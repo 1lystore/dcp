@@ -1,0 +1,46 @@
+{
+  "name": "@dcprotocol/server",
+  "version": "0.1.0",
+  "description": "REST API server for DCP Vault - localhost:8420",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "dcp-server": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts --clean",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "vault",
+    "rest-api",
+    "ai-agents",
+    "wallet",
+    "signing"
+  ],
+  "author": "DCP Protocol",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@dcprotocol/core": "^0.1.0",
+    "@fastify/cors": "^10.0.2",
+    "fastify": "^5.2.1",
+    "pino-pretty": "^13.0.0"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0",
+    "@types/node": "^22.10.2",
+    "tsup": "^8.3.5",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

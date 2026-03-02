@@ -1,0 +1,29 @@
+{
+  "name": "dcp",
+  "version": "0.1.0",
+  "description": "Delegated Custody Protocol (DCP) reference implementation",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "eslint packages/*/src/**/*.ts",
+    "clean": "rm -rf packages/*/dist"
+  },
+  "keywords": [
+    "vault",
+    "crypto",
+    "solana",
+    "mcp",
+    "ai-agents",
+    "wallet",
+    "security"
+  ],
+  "author": "DCP Protocol",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

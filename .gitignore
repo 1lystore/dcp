@@ -1,0 +1,57 @@
+# PRD and internal docs (not for public repo yet)
+*.md
+!README.md
+!ARCHITECTURE.md
+!CONTRIBUTING.md
+!CODE_OF_CONDUCT.md
+!SECURITY.md
+!ROADMAP.md
+!RELEASE.md
+!packages/**/README.md
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+*.tgz
+dist/
+build/
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Environment and secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Vault data (never commit user data)
+.dcp/
+vault.db
+vault.key
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+Thumbs.db
+ehthumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp

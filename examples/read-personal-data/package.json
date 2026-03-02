@@ -1,0 +1,10 @@
+{
+  "name": "read-personal-data-example",
+  "version": "1.0.0",
+  "description": "Example: Read personal data via DCP Vault REST API",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {}
+}

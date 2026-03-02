@@ -1,0 +1,49 @@
+{
+  "name": "@dcprotocol/cli",
+  "version": "0.1.0",
+  "description": "CLI for DCP Vault - manage wallets, data, and agent access",
+  "type": "module",
+  "main": "dist/cli.js",
+  "types": "dist/cli.d.ts",
+  "bin": {
+    "dcp": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/cli.ts --format esm --dts --clean && chmod +x dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "test": "npm run build && vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "vault",
+    "cli",
+    "wallet",
+    "solana",
+    "crypto"
+  ],
+  "author": "DCP Protocol",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@dcprotocol/core": "*",
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "ora": "^8.0.1",
+    "prompts": "^2.4.2"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0",
+    "@types/node": "^22.10.2",
+    "@types/prompts": "^2.4.9",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "name": "@dcprotocol/mcp",
+  "version": "0.1.0",
+  "description": "MCP Server for DCP Vault - Agent interface for secure wallet signing and data access",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "dcp-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts --clean",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "vault",
+    "mcp",
+    "ai-agents",
+    "wallet",
+    "solana",
+    "signing"
+  ],
+  "author": "DCP Protocol",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@dcprotocol/core": "^0.1.0",
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0",
+    "@types/node": "^22.10.2",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
