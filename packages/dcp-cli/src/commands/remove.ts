@@ -15,7 +15,7 @@ import {
   info,
   warn,
   spinner,
-  getPassphrase,
+  unlockVault,
   confirm,
   handleError,
   formatScope,
@@ -89,11 +89,18 @@ async function runRemove(scope: string, options: { force?: boolean }): Promise<v
     if (existing.item_type === 'WALLET_KEY') {
       // Require typing "DELETE" for wallets
       const { default: prompts } = await import('prompts');
-      const response = await prompts({
-        type: 'text',
-        name: 'confirm',
-        message: confirmMsg,
-      });
+      const response = await prompts(
+        {
+          type: 'text',
+          name: 'confirm',
+          message: confirmMsg,
+        },
+        {
+          onCancel: () => {
+            throw new Error('Cancelled');
+          },
+        }
+      );
 
       if (response.confirm !== 'DELETE') {
         info('Cancelled');
@@ -110,13 +117,11 @@ async function runRemove(scope: string, options: { force?: boolean }): Promise<v
   }
 
   // Unlock vault
-  const passphrase = await getPassphrase('Enter vault passphrase to confirm');
-
   const spin = spinner('Unlocking vault...');
   spin.start();
 
   try {
-    await storage.unlock(passphrase);
+    await unlockVault(storage, 'Enter vault passphrase to confirm', () => spin.stop());
     spin.succeed('Vault unlocked');
   } catch (err) {
     spin.fail('Failed to unlock vault');
@@ -139,7 +144,7 @@ async function runRemove(scope: string, options: { force?: boolean }): Promise<v
       deleteSpin.succeed('Record removed');
 
       // Log to audit
-      storage.logAudit('CONFIG', 'success', {
+      storage.logAudit('EXECUTE', 'success', {
         operation: 'remove_record',
         scope,
         details: JSON.stringify({

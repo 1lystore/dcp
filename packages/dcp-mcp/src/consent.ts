@@ -31,6 +31,9 @@ const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 /** Session max duration in milliseconds (4 hours) */
 const SESSION_MAX_DURATION_MS = 4 * 60 * 60 * 1000;
 
+/** Local approval UI URL */
+export const APPROVAL_URL = 'http://127.0.0.1:8420';
+
 // ============================================================================
 // TTY Detection
 // ============================================================================
@@ -40,7 +43,10 @@ const SESSION_MAX_DURATION_MS = 4 * 60 * 60 * 1000;
  * MCP servers run as subprocesses, so they typically don't have TTY access
  */
 export function isTTY(): boolean {
-  return process.stdin.isTTY === true && process.stdout.isTTY === true;
+  if (process.env.DCP_MCP_ALLOW_TTY === '1') {
+    return process.stdin.isTTY === true && process.stdout.isTTY === true;
+  }
+  return false;
 }
 
 // ============================================================================
@@ -164,21 +170,7 @@ export async function requestPendingConsent(
   storage: VaultStorage,
   request: ConsentRequest
 ): Promise<ConsentResponse> {
-  // Build details JSON from request options
-  const details: Record<string, unknown> = {};
-  if (request.description) details.description = request.description;
-  if (request.amount !== undefined) details.amount = request.amount;
-  if (request.currency) details.currency = request.currency;
-  if (request.chain) details.chain = request.chain;
-
-  // Insert pending consent into database
-  // Storage layer generates the ID
-  const consent = storage.createPendingConsent(
-    request.agent_name,
-    request.action,
-    request.scope,
-    Object.keys(details).length > 0 ? JSON.stringify(details) : undefined
-  );
+  const consent = createPendingConsent(storage, request);
 
   // Update request with the generated ID
   request.id = consent.id;
@@ -199,6 +191,8 @@ export async function requestPendingConsent(
   process.stderr.write(`  dcp approve ${consent.id}\n`);
   process.stderr.write(`\nTo deny, run:\n`);
   process.stderr.write(`  dcp approve ${consent.id} --deny\n\n`);
+  process.stderr.write(`Or open the local approval UI:\n`);
+  process.stderr.write(`  ${APPROVAL_URL}\n\n`);
 
   // Poll for resolution
   const expiresAt = new Date(consent.expires_at).getTime();
@@ -261,6 +255,30 @@ export async function requestPendingConsent(
     // Start polling
     poll();
   });
+}
+
+/**
+ * Create a pending consent record (non-blocking)
+ */
+export function createPendingConsent(
+  storage: VaultStorage,
+  request: ConsentRequest
+): { id: string; expires_at: string } {
+  const details: Record<string, unknown> = {};
+  if (request.description) details.description = request.description;
+  if (request.amount !== undefined) details.amount = request.amount;
+  if (request.currency) details.currency = request.currency;
+  if (request.chain) details.chain = request.chain;
+
+  const consent = storage.createPendingConsent(
+    request.agent_name,
+    request.action,
+    request.scope,
+    Object.keys(details).length > 0 ? JSON.stringify(details) : undefined
+  );
+
+  request.id = consent.id;
+  return consent;
 }
 
 // ============================================================================
@@ -356,6 +374,26 @@ export function hasSessionScope(
  */
 export function touchSession(storage: VaultStorage, sessionId: string): void {
   storage.touchSession(sessionId);
+}
+
+/**
+ * Get the most recent active session for an agent, scoped to a specific scope
+ */
+export function getActiveAgentSessionId(
+  storage: VaultStorage,
+  agentName: string,
+  scope: string
+): string | undefined {
+  const sessions = storage.listActiveSessionsForAgent(agentName);
+  for (const session of sessions) {
+    if (hasSessionScope(storage, session.id, scope)) {
+      return session.id;
+    }
+    if (scope === '*') {
+      return session.id;
+    }
+  }
+  return undefined;
 }
 
 // ============================================================================

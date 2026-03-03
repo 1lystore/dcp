@@ -15,6 +15,8 @@
  * - vault_budget_check(amount, currency) - Check budget (no consent)
  * - vault_read(scope, fields?) - Read data (consent required)
  * - vault_sign_tx(chain, unsigned_tx, description?) - Sign transaction (consent required)
+ * - vault_unlock(passphrase) - Unlock vault for this MCP process
+ * - vault_lock() - Lock vault for this MCP process
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -33,6 +35,10 @@ import {
   getBudgetEngine,
   VaultError,
 } from '@dcprotocol/core';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import keytar from 'keytar';
 
 import {
   vault_list_scopes,
@@ -40,6 +46,8 @@ import {
   vault_budget_check,
   vault_read,
   vault_sign_tx,
+  vault_unlock,
+  vault_lock,
   ToolContext,
 } from './tools.js';
 
@@ -48,6 +56,7 @@ import {
   BudgetCheckInput,
   ReadInput,
   SignTxInput,
+  UnlockInput,
 } from './types.js';
 
 // ============================================================================
@@ -57,7 +66,16 @@ import {
 let storage: VaultStorage;
 let budget: BudgetEngine;
 let agentName = 'MCP Agent';
+const MCP_UNLOCK_KEYCHAIN_SERVICE = 'dcp-mcp-unlock';
+const MCP_UNLOCK_KEYCHAIN_ACCOUNT = 'passphrase';
+const MCP_UNLOCK_META_ACCOUNT = 'meta';
+const MCP_UNLOCK_SESSION_MINUTES = parseInt(
+  process.env.DCP_MCP_SESSION_MINUTES || '30',
+  10
+);
 let sessionId: string | undefined;
+const vaultDir = process.env.VAULT_DIR || path.join(os.homedir(), '.dcp');
+const mcpStatusPath = path.join(vaultDir, 'mcp.status');
 
 // ============================================================================
 // MCP Server Setup
@@ -182,6 +200,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['chain', 'unsigned_tx'],
         },
       },
+      {
+        name: 'vault_unlock',
+        description: 'Unlock the vault for this MCP process (local only).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            passphrase: {
+              type: 'string',
+              description: 'Vault passphrase',
+            },
+          },
+          required: ['passphrase'],
+        },
+      },
+      {
+        name: 'vault_lock',
+        description: 'Lock the vault for this MCP process (local only).',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+      },
     ],
   };
 });
@@ -283,6 +324,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case 'vault_unlock': {
+        const input = args as unknown as UnlockInput;
+        if (!input.passphrase) {
+          throw new McpError(ErrorCode.InvalidParams, 'passphrase is required');
+        }
+        const result = await vault_unlock(ctx, input);
+        writeMcpStatus(true);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'vault_lock': {
+        const result = await vault_lock(ctx);
+        writeMcpStatus(false);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
@@ -315,15 +386,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   try {
     // Initialize vault storage (does NOT require unlock)
-    storage = getStorage();
-    budget = getBudgetEngine(storage);
+    storage = getStorage(vaultDir);
+    budget = getBudgetEngine(storage, vaultDir);
+
+    // Auto-unlock if a valid keychain session exists
+    await tryAutoUnlockFromKeychain();
 
     // Check if vault is unlocked (but don't fail if not)
     // Operations that need the master key will fail with VAULT_LOCKED
     if (!storage.isUnlocked()) {
-      process.stderr.write('Warning: Vault is locked. Run "dcp unlock" to unlock.\n');
+      process.stderr.write('Warning: Vault is locked. Use vault_unlock to unlock.\n');
       process.stderr.write('Some operations will fail until the vault is unlocked.\n');
     }
+    writeMcpStatus(storage.isUnlocked());
+
+    // Start local unlock watcher (optional bridge from REST UI)
+    startUnlockWatcher();
 
     // Extract agent name from environment if available
     if (process.env.MCP_AGENT_NAME) {
@@ -355,3 +433,73 @@ process.on('SIGTERM', () => {
 
 // Start the server
 main();
+
+function startUnlockWatcher(): void {
+  const unlockPath = path.join(vaultDir, 'mcp.unlock');
+  const poll = () => {
+    try {
+      if (fs.existsSync(unlockPath)) {
+        const raw = fs.readFileSync(unlockPath, 'utf8');
+        fs.unlinkSync(unlockPath);
+        try {
+          const payload = JSON.parse(raw) as { created_at?: string };
+          const createdAt = payload.created_at ? Date.parse(payload.created_at) : 0;
+          const ageMs = createdAt ? Date.now() - createdAt : 0;
+          if (createdAt && ageMs > 60_000) {
+            process.stderr.write('MCP unlock request expired or invalid.\n');
+          } else {
+            tryAutoUnlockFromKeychain(true).catch(() => {
+              process.stderr.write('MCP unlock failed.\n');
+            });
+          }
+        } catch {
+          process.stderr.write('MCP unlock request invalid.\n');
+        }
+      }
+    } catch {
+      // Ignore watcher errors
+    }
+    setTimeout(poll, 500);
+  };
+
+  poll();
+}
+
+function writeMcpStatus(unlocked: boolean): void {
+  try {
+    const payload = JSON.stringify({
+      unlocked,
+      updated_at: new Date().toISOString(),
+      pid: process.pid,
+    });
+    fs.writeFileSync(mcpStatusPath, payload, { mode: 0o600 });
+  } catch {
+    // ignore
+  }
+}
+
+async function tryAutoUnlockFromKeychain(fromBridge: boolean = false): Promise<void> {
+  try {
+    const metaRaw = await keytar.getPassword(MCP_UNLOCK_KEYCHAIN_SERVICE, MCP_UNLOCK_META_ACCOUNT);
+    const passphrase = await keytar.getPassword(MCP_UNLOCK_KEYCHAIN_SERVICE, MCP_UNLOCK_KEYCHAIN_ACCOUNT);
+    if (!metaRaw || !passphrase) {
+      return;
+    }
+    const meta = JSON.parse(metaRaw) as { expires_at?: string };
+    const expiresAt = meta.expires_at ? Date.parse(meta.expires_at) : 0;
+    if (!expiresAt || Date.now() > expiresAt) {
+      await keytar.deletePassword(MCP_UNLOCK_KEYCHAIN_SERVICE, MCP_UNLOCK_META_ACCOUNT);
+      await keytar.deletePassword(MCP_UNLOCK_KEYCHAIN_SERVICE, MCP_UNLOCK_KEYCHAIN_ACCOUNT);
+      return;
+    }
+    await storage.unlock(passphrase);
+    writeMcpStatus(true);
+    if (fromBridge) {
+      process.stderr.write('MCP unlocked via local bridge.\n');
+    } else {
+      process.stderr.write(`MCP auto-unlocked for ${MCP_UNLOCK_SESSION_MINUTES} min session.\n`);
+    }
+  } catch {
+    // ignore
+  }
+}

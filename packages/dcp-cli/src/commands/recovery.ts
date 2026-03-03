@@ -94,24 +94,31 @@ async function runRestore(): Promise<void> {
   }
 
   // Get recovery phrase from user
-  info('Enter your 12-word recovery phrase:');
+  info('Enter your 12-word recovery phrase (space-separated, no commas):');
   console.log();
 
-  const response = await prompts({
-    type: 'text',
-    name: 'mnemonic',
-    message: 'Recovery phrase',
-    validate: (value: string) => {
-      const words = value.trim().split(/\s+/);
-      if (words.length !== 12) {
-        return 'Recovery phrase must be exactly 12 words';
-      }
-      if (!validateMnemonic(value.trim())) {
-        return 'Invalid recovery phrase. Please check your words.';
-      }
-      return true;
+  const response = await prompts(
+    {
+      type: 'text',
+      name: 'mnemonic',
+      message: 'Recovery phrase',
+      validate: (value: string) => {
+        const words = value.trim().split(/\s+/);
+        if (words.length !== 12) {
+          return 'Recovery phrase must be exactly 12 words';
+        }
+        if (!validateMnemonic(value.trim())) {
+          return 'Invalid recovery phrase. Please check your words.';
+        }
+        return true;
+      },
     },
-  });
+    {
+      onCancel: () => {
+        throw new Error('Cancelled');
+      },
+    }
+  );
 
   if (!response.mnemonic) {
     error('Recovery phrase is required');

@@ -236,10 +236,3 @@ function formatExpiresIn(expiresAt: string): string {
 
   return chalk.yellow(`${Math.floor(diffMins / 60)}h ${diffMins % 60}m`);
 }
-
-/**
- * Format time as HH:MM
- */
-function formatTime(date: Date): string {
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}

@@ -29,8 +29,14 @@ Before running examples, ensure you have:
    npx @dcprotocol/server
    ```
 
-5. **Unlocked the vault:**
-   The vault must be unlocked before the REST API can decrypt data or sign transactions. Run `dcp init` and enter your passphrase; the vault stays unlocked for this session.
+5. **Unlock the vault:**
+   The REST server has its own process‑local lock. Unlock it via the UI or the API:
+   ```bash
+   curl -X POST http://127.0.0.1:8420/v1/vault/unlock \
+     -H "Content-Type: application/json" \
+     -d '{"passphrase":"<your-passphrase>"}'
+   ```
+   Or open `http://127.0.0.1:8420` and unlock from the browser.
 
 ## Examples
 

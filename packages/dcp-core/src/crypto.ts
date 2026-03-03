@@ -367,11 +367,6 @@ export function validateMnemonic(mnemonic: string): boolean {
  * but recovery phrases should be generated independently.
  */
 export function generateRecoveryPhrase(_masterKey: Buffer): string {
-  console.warn(
-    'DEPRECATED: generateRecoveryPhrase() is deprecated. ' +
-    'Use generateRecoveryMnemonic() instead. ' +
-    'Recovery phrases should be generated independently, not derived from master key.'
-  );
   return generateRecoveryMnemonic();
 }
 
@@ -396,7 +391,7 @@ export function verifyCryptoReady(): boolean {
     zeroize(testKey);
     zeroize(decrypted);
 
-    return success;
+    return success && testNonce.length === NONCE_SIZE;
   } catch {
     return false;
   }

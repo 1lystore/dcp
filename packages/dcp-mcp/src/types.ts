@@ -19,6 +19,7 @@ export interface GetAddressInput {
 export interface BudgetCheckInput {
   amount: number;
   currency: string;
+  chain?: Chain;
 }
 
 /** Input for vault_read tool */
@@ -36,6 +37,11 @@ export interface SignTxInput {
   currency?: string;
   destination?: string;
   idempotency_key?: string;
+}
+
+/** Input for vault_unlock tool */
+export interface UnlockInput {
+  passphrase: string;
 }
 
 // ============================================================================
@@ -97,6 +103,16 @@ export interface SignTxOutput {
     daily: number;
     per_tx: number;
   };
+}
+
+/** Output for vault_unlock tool */
+export interface UnlockOutput {
+  unlocked: boolean;
+}
+
+/** Output for vault_lock tool */
+export interface LockOutput {
+  locked: boolean;
 }
 
 // ============================================================================

@@ -27,8 +27,11 @@ import {
   ReadInput,
   ReadOutput,
   SignTxInput,
-  SignTxOutput,
-  ScopeInfo,
+ SignTxOutput,
+ ScopeInfo,
+ UnlockInput,
+ UnlockOutput,
+ LockOutput,
 } from './types.js';
 
 import {
@@ -36,6 +39,10 @@ import {
   requiresMandatoryApproval,
   hasSessionScope,
   touchSession,
+  getActiveAgentSessionId,
+  isTTY,
+  createPendingConsent,
+  APPROVAL_URL,
 } from './consent.js';
 
 // ============================================================================
@@ -61,6 +68,36 @@ function getMasterKeySafe(storage: VaultStorage): Buffer {
     throw new VaultError('VAULT_LOCKED', 'Vault is locked. Please unlock first.');
   }
   return storage.getMasterKey();
+}
+
+// ============================================================================
+// vault_unlock / vault_lock - Local only
+// ============================================================================
+
+/**
+ * Unlock vault for this MCP process
+ *
+ * Consent: No (local user action)
+ */
+export async function vault_unlock(
+  ctx: ToolContext,
+  input: UnlockInput
+): Promise<UnlockOutput> {
+  if (!input.passphrase) {
+    throw new VaultError('INTERNAL_ERROR', 'passphrase is required');
+  }
+  await ctx.storage.unlock(input.passphrase);
+  return { unlocked: true };
+}
+
+/**
+ * Lock vault for this MCP process
+ *
+ * Consent: No (local user action)
+ */
+export async function vault_lock(ctx: ToolContext): Promise<LockOutput> {
+  ctx.storage.lock();
+  return { locked: true };
 }
 
 // ============================================================================
@@ -115,6 +152,9 @@ function getOperationsForType(itemType: string, sensitivity: string): string[] {
     case 'ADDRESS':
     case 'IDENTITY':
     case 'PREFERENCES':
+    case 'CREDENTIALS':
+    case 'HEALTH':
+    case 'BUDGET':
       if (sensitivity === 'critical') {
         return ['read_reference', 'submit_to_endpoint'];
       }
@@ -180,8 +220,8 @@ export async function vault_budget_check(
 ): Promise<BudgetCheckOutput> {
   const limits = ctx.budget.getLimits(input.currency);
 
-  // Get the chain for this currency (default to solana)
-  const chain = getChainForCurrency(input.currency);
+  // Determine chain (required for chain-agnostic currencies like USDC/USDT)
+  const chain = getChainForCurrency(input.currency, input.chain);
   const result = ctx.budget.checkBudget(input.amount, input.currency, chain);
 
   return {
@@ -203,7 +243,8 @@ export async function vault_budget_check(
 /**
  * Get the chain for a currency code
  */
-function getChainForCurrency(currency: string): Chain {
+function getChainForCurrency(currency: string, chain?: Chain): Chain {
+  if (chain) return chain;
   switch (currency.toUpperCase()) {
     case 'SOL':
       return 'solana';
@@ -211,8 +252,11 @@ function getChainForCurrency(currency: string): Chain {
       return 'ethereum';
     case 'BASE_ETH':
       return 'base';
+    case 'USDC':
+    case 'USDT':
+      throw new VaultError('INTERNAL_ERROR', `chain is required for ${currency}`);
     default:
-      return 'solana'; // Default
+      throw new VaultError('INTERNAL_ERROR', `Unknown currency: ${currency}`);
   }
 }
 
@@ -230,12 +274,27 @@ export async function vault_read(
   ctx: ToolContext,
   input: ReadInput
 ): Promise<ReadOutput> {
+  // If we don't have a session yet, try to reuse an existing active session
+  if (!ctx.sessionId) {
+    const existingSessionId = getActiveAgentSessionId(ctx.storage, ctx.agentName, input.scope);
+    if (existingSessionId) {
+      ctx.sessionId = existingSessionId;
+    }
+  }
+
   // Find the record
   const record = ctx.storage.getRecord(input.scope);
 
   if (!record) {
     throw new VaultError('RECORD_NOT_FOUND', `Scope not found: ${input.scope}`, {
       scope: input.scope,
+    });
+  }
+
+  // If vault is locked and we need plaintext, short-circuit before consent
+  if (record.sensitivity !== 'critical' && !ctx.storage.isUnlocked()) {
+    throw new VaultError('VAULT_LOCKED', 'Vault is locked. Unlock at http://127.0.0.1:8420', {
+      approval_url: APPROVAL_URL,
     });
   }
 
@@ -353,8 +412,7 @@ export async function vault_read(
  * Get wallet scope for a chain (matches storage convention)
  */
 function getWalletScope(chain: Chain): string {
-  const chainSuffix = chain === 'solana' ? 'sol' : chain;
-  return `crypto.wallet.${chainSuffix}`;
+  return `crypto.wallet.${chain}`;
 }
 
 /**
@@ -367,8 +425,22 @@ export async function vault_sign_tx(
   ctx: ToolContext,
   input: SignTxInput
 ): Promise<SignTxOutput> {
+  if (!ctx.storage.isUnlocked()) {
+    throw new VaultError('VAULT_LOCKED', 'Vault is locked. Unlock at http://127.0.0.1:8420', {
+      approval_url: APPROVAL_URL,
+    });
+  }
+
   // Get wallet scope
   const walletScope = getWalletScope(input.chain);
+
+  // If we don't have a session yet, try to reuse an existing active session
+  if (!ctx.sessionId) {
+    const existingSessionId = getActiveAgentSessionId(ctx.storage, ctx.agentName, walletScope);
+    if (existingSessionId) {
+      ctx.sessionId = existingSessionId;
+    }
+  }
 
   // Find wallet record for the chain
   const records = ctx.storage.listRecords();

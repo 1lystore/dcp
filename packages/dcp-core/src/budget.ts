@@ -43,18 +43,21 @@ export const DEFAULT_BUDGET_CONFIG: BudgetConfig = {
     SOL: 20,
     ETH: 1,
     USDC: 500,
+    USDT: 500,
     BASE_ETH: 0.5,
   },
   tx_limit: {
     SOL: 5,
     ETH: 0.5,
     USDC: 200,
+    USDT: 200,
     BASE_ETH: 0.2,
   },
   approval_threshold: {
     SOL: 2,
     ETH: 0.1,
     USDC: 100,
+    USDT: 100,
     BASE_ETH: 0.05,
   },
 };
@@ -368,6 +371,11 @@ export class BudgetEngine {
 
     // Filter to only timestamps in current window
     timestamps = timestamps.filter((t) => t > windowStart);
+    if (timestamps.length === 0) {
+      this.rateLimitMap.delete(sessionId);
+    } else {
+      this.rateLimitMap.set(sessionId, timestamps);
+    }
 
     // Check if over limit
     return timestamps.length >= this.config.rate_limit_per_minute;
@@ -411,8 +419,14 @@ export class BudgetEngine {
     const now = Date.now();
     const windowStart = now - RATE_LIMIT_WINDOW_MS;
 
-    const timestamps = this.rateLimitMap.get(sessionId) || [];
-    const recentCount = timestamps.filter((t) => t > windowStart).length;
+    let timestamps = this.rateLimitMap.get(sessionId) || [];
+    timestamps = timestamps.filter((t) => t > windowStart);
+    if (timestamps.length === 0) {
+      this.rateLimitMap.delete(sessionId);
+    } else {
+      this.rateLimitMap.set(sessionId, timestamps);
+    }
+    const recentCount = timestamps.length;
 
     return Math.max(0, this.config.rate_limit_per_minute - recentCount);
   }

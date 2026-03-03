@@ -94,6 +94,9 @@ dcp add preferences.sizes
 npx @dcprotocol/server
 ```
 
+Open `http://127.0.0.1:8420` to approve/deny requests in the browser.
+The UI also includes an **Unlock MCP** button to unlock the MCP process without typing your passphrase in Claude.
+
 ### 6. Connect an MCP agent
 
 ```json
@@ -106,6 +109,47 @@ npx @dcprotocol/server
   }
 }
 ```
+
+If the vault is locked, call `vault_unlock` once from the agent before reads/signing.
+By default MCP uses **non‑TTY** consent: it creates a pending request and waits until you approve in the UI or CLI.  
+To allow interactive terminal prompts, set `DCP_MCP_ALLOW_TTY=1`.
+
+If you use multiple MCP processes, set a stable agent name to keep sessions consistent:
+
+```bash
+MCP_AGENT_NAME=claude-desktop
+```
+
+## Environment Variables
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `VAULT_DIR` | Vault storage directory | `~/.dcp` |
+| `VAULT_PORT` | REST server port | `8420` |
+| `DCP_MCP_ALLOW_TTY` | Enable terminal consent prompts | `0` |
+| `MCP_AGENT_NAME` | Stable agent name for session reuse | `MCP Agent` |
+| `DCP_CLI_SESSION_MINUTES` | CLI unlock cache duration | `30` |
+| `DCP_CLI_INSECURE_SESSION` | File‑based cache when keychain unavailable | `0` |
+| `DCP_MCP_SESSION_MINUTES` | MCP auto‑unlock session duration | `30` |
+
+## Sessions, Limits, and Rate Limiting
+
+**Session timeouts**
+- 30 minutes idle
+- 4 hours max duration
+
+**Default budgets (per currency)**
+- SOL: `tx_limit=5`, `daily_budget=20`, `approval_threshold=2`
+- ETH: `tx_limit=0.5`, `daily_budget=1`, `approval_threshold=0.1`
+- USDC: `tx_limit=200`, `daily_budget=500`, `approval_threshold=100`
+- USDT: `tx_limit=200`, `daily_budget=500`, `approval_threshold=100`
+- BASE_ETH: `tx_limit=0.2`, `daily_budget=0.5`, `approval_threshold=0.05`
+
+**Rate limiting**
+- 5 executions/minute per agent session
+
+**Stablecoin note**
+- For **USDC/USDT**, include the chain when checking budgets via REST/MCP (`chain: solana|ethereum|base`).
 
 ### 7. Approve a consent request (when prompted)
 
@@ -131,7 +175,7 @@ Runs end-to-end: init vault, create wallet, add sample data, start server, and r
 | `vault_get_address(chain)` | Public address | N/A (public) |
 | `vault_read("address.home")` | Address JSON | With consent |
 | `vault_read("preferences.sizes")` | Sizes JSON | With consent |
-| `vault_read("crypto.wallet.sol")` | Reference only | Never |
+| `vault_read("crypto.wallet.solana")` | Reference only | Never |
 
 **Rule: critical data (private keys) never leaves the vault. Agents get USE of data, not POSSESSION.**
 
@@ -162,7 +206,7 @@ Private key exposure: zero.
 
 ```bash
 dcp config set tx_limit.SOL 5            # max per transaction
-dcp config set tx_limit.USDC 100      # max per day
+dcp config set daily_budget.USDC 100     # max per day
 dcp config set approval_threshold.SOL 2  # above this -> manual approve
 ```
 
@@ -172,21 +216,42 @@ Compromised agent tries to drain wallet:
 - 4 SOL transfer -> **PAUSED** (above threshold, you must approve)
 - Many 1.9 SOL transfers -> **BLOCKED** after daily limit hit
 
-Worst case with DCP: ~1 SOL/day. Without DCP: entire wallet gone instantly.
+Worst case with DCP: bounded by your daily budget. Without DCP: entire wallet gone instantly.
 
 ## Also Stores Personal Data
 
 Not just wallets. Store anything agents need:
 
 ```bash
-dcp add address.home           # shipping address
-dcp add identity.name          # your name
-dcp add identity.email         # email
-dcp add preferences.sizes      # shoe size, shirt size
-dcp add preferences.diet       # dietary restrictions
+dcp add identity.name
+dcp add identity.email
+dcp add identity.phone
+dcp add identity.passport
+dcp add identity.drivers_license
+
+dcp add address.home
+dcp add address.work
+
+dcp add preferences.sizes
+dcp add preferences.brands
+dcp add preferences.diet
+dcp add preferences.travel
+
+dcp add credentials.api
+dcp add health.profile
+dcp add budget.default
 ```
 
-Any agent reads with your consent. Store once, use everywhere.
+Every record includes `schema_version`. See full canonical schema in `SCHEMA.md`.
+
+## Choose the Right Package
+
+| Package | When to use it |
+|---------|----------------|
+| `@dcprotocol/cli` | You’re a human managing the vault (init, add data, approve) |
+| `@dcprotocol/mcp` | Your agent runtime supports MCP (Claude, Cursor, OpenClaw) |
+| `@dcprotocol/server` | You want a local REST API + browser approval UI |
+| `@dcprotocol/core` | You’re embedding DCP inside your own app or service |
 
 ## CLI Reference
 
@@ -195,6 +260,7 @@ Any agent reads with your consent. Store once, use everywhere.
 | `dcp init` | Initialize vault (shows recovery phrase once) |
 | `dcp create-wallet --chain <solana|ethereum|base>` | Generate wallet (key never leaves vault) |
 | `dcp add <scope>` | Store personal data |
+| `dcp read <scope>` | Read STANDARD/SENSITIVE data (CRITICAL never shown) |
 | `dcp list` | List stored items (no values shown) |
 | `dcp update <scope>` | Update existing data |
 | `dcp remove <scope>` | Remove data |
@@ -214,13 +280,28 @@ For non-MCP agents. Binds to `127.0.0.1:8420` only (never exposed to internet).
 ```bash
 npx @dcprotocol/server
 
+# Unlock the vault for this REST process
+curl -X POST http://127.0.0.1:8420/v1/vault/unlock \
+  -H "Content-Type: application/json" \
+  -d '{"passphrase":"<your-passphrase>"}'
+
+# Unlock MCP (local bridge)
+curl -X POST http://127.0.0.1:8420/v1/vault/unlock-mcp \
+  -H "Content-Type: application/json" \
+  -d '{"passphrase":"<your-passphrase>"}'
+
 # Sign a transaction
 curl -X POST http://127.0.0.1:8420/v1/vault/sign \
+  -H "Content-Type: application/json" \
   -d '{"chain":"solana","unsigned_tx":"<base64>","agent_name":"my-bot"}'
 
 # Read personal data
 curl -X POST http://127.0.0.1:8420/v1/vault/read \
+  -H "Content-Type: application/json" \
   -d '{"scope":"address.home","agent_name":"my-bot"}'
+
+# Lock the vault when done
+curl -X POST http://127.0.0.1:8420/v1/vault/lock
 ```
 
 ## Architecture
@@ -257,6 +338,18 @@ No Docker. No database server. No cloud. SQLite file + OS Keychain.
 | Network sniffing | REST binds to localhost only. |
 
 Full threat model: [SECURITY.md](./SECURITY.md)
+
+## Common Error Codes
+
+| Code | Meaning |
+|------|---------|
+| `VAULT_LOCKED` | Vault process is locked (unlock required) |
+| `CONSENT_DENIED` | User denied consent |
+| `CONSENT_TIMEOUT` | Consent expired |
+| `RECORD_NOT_FOUND` | Scope not found |
+| `BUDGET_EXCEEDED_TX` | Per‑tx limit exceeded |
+| `BUDGET_EXCEEDED_DAILY` | Daily budget exceeded |
+| `RATE_LIMITED` | Too many requests per minute |
 
 ## Packages
 

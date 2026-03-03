@@ -255,11 +255,33 @@ export async function signEvmTransaction(
     const privateKeyHex = '0x' + privateKey.toString('hex');
     const wallet = new Wallet(privateKeyHex);
 
-    // Parse transaction request
-    const txRequest = JSON.parse(unsignedTx);
+    // Parse transaction request: accept JSON or raw RLP hex
+    let txRequest: Record<string, unknown>;
+    const trimmed = unsignedTx.trim();
+    if (trimmed.startsWith('{')) {
+      txRequest = JSON.parse(trimmed);
+    } else if (trimmed.startsWith('0x')) {
+      // Raw RLP hex: parse and convert to TransactionRequest
+      const parsed = EthTransaction.from(trimmed);
+      txRequest = {
+        to: parsed.to,
+        data: parsed.data,
+        value: parsed.value,
+        nonce: parsed.nonce,
+        chainId: parsed.chainId,
+        type: parsed.type,
+        gasLimit: parsed.gasLimit,
+        gasPrice: parsed.gasPrice,
+        maxFeePerGas: parsed.maxFeePerGas,
+        maxPriorityFeePerGas: parsed.maxPriorityFeePerGas,
+        accessList: parsed.accessList,
+      };
+    } else {
+      throw new VaultError('INVALID_TX', 'Invalid unsigned transaction format for EVM');
+    }
 
     // Sign the transaction - this returns the fully serialized signed transaction
-    const signedTxSerialized = await wallet.signTransaction(txRequest);
+    const signedTxSerialized = await wallet.signTransaction(txRequest as any);
 
     // Parse the signed transaction to extract signature
     const signedTx = EthTransaction.from(signedTxSerialized);

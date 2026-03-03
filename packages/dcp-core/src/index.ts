@@ -39,7 +39,6 @@ export {
 
   // Utilities
   verifyCryptoReady,
-
   // Constants
   KEY_SIZE,
   NONCE_SIZE,

@@ -15,7 +15,7 @@ import {
   info,
   warn,
   spinner,
-  getPassphrase,
+  unlockVault,
   input,
   maskedInput,
   confirm,
@@ -27,97 +27,8 @@ import {
 import {
   VaultStorage,
   SensitivityLevel,
-  ItemType,
 } from '@dcprotocol/core';
-
-// Scope metadata for interactive prompts (field names match PRD schema)
-const SCOPE_CONFIG: Record<
-  string,
-  {
-    sensitivity: SensitivityLevel;
-    itemType: ItemType;
-    fields: { name: string; label: string; masked?: boolean }[];
-  }
-> = {
-  'identity.name': {
-    sensitivity: 'sensitive',
-    itemType: 'IDENTITY',
-    fields: [
-      { name: 'first', label: 'First name' },
-      { name: 'last', label: 'Last name' },
-      { name: 'middle', label: 'Middle name (optional)' },
-    ],
-  },
-  'identity.email': {
-    sensitivity: 'sensitive',
-    itemType: 'IDENTITY',
-    fields: [{ name: 'email', label: 'Email address' }],
-  },
-  'identity.phone': {
-    sensitivity: 'sensitive',
-    itemType: 'IDENTITY',
-    fields: [
-      { name: 'country_code', label: 'Country code (e.g., +1)' },
-      { name: 'number', label: 'Phone number' },
-    ],
-  },
-  'identity.passport': {
-    sensitivity: 'critical',
-    itemType: 'IDENTITY',
-    fields: [
-      { name: 'number', label: 'Passport number', masked: true },
-      { name: 'country', label: 'Issuing country' },
-      { name: 'expiry', label: 'Expiry date (YYYY-MM-DD)', masked: true },
-    ],
-  },
-  'address.home': {
-    sensitivity: 'sensitive',
-    itemType: 'ADDRESS',
-    fields: [
-      { name: 'street', label: 'Street address' },
-      { name: 'city', label: 'City' },
-      { name: 'state', label: 'State/Province' },
-      { name: 'zip', label: 'ZIP/Postal code' },
-      { name: 'country', label: 'Country' },
-    ],
-  },
-  'address.work': {
-    sensitivity: 'sensitive',
-    itemType: 'ADDRESS',
-    fields: [
-      { name: 'street', label: 'Street address' },
-      { name: 'city', label: 'City' },
-      { name: 'state', label: 'State/Province' },
-      { name: 'zip', label: 'ZIP/Postal code' },
-      { name: 'country', label: 'Country' },
-    ],
-  },
-  'preferences.sizes': {
-    sensitivity: 'standard',
-    itemType: 'PREFERENCES',
-    fields: [
-      { name: 'shirt', label: 'Shirt size (XS, S, M, L, XL, XXL)' },
-      { name: 'pants', label: 'Pants size' },
-      { name: 'shoe', label: 'Shoe size' },
-    ],
-  },
-  'preferences.brands': {
-    sensitivity: 'standard',
-    itemType: 'PREFERENCES',
-    fields: [
-      { name: 'preferred', label: 'Preferred brands (comma-separated)' },
-      { name: 'avoided', label: 'Avoided brands (comma-separated, optional)' },
-    ],
-  },
-  'preferences.diet': {
-    sensitivity: 'standard',
-    itemType: 'PREFERENCES',
-    fields: [
-      { name: 'restrictions', label: 'Dietary restrictions (comma-separated)' },
-      { name: 'allergies', label: 'Allergies (comma-separated)' },
-    ],
-  },
-};
+import { SCOPE_CONFIG } from '../scope-config.js';
 
 export const addCommand = new Command('add')
   .description('Add personal data to the vault')
@@ -157,12 +68,22 @@ async function runAdd(
 
   // Get scope config or use defaults
   const config = SCOPE_CONFIG[scope];
-  const sensitivity = (options.sensitivity as SensitivityLevel) ||
-    config?.sensitivity ||
-    detectSensitivity(scope);
+  let sensitivityOverride: SensitivityLevel | undefined;
+  if (options.sensitivity) {
+    const value = options.sensitivity.toLowerCase();
+    if (!['standard', 'sensitive', 'critical'].includes(value)) {
+      error(`Invalid sensitivity: ${options.sensitivity}`);
+      info('Valid values: standard, sensitive, critical');
+      process.exit(1);
+    }
+    sensitivityOverride = value as SensitivityLevel;
+  }
+  const sensitivity =
+    sensitivityOverride || config?.sensitivity || detectSensitivity(scope);
   const itemType = config?.itemType || detectItemType(scope);
 
   info(`Adding ${formatScope(scope)} (${formatSensitivity(sensitivity)})`);
+  info('Press Esc or Ctrl+C to cancel.');
   console.log();
 
   // Get data
@@ -179,6 +100,9 @@ async function runAdd(
   } else if (config?.fields) {
     // Interactive prompts for known scopes
     data = await promptForFields(config.fields);
+    if (config.transform) {
+      data = config.transform(data, scope);
+    }
   } else {
     // Generic JSON input for unknown scopes
     info('Enter data as JSON (e.g., {"key": "value"}):');
@@ -192,13 +116,11 @@ async function runAdd(
   }
 
   // Unlock vault
-  const passphrase = await getPassphrase('Enter vault passphrase');
-
   const spin = spinner('Unlocking vault...');
   spin.start();
 
   try {
-    await storage.unlock(passphrase);
+    await unlockVault(storage, 'Enter vault passphrase', () => spin.stop());
     spin.succeed('Vault unlocked');
   } catch (err) {
     spin.fail('Failed to unlock vault');
@@ -208,6 +130,11 @@ async function runAdd(
       throw err;
     }
     process.exit(1);
+  }
+
+  // Ensure schema_version exists
+  if (!('schema_version' in data)) {
+    data.schema_version = '1.0';
   }
 
   // Store data
@@ -254,19 +181,69 @@ async function runAdd(
  * Interactive prompts for fields
  */
 async function promptForFields(
-  fields: { name: string; label: string; masked?: boolean }[]
-): Promise<Record<string, string>> {
-  const data: Record<string, string> = {};
+  fields: {
+    name: string;
+    label: string;
+    masked?: boolean;
+    optional?: boolean;
+    array?: boolean;
+    boolean?: boolean;
+    json?: boolean;
+  }[]
+): Promise<Record<string, unknown>> {
+  const data: Record<string, unknown> = {};
 
   for (const field of fields) {
-    const isOptional = field.label.includes('optional');
+    if (field.boolean) {
+      const confirmed = await confirm(field.label, false);
+      if (confirmed || !field.optional) {
+        data[field.name] = confirmed;
+      }
+      continue;
+    }
 
-    // Use masked input for sensitive fields (passport numbers, etc.)
+    if (field.json) {
+      const value = await input(field.label);
+      if (!value) {
+        if (!field.optional) {
+          data[field.name] = {};
+        }
+        continue;
+      }
+      try {
+        data[field.name] = JSON.parse(value);
+      } catch {
+        error('Invalid JSON. Please try again.');
+        return promptForFields(fields);
+      }
+      continue;
+    }
+
     const value = field.masked
       ? await maskedInput(field.label)
       : await input(field.label);
 
-    if (value || !isOptional) {
+    if (!value) {
+      if (!field.optional) {
+        data[field.name] = value;
+      }
+      continue;
+    }
+
+    if (field.array) {
+      if (value.trim().startsWith('[')) {
+        try {
+          const arr = JSON.parse(value);
+          if (Array.isArray(arr)) {
+            data[field.name] = arr;
+          }
+        } catch {
+          data[field.name] = value.split(',').map((v) => v.trim()).filter(Boolean);
+        }
+      } else {
+        data[field.name] = value.split(',').map((v) => v.trim()).filter(Boolean);
+      }
+    } else {
       data[field.name] = value;
     }
   }
@@ -278,10 +255,15 @@ async function promptForFields(
  * Detect sensitivity from scope name
  */
 function detectSensitivity(scope: string): SensitivityLevel {
-  if (scope.startsWith('identity.passport') || scope.startsWith('crypto.')) {
+  if (
+    scope.startsWith('identity.passport') ||
+    scope.startsWith('identity.drivers_license') ||
+    scope.startsWith('crypto.') ||
+    scope.startsWith('credentials.')
+  ) {
     return 'critical';
   }
-  if (scope.startsWith('identity.') || scope.startsWith('address.')) {
+  if (scope.startsWith('identity.') || scope.startsWith('address.') || scope.startsWith('health.')) {
     return 'sensitive';
   }
   return 'standard';
@@ -295,5 +277,8 @@ function detectItemType(scope: string): ItemType {
   if (scope.startsWith('address.')) return 'ADDRESS';
   if (scope.startsWith('preferences.')) return 'PREFERENCES';
   if (scope.startsWith('crypto.')) return 'WALLET_KEY';
+  if (scope.startsWith('credentials.')) return 'CREDENTIALS';
+  if (scope.startsWith('health.')) return 'HEALTH';
+  if (scope.startsWith('budget.')) return 'BUDGET';
   return 'PREFERENCES';
 }

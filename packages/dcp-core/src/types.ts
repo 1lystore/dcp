@@ -13,7 +13,14 @@ export type SensitivityLevel = 'standard' | 'sensitive' | 'critical';
 // Item Types (from PRD Schema Section 4.3)
 // ============================================================================
 
-export type ItemType = 'WALLET_KEY' | 'ADDRESS' | 'IDENTITY' | 'PREFERENCES';
+export type ItemType =
+  | 'WALLET_KEY'
+  | 'ADDRESS'
+  | 'IDENTITY'
+  | 'PREFERENCES'
+  | 'CREDENTIALS'
+  | 'HEALTH'
+  | 'BUDGET';
 
 // ============================================================================
 // Chain Types

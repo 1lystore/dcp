@@ -71,11 +71,14 @@ async function runList(options: {
       identity: 'IDENTITY',
       address: 'ADDRESS',
       preferences: 'PREFERENCES',
+      credentials: 'CREDENTIALS',
+      health: 'HEALTH',
+      budget: 'BUDGET',
     };
     const itemType = typeMap[options.type.toLowerCase()];
     if (!itemType) {
       error(`Unknown type: ${options.type}`);
-      info('Valid types: wallet, identity, address, preferences');
+      info('Valid types: wallet, identity, address, preferences, credentials, health, budget');
       process.exit(1);
     }
     filtered = filtered.filter((r) => r.item_type === itemType);

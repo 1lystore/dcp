@@ -21,6 +21,8 @@ import {
   vault_list_scopes,
   vault_get_address,
   vault_budget_check,
+  vault_unlock,
+  vault_lock,
   ToolContext,
 } from '../src/tools.js';
 
@@ -183,6 +185,28 @@ describe('MCP Tools', () => {
 
       expect(result.allowed).toBe(false);
       expect(result.reason).toContain('BUDGET_EXCEEDED_TX');
+    });
+  });
+
+  describe('vault_unlock / vault_lock', () => {
+    it('should unlock and lock the vault', async () => {
+      // Lock first
+      storage.lock();
+      expect(storage.isUnlocked()).toBe(false);
+
+      const ctx: ToolContext = {
+        storage,
+        budget,
+        agentName: 'TestAgent',
+      };
+
+      const unlockResult = await vault_unlock(ctx, { passphrase: 'test-passphrase' });
+      expect(unlockResult.unlocked).toBe(true);
+      expect(storage.isUnlocked()).toBe(true);
+
+      const lockResult = await vault_lock(ctx);
+      expect(lockResult.locked).toBe(true);
+      expect(storage.isUnlocked()).toBe(false);
     });
   });
 });

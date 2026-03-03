@@ -17,7 +17,7 @@ import {
   info,
   warn,
   spinner,
-  getPassphrase,
+  unlockVault,
   handleError,
   highlight,
   formatChain,
@@ -73,13 +73,11 @@ async function runCreateWallet(options: { chain: string }): Promise<void> {
   info(`Creating ${formatChain(chain)} wallet...`);
   console.log();
 
-  const passphrase = await getPassphrase('Enter vault passphrase');
-
   const spin = spinner('Unlocking vault...');
   spin.start();
 
   try {
-    await storage.unlock(passphrase);
+    await unlockVault(storage, 'Enter vault passphrase', () => spin.stop());
     spin.succeed('Vault unlocked');
   } catch (err) {
     spin.fail('Failed to unlock vault');

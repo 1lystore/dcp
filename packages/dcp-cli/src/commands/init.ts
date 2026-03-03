@@ -28,7 +28,6 @@ import {
   generateRecoveryMnemonic,
   deriveKeyFromMnemonic,
   zeroize,
-  VaultError,
 } from '@dcprotocol/core';
 
 export const initCommand = new Command('init')

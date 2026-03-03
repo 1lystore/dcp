@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildServer } from '../src/index.js';
-import { VaultStorage, resetStorage } from '@dcprotocol/core';
+import { VaultStorage, resetStorage, generateRecoveryMnemonic, deriveKeyFromMnemonic, zeroize } from '@dcprotocol/core';
 import type { FastifyInstance } from 'fastify';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -16,6 +16,7 @@ describe('REST Server', () => {
   let server: FastifyInstance;
   let testVaultDir: string;
   let storage: VaultStorage;
+  const passphrase = 'test-passphrase-123';
 
   beforeAll(async () => {
     // Reset any existing storage singleton
@@ -30,6 +31,13 @@ describe('REST Server', () => {
     // Initialize storage and schema first
     storage = new VaultStorage(testVaultDir);
     storage.initializeSchema();
+    const mnemonic = generateRecoveryMnemonic();
+    const masterKey = deriveKeyFromMnemonic(mnemonic);
+    try {
+      await storage.storeMasterKeyWithPassphrase(masterKey, passphrase);
+    } finally {
+      zeroize(masterKey);
+    }
     storage.close(); // Close so server can open its own connection
 
     // Build and start the server (will create its own storage connection)
@@ -64,6 +72,51 @@ describe('REST Server', () => {
       expect(body.status).toBe('ok');
       expect(typeof body.unlocked).toBe('boolean');
       expect(body.version).toBe('0.1.0');
+    });
+  });
+
+  describe('Vault Unlock', () => {
+    it('should unlock the vault with passphrase', async () => {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/vault/unlock',
+        payload: { passphrase },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.unlocked).toBe(true);
+    });
+  });
+
+  describe('MCP Unlock Bridge', () => {
+    it('should write mcp.unlock file', async () => {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/vault/unlock-mcp',
+        payload: { passphrase },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.queued).toBe(true);
+
+      const unlockPath = path.join(testVaultDir, 'mcp.unlock');
+      expect(fs.existsSync(unlockPath)).toBe(true);
+      fs.unlinkSync(unlockPath);
+    });
+  });
+
+  describe('Vault Lock', () => {
+    it('should lock the vault', async () => {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/vault/lock',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.locked).toBe(true);
     });
   });
 

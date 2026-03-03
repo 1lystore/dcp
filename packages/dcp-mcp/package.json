@@ -1,21 +1,41 @@
 {
   "name": "@dcprotocol/mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP Server for DCP Vault - Agent interface for secure wallet signing and data access",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
   "bin": {
     "dcp-mcp": "./dist/index.js"
   },
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1lystore/dcp.git",
+    "directory": "packages/dcp-mcp"
+  },
+  "homepage": "https://github.com/1lystore/dcp#readme",
+  "bugs": {
+    "url": "https://github.com/1lystore/dcp/issues"
+  },
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts --clean",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
   },
   "keywords": [
     "vault",
@@ -29,12 +49,14 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@dcprotocol/core": "^0.1.0",
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "keytar": "^7.9.0"
   },
   "devDependencies": {
     "vite": "^6.0.0",
     "@types/node": "^22.10.2",
     "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^3.0.0"
   },

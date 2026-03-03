@@ -19,7 +19,7 @@ import * as keytar from 'keytar';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { nanoid } from 'nanoid';
+import { randomBytes, randomUUID } from 'crypto';
 import {
   VaultRecord,
   AgentSession,
@@ -57,6 +57,13 @@ const KEYCHAIN_SALT_ACCOUNT = 'master-salt';
 
 /** File permissions for vault.key (owner read/write only) */
 const KEY_FILE_MODE = 0o600;
+
+function generateId(): string {
+  if (typeof randomUUID === 'function') {
+    return randomUUID();
+  }
+  return randomBytes(16).toString('hex');
+}
 
 // ============================================================================
 // Vault Storage Class
@@ -318,28 +325,54 @@ export class VaultStorage {
   async unlock(passphrase: string): Promise<Buffer> {
     // Try keychain first, then file
     let keyData = await this.loadMasterKeyFromKeychain();
+    let keySource: 'keychain' | 'file' | null = keyData ? 'keychain' : null;
 
     if (!keyData) {
       keyData = this.loadMasterKeyFromFile();
+      keySource = keyData ? 'file' : null;
     }
 
     if (!keyData) {
       throw new VaultError('VAULT_NOT_INITIALIZED', 'Vault not initialized. Run dcp init');
     }
 
-    const { encryptedKey, nonce, salt } = keyData;
-
-    // Derive wrapping key from passphrase using Argon2id
-    const wrappingKey = deriveKeyFromPassphrase(passphrase, salt);
+    const tryDecrypt = (data: { encryptedKey: Buffer; nonce: Buffer; salt: Buffer }): Buffer => {
+      const wrappingKey = deriveKeyFromPassphrase(passphrase, data.salt);
+      try {
+        return decrypt(data.encryptedKey, data.nonce, wrappingKey);
+      } finally {
+        // CRITICAL: Always zeroize wrapping key
+        zeroize(wrappingKey);
+      }
+    };
 
     try {
       // Decrypt master key using AEAD
       // If passphrase is wrong, this will throw (authentication tag mismatch)
-      const masterKey = decrypt(encryptedKey, nonce, wrappingKey);
-
+      const masterKey = tryDecrypt(keyData);
       this.masterKey = masterKey;
       return masterKey;
     } catch (error) {
+      // If keychain entry is stale but file exists, try file before failing.
+      if (keySource === 'keychain') {
+        const fileData = this.loadMasterKeyFromFile();
+        if (fileData) {
+          try {
+            const masterKey = tryDecrypt(fileData);
+            this.masterKey = masterKey;
+            // Refresh keychain to avoid future mismatches
+            await this.storeMasterKeyInKeychain(
+              fileData.encryptedKey,
+              fileData.nonce,
+              fileData.salt
+            );
+            return masterKey;
+          } catch {
+            // Fall through to error below
+          }
+        }
+      }
+
       // AEAD decryption failed - wrong passphrase or tampered data
       if (error instanceof VaultError && error.message.includes('Decryption failed')) {
         throw new VaultError(
@@ -348,9 +381,6 @@ export class VaultStorage {
         );
       }
       throw error;
-    } finally {
-      // CRITICAL: Always zeroize wrapping key
-      zeroize(wrappingKey);
     }
   }
 
@@ -372,6 +402,16 @@ export class VaultStorage {
       throw new VaultError('VAULT_LOCKED', 'Vault is locked. Please unlock first.');
     }
     return this.masterKey;
+  }
+
+  /**
+   * Set master key directly (used by trusted local session cache)
+   *
+   * This is intentionally not exposed to agents. It is used by the CLI
+   * to restore an already-unlocked master key from a local session cache.
+   */
+  setMasterKey(masterKey: Buffer): void {
+    this.masterKey = masterKey;
   }
 
   /**
@@ -506,7 +546,7 @@ export class VaultStorage {
     publicAddress?: string
   ): VaultRecord {
     const now = new Date().toISOString();
-    const id = nanoid();
+    const id = generateId();
 
     const stmt = this.db.prepare(`
       INSERT INTO vault_records (
@@ -761,7 +801,7 @@ export class VaultStorage {
     }
   ): AgentSession {
     const now = new Date().toISOString();
-    const id = nanoid();
+    const id = generateId();
 
     const stmt = this.db.prepare(`
       INSERT INTO agent_sessions (
@@ -897,6 +937,27 @@ export class VaultStorage {
   }
 
   /**
+   * List all active sessions for a specific agent
+   */
+  listActiveSessionsForAgent(agentName: string): AgentSession[] {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      SELECT * FROM agent_sessions
+      WHERE agent_name = ?
+        AND expires_at > ?
+        AND revoked_at IS NULL
+      ORDER BY created_at DESC
+    `);
+
+    const rows = stmt.all(agentName, now) as Array<AgentSession & { granted_scopes: string }>;
+
+    return rows.map((row) => ({
+      ...row,
+      granted_scopes: JSON.parse(row.granted_scopes),
+    }));
+  }
+
+  /**
    * List all sessions (including expired and revoked)
    */
   listAllSessions(): AgentSession[] {
@@ -934,7 +995,7 @@ export class VaultStorage {
     }
   ): SpendEvent {
     const now = new Date().toISOString();
-    const id = nanoid();
+    const id = generateId();
 
     const stmt = this.db.prepare(`
       INSERT INTO spend_events (
@@ -1024,7 +1085,7 @@ export class VaultStorage {
     }
   ): AuditEvent {
     const now = new Date().toISOString();
-    const id = nanoid();
+    const id = generateId();
 
     const stmt = this.db.prepare(`
       INSERT INTO audit_events (
@@ -1103,7 +1164,7 @@ export class VaultStorage {
   ): PendingConsent {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + 5 * 60 * 1000); // 5 minutes
-    const id = nanoid();
+    const id = generateId();
 
     const stmt = this.db.prepare(`
       INSERT INTO pending_consents (

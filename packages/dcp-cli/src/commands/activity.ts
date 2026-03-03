@@ -102,7 +102,7 @@ async function runActivity(options: {
     const type = formatEventType(event.event_type);
     const agent = event.agent_name
       ? (event.agent_name.length > 16 ? event.agent_name.slice(0, 13) + '...' : event.agent_name.padEnd(16))
-      : dim('-'.padEnd(16));
+      : dim('user'.padEnd(16));
     const scope = event.scope
       ? (event.scope.length > 18 ? event.scope.slice(0, 15) + '...' : event.scope.padEnd(18))
       : dim('-'.padEnd(18));
@@ -136,7 +136,11 @@ async function runActivity(options: {
       }
 
       if (details.length > 0) {
-        console.log(`    ${dim(details.join(' | '))}`);
+        const detailText = details.join(' | ');
+        const lines = wrapLine(detailText, 72);
+        for (const line of lines) {
+          console.log(`    ${dim(line)}`);
+        }
       }
     }
   }
@@ -217,6 +221,31 @@ function formatEventType(type: string): string {
     default:
       return type;
   }
+}
+
+function wrapLine(text: string, width: number): string[] {
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let current = '';
+
+  for (const word of words) {
+    if (current.length === 0) {
+      current = word;
+      continue;
+    }
+    if (current.length + word.length + 1 <= width) {
+      current += ` ${word}`;
+    } else {
+      lines.push(current);
+      current = word;
+    }
+  }
+
+  if (current.length > 0) {
+    lines.push(current);
+  }
+
+  return lines.length > 0 ? lines : [''];
 }
 
 /**

@@ -13,9 +13,10 @@ import {
   error,
   info,
   spinner,
-  getPassphrase,
+  unlockVault,
   input,
   maskedInput,
+  confirm,
   handleError,
   highlight,
   formatScope,
@@ -29,85 +30,7 @@ import {
   zeroize,
 } from '@dcprotocol/core';
 import chalk from 'chalk';
-
-// Scope metadata for interactive prompts (same as add.ts)
-const SCOPE_CONFIG: Record<
-  string,
-  {
-    sensitivity: SensitivityLevel;
-    fields: { name: string; label: string; masked?: boolean }[];
-  }
-> = {
-  'identity.name': {
-    sensitivity: 'sensitive',
-    fields: [
-      { name: 'first', label: 'First name' },
-      { name: 'last', label: 'Last name' },
-      { name: 'middle', label: 'Middle name (optional)' },
-    ],
-  },
-  'identity.email': {
-    sensitivity: 'sensitive',
-    fields: [{ name: 'email', label: 'Email address' }],
-  },
-  'identity.phone': {
-    sensitivity: 'sensitive',
-    fields: [
-      { name: 'country_code', label: 'Country code (e.g., +1)' },
-      { name: 'number', label: 'Phone number' },
-    ],
-  },
-  'identity.passport': {
-    sensitivity: 'critical',
-    fields: [
-      { name: 'number', label: 'Passport number', masked: true },
-      { name: 'country', label: 'Issuing country' },
-      { name: 'expiry', label: 'Expiry date (YYYY-MM-DD)', masked: true },
-    ],
-  },
-  'address.home': {
-    sensitivity: 'sensitive',
-    fields: [
-      { name: 'street', label: 'Street address' },
-      { name: 'city', label: 'City' },
-      { name: 'state', label: 'State/Province' },
-      { name: 'zip', label: 'ZIP/Postal code' },
-      { name: 'country', label: 'Country' },
-    ],
-  },
-  'address.work': {
-    sensitivity: 'sensitive',
-    fields: [
-      { name: 'street', label: 'Street address' },
-      { name: 'city', label: 'City' },
-      { name: 'state', label: 'State/Province' },
-      { name: 'zip', label: 'ZIP/Postal code' },
-      { name: 'country', label: 'Country' },
-    ],
-  },
-  'preferences.sizes': {
-    sensitivity: 'standard',
-    fields: [
-      { name: 'shirt', label: 'Shirt size (XS, S, M, L, XL, XXL)' },
-      { name: 'pants', label: 'Pants size' },
-      { name: 'shoe', label: 'Shoe size' },
-    ],
-  },
-  'preferences.brands': {
-    sensitivity: 'standard',
-    fields: [
-      { name: 'preferred', label: 'Preferred brands (comma-separated)' },
-      { name: 'avoided', label: 'Avoided brands (comma-separated, optional)' },
-    ],
-  },
-  'preferences.diet': {
-    sensitivity: 'standard',
-    fields: [
-      { name: 'restrictions', label: 'Dietary restrictions (comma-separated)' },
-      { name: 'allergies', label: 'Allergies (comma-separated)' },
-    ],
-  },
-};
+import { SCOPE_CONFIG } from '../scope-config.js';
 
 export const updateCommand = new Command('update')
   .description('Update existing data in the vault')
@@ -150,13 +73,11 @@ async function runUpdate(scope: string, options: { data?: string }): Promise<voi
   console.log();
 
   // Unlock vault first to show current values
-  const passphrase = await getPassphrase('Enter vault passphrase');
-
   const spin = spinner('Unlocking vault...');
   spin.start();
 
   try {
-    await storage.unlock(passphrase);
+    await unlockVault(storage, 'Enter vault passphrase', () => spin.stop());
     spin.succeed('Vault unlocked');
   } catch (err) {
     spin.fail('Failed to unlock vault');
@@ -191,7 +112,15 @@ async function runUpdate(scope: string, options: { data?: string }): Promise<voi
     if (existing.sensitivity === 'critical') {
       console.log(`  ${dim(key + ':')} ${dim('[hidden]')}`);
     } else {
-      console.log(`  ${dim(key + ':')} ${highlight(String(value))}`);
+      let display = '';
+      if (Array.isArray(value)) {
+        display = value.join(', ');
+      } else if (value && typeof value === 'object') {
+        display = JSON.stringify(value);
+      } else {
+        display = String(value);
+      }
+      console.log(`  ${dim(key + ':')} ${highlight(display)}`);
     }
   }
   console.log();
@@ -214,6 +143,9 @@ async function runUpdate(scope: string, options: { data?: string }): Promise<voi
     info('Enter new values (leave blank to keep current):');
     console.log();
     newData = await promptForFieldsWithDefaults(config.fields, currentData);
+    if (config.transform) {
+      newData = config.transform(newData, scope);
+    }
   } else {
     // Generic JSON input for unknown scopes
     info('Enter new data as JSON (e.g., {"key": "value"}):');
@@ -232,6 +164,10 @@ async function runUpdate(scope: string, options: { data?: string }): Promise<voi
   saveSpin.start();
 
   try {
+    if (!('schema_version' in newData)) {
+      const currentVersion = (currentData as Record<string, unknown>).schema_version;
+      newData.schema_version = typeof currentVersion === 'string' ? currentVersion : '1.0';
+    }
     storage.updateRecord(existing.id, newData, masterKey);
     saveSpin.succeed('Data updated');
 
@@ -239,7 +175,7 @@ async function runUpdate(scope: string, options: { data?: string }): Promise<voi
     success(`${formatScope(scope)} updated`);
 
     // Log to audit
-    storage.logAudit('CONFIG', 'success', {
+    storage.logAudit('EXECUTE', 'success', {
       operation: 'update_record',
       scope,
       details: JSON.stringify({ updated_fields: Object.keys(newData) }),
@@ -256,14 +192,22 @@ async function runUpdate(scope: string, options: { data?: string }): Promise<voi
  * Interactive prompts for fields with current values as defaults
  */
 async function promptForFieldsWithDefaults(
-  fields: { name: string; label: string; masked?: boolean }[],
+  fields: {
+    name: string;
+    label: string;
+    masked?: boolean;
+    optional?: boolean;
+    array?: boolean;
+    boolean?: boolean;
+    json?: boolean;
+  }[],
   currentData: Record<string, unknown>
-): Promise<Record<string, string>> {
-  const data: Record<string, string> = {};
+): Promise<Record<string, unknown>> {
+  const data: Record<string, unknown> = {};
 
   for (const field of fields) {
     const currentValue = String(currentData[field.name] || '');
-    const isOptional = field.label.includes('optional');
+    const isOptional = field.optional === true;
 
     // Show current value (masked for sensitive fields)
     const displayCurrent = field.masked && currentValue
@@ -273,15 +217,55 @@ async function promptForFieldsWithDefaults(
     const prompt = `${field.label} [${dim(displayCurrent)}]`;
 
     // Get new value
-    const value = field.masked
-      ? await maskedInput(prompt)
-      : await input(prompt);
+    if (field.boolean) {
+      const currentBool = Boolean(currentData[field.name]);
+      const confirmed = await confirm(prompt, currentBool);
+      data[field.name] = confirmed;
+      continue;
+    }
+
+    if (field.json) {
+      const value = await input(prompt);
+      if (!value) {
+        if (currentData[field.name] !== undefined) {
+          data[field.name] = currentData[field.name];
+        } else if (!isOptional) {
+          data[field.name] = {};
+        }
+        continue;
+      }
+      try {
+        data[field.name] = JSON.parse(value);
+      } catch {
+        error('Invalid JSON. Please try again.');
+        return promptForFieldsWithDefaults(fields, currentData);
+      }
+      continue;
+    }
+
+    const value = field.masked ? await maskedInput(prompt) : await input(prompt);
 
     // Use new value if provided, otherwise keep current
     if (value) {
-      data[field.name] = value;
+      if (field.array) {
+        if (value.trim().startsWith('[')) {
+          try {
+            const arr = JSON.parse(value);
+            if (Array.isArray(arr)) {
+              data[field.name] = arr;
+              continue;
+            }
+          } catch {
+            // fall back to comma split
+          }
+        }
+        data[field.name] = value.split(',').map((v) => v.trim()).filter(Boolean);
+      } else {
+        data[field.name] = value;
+      }
     } else if (currentValue) {
-      data[field.name] = currentValue;
+      const existing = currentData[field.name];
+      data[field.name] = existing;
     } else if (!isOptional) {
       data[field.name] = '';
     }

@@ -7,9 +7,9 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces",
+    "build": "npm run build -w @dcprotocol/core && npm run build --workspaces --if-present",
+    "dev:cli": "npm run build -w @dcprotocol/core && npm run dev -w @dcprotocol/cli --",
     "test": "npm run test --workspaces --if-present",
-    "lint": "eslint packages/*/src/**/*.ts",
     "clean": "rm -rf packages/*/dist"
   },
   "keywords": [
@@ -21,6 +21,14 @@
     "wallet",
     "security"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1lystore/dcp.git"
+  },
+  "homepage": "https://github.com/1lystore/dcp#readme",
+  "bugs": {
+    "url": "https://github.com/1lystore/dcp/issues"
+  },
   "author": "DCP Protocol",
   "license": "Apache-2.0",
   "engines": {
