@@ -376,6 +376,11 @@ cd dcp && npm install && npm run build
 npm test
 ```
 
+## Community
+
+- [Discord](https://discord.gg/3pgAgQgpBn) — `#dcp-general` for questions, `#dcp-help` for support
+- [GitHub Issues](https://github.com/1lystore/dcp/issues) — Bug reports & feature requests
+
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md). We accept: bug fixes, new chain support, new data schemas, framework integrations, docs, tests.
@@ -386,6 +391,7 @@ Apache-2.0 — see `LICENSE`.
 
 ## Links
 
+- [Discord](https://discord.gg/3pgAgQgpBn)
 - [Architecture](./ARCHITECTURE.md)
 - [Security Model](./SECURITY.md)
 - [Roadmap](./ROADMAP.md)
