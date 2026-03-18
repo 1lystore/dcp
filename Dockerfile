@@ -3,6 +3,7 @@ FROM node:20-bookworm-slim AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
+COPY scripts/check-node.mjs scripts/check-node.mjs
 COPY packages/dcp-relay/package.json packages/dcp-relay/package.json
 
 RUN npm ci
