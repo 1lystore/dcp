@@ -1,4 +1,4 @@
-app = "relay-dcp-1ly-store"
+app = "relay-dcp-1lystore"
 kill_signal = "SIGINT"
 kill_timeout = "5s"
 
