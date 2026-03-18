@@ -1,0 +1,41 @@
+app = "relay-dcp-1ly-store"
+kill_signal = "SIGINT"
+kill_timeout = "5s"
+
+[build]
+  dockerfile = "Dockerfile.relay"
+
+[env]
+  NODE_ENV = "production"
+  DCP_RELAY_HOST = "0.0.0.0"
+  DCP_RELAY_PORT = "8421"
+  DCP_RELAY_RATE_LIMIT = "60"
+  DCP_RELAY_DEBUG = "false"
+
+[http_service]
+  internal_port = 8421
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 200
+    hard_limit = 400
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/health"
+
+[metrics]
+  port = 8421
+  path = "/metrics"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "256mb"
