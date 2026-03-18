@@ -33,9 +33,7 @@ export default function App() {
 
   // Authenticate as owner (challenge-response with Ed25519 keypair)
   const authenticateOwner = useCallback(async () => {
-    console.log('[authenticateOwner] called, authAttempted:', authAttempted.current);
     if (authAttempted.current) {
-      console.log('[authenticateOwner] already attempted, returning');
       return;
     }
     authAttempted.current = true;
@@ -43,9 +41,7 @@ export default function App() {
 
     try {
       // Step 1: Get or create desktop credentials
-      console.log('[authenticateOwner] Step 1: calling get_or_create_desktop_credentials');
       const credentials = await invoke<DesktopCredentials>('get_or_create_desktop_credentials');
-      console.log('[authenticateOwner] Got credentials:', credentials.desktop_id.slice(0, 8), 'is_new:', credentials.is_new);
 
       // Step 2: Register with server if new credentials
       if (credentials.is_new) {
@@ -94,20 +90,16 @@ export default function App() {
   }, []);
 
   const checkServer = useCallback(async () => {
-    console.log('[checkServer] called, appState:', appState, 'ownerAuthenticated:', ownerAuthenticated);
     try {
       const h = await api.health();
-      console.log('[checkServer] health:', h);
       setHealth(h);
       setError(null);
 
       if (forceOnboarding || onboardingLock.current || onboardingActive || appState === 'no-vault') {
-        console.log('[checkServer] early return - forceOnboarding:', forceOnboarding, 'onboardingLock:', onboardingLock.current, 'onboardingActive:', onboardingActive, 'appState:', appState);
         return;
       }
 
       if (!h.initialized) {
-        console.log('[checkServer] vault not initialized');
         setAppState('no-vault');
         api.setOwnerToken(null);
         setOwnerAuthenticated(false);
@@ -116,12 +108,10 @@ export default function App() {
       }
 
       if (h.unlocked) {
-        console.log('[checkServer] vault unlocked, ownerAuthenticated:', ownerAuthenticated);
         setAppState('unlocked');
         // Authenticate as owner when vault is unlocked
         if (!ownerAuthenticated) {
-          console.log('[checkServer] calling authenticateOwner');
-          authenticateOwner();
+          void authenticateOwner();
         }
       } else {
         setAppState('locked');

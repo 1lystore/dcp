@@ -1,15 +1,4 @@
-/**
- * dcp proxy
- *
- * Run a local proxy for remote agents (PRD Section B4 - Tier 3).
- *
- * The proxy:
- * 1. Runs a local HTTP server that mimics DCP REST endpoints
- * 2. Forwards requests through the relay to the actual vault using @dcprotocol/client
- *
- * This allows agents on remote VPS machines to connect via localhost
- * without holding any secrets.
- */
+#!/usr/bin/env node
 
 import { Command } from 'commander';
 import chalk from 'chalk';
@@ -18,36 +7,10 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { fileURLToPath } from 'url';
 import { DcpClient, DcpError, generateSigningKeyPair } from '@dcprotocol/client';
 
 const DEFAULT_RELAY_URL = 'wss://relay.dcp.1ly.store';
-
-// ============================================================================
-// Command Definition
-// ============================================================================
-
-export const proxyCommand = new Command('proxy')
-  .description('Run a local proxy for remote agents (Tier 3)')
-  .option('-v, --vault <id>', 'Vault ID to proxy for (required)')
-  .option('-r, --relay <url>', `Relay URL (default: ${DEFAULT_RELAY_URL})`)
-  .option('-k, --hpke-key <key>', 'Vault HPKE public key (base64)')
-  .option('-p, --port <port>', 'Local port to listen on (default: 8420)', '8420')
-  .option('-s, --service-id <id>', 'Service identity (required for relay access)')
-  .option('--service-key <key>', 'Service Ed25519 private key (required for relay access)')
-  .option('--pair <token>', 'Pair this proxy using a pairing token (generates keys)')
-  .option('-a, --agent-name <name>', 'Agent name to use for all proxied requests')
-  .option('-d, --daemonize', 'Run in background')
-  .action(async (options) => {
-    try {
-      await runProxy(options);
-    } catch (err) {
-      handleProxyCommandError(err);
-    }
-  });
-
-// ============================================================================
-// Proxy Configuration
-// ============================================================================
 
 interface ProxyOptions {
   vault?: string;
@@ -59,6 +22,16 @@ interface ProxyOptions {
   pair?: string;
   agentName?: string;
   daemonize?: boolean;
+}
+
+interface ProxyConfig {
+  vaultId: string;
+  relayUrl: string;
+  vaultHpkePublicKey: string;
+  localPort: number;
+  serviceId: string;
+  servicePrivateKey: string;
+  agentName: string;
 }
 
 function success(message: string): void {
@@ -94,7 +67,7 @@ function box(lines: string[], title?: string): void {
   console.log();
 }
 
-function handleProxyCommandError(err: unknown): never {
+function handleProxyError(err: unknown): never {
   if (err instanceof Error) {
     error(err.message);
   } else {
@@ -103,49 +76,61 @@ function handleProxyCommandError(err: unknown): never {
   process.exit(1);
 }
 
-interface ProxyConfig {
-  vaultId: string;
-  relayUrl: string;
-  vaultHpkePublicKey: string;
-  localPort: number;
-  serviceId: string;
-  servicePrivateKey: string;
-  agentName: string;
+function getPackageVersion(): string {
+  try {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const raw = fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8');
+    const json = JSON.parse(raw) as { version?: string };
+    return json.version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
 }
 
-// ============================================================================
-// Run Proxy
-// ============================================================================
+function getProxyIdentityPath(serviceId: string): string {
+  return path.join(os.homedir(), '.dcp', 'proxy', `${serviceId}.json`);
+}
+
+function loadProxyIdentity(serviceId: string): { private_key: string } | null {
+  try {
+    const identityPath = getProxyIdentityPath(serviceId);
+    if (!fs.existsSync(identityPath)) return null;
+    const raw = fs.readFileSync(identityPath, 'utf8');
+    const parsed = JSON.parse(raw) as { private_key?: string };
+    if (!parsed.private_key) return null;
+    return { private_key: parsed.private_key };
+  } catch {
+    return null;
+  }
+}
 
 export async function runProxy(options: ProxyOptions): Promise<void> {
-  // Vault ID
   if (!options.vault) {
     const vaultId = process.env.DCP_VAULT_ID;
     if (!vaultId) {
       error('Vault ID is required');
       console.log();
-      console.log(dim('Usage: dcp proxy --vault=vault_abc123'));
-      console.log(dim('   or: DCP_VAULT_ID=vault_abc123 dcp proxy'));
+      console.log(dim('Usage: dcp-proxy --vault=vault_abc123'));
+      console.log(dim('   or: DCP_VAULT_ID=vault_abc123 dcp-proxy'));
       console.log();
       process.exit(1);
     }
     options.vault = vaultId;
   }
 
-  // HPKE public key
   const hpkeKey = options.hpkeKey || process.env.DCP_VAULT_HPKE_PUBLIC_KEY;
   if (!hpkeKey) {
     error('Vault HPKE public key is required');
     console.log();
-    console.log(dim('Usage: dcp proxy --vault=... --hpke-key=<base64>'));
-    console.log(dim('   or: DCP_VAULT_HPKE_PUBLIC_KEY=<base64> dcp proxy ...'));
+    console.log(dim('Usage: dcp-proxy --vault=... --hpke-key=<base64>'));
+    console.log(dim('   or: DCP_VAULT_HPKE_PUBLIC_KEY=<base64> dcp-proxy ...'));
     console.log();
     process.exit(1);
   }
 
   const relayUrl = options.relay || process.env.DCP_RELAY_URL || DEFAULT_RELAY_URL;
 
-  // Service identity (required for relay)
   let serviceId = options.serviceId || process.env.DCP_SERVICE_ID;
   let serviceKey = options.serviceKey || process.env.DCP_SERVICE_PRIVATE_KEY;
 
@@ -210,9 +195,9 @@ export async function runProxy(options: ProxyOptions): Promise<void> {
   if (!serviceId || !serviceKey) {
     error('Service ID and private key are required for relay access');
     console.log();
-    console.log(dim('Usage: dcp proxy --service-id=<id> --service-key=<ed25519_private_key>'));
-    console.log(dim('   or: DCP_SERVICE_ID=... DCP_SERVICE_PRIVATE_KEY=... dcp proxy'));
-    console.log(dim('   or: dcp proxy --pair <token> --service-id=<id>'));
+    console.log(dim('Usage: dcp-proxy --service-id=<id> --service-key=<ed25519_private_key>'));
+    console.log(dim('   or: DCP_SERVICE_ID=... DCP_SERVICE_PRIVATE_KEY=... dcp-proxy'));
+    console.log(dim('   or: dcp-proxy --pair <token> --service-id=<id>'));
     console.log();
     process.exit(1);
   }
@@ -262,38 +247,12 @@ export async function runProxy(options: ProxyOptions): Promise<void> {
       'Press Ctrl+C to stop',
     ], 'Running');
 
-    // Keep process alive
     await new Promise(() => {});
   } catch (err) {
     spin.stop();
     throw err;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Proxy Identity Helpers
-// ---------------------------------------------------------------------------
-
-function getProxyIdentityPath(serviceId: string): string {
-  return path.join(os.homedir(), '.dcp', 'proxy', `${serviceId}.json`);
-}
-
-function loadProxyIdentity(serviceId: string): { private_key: string } | null {
-  try {
-    const identityPath = getProxyIdentityPath(serviceId);
-    if (!fs.existsSync(identityPath)) return null;
-    const raw = fs.readFileSync(identityPath, 'utf8');
-    const parsed = JSON.parse(raw) as { private_key?: string };
-    if (!parsed.private_key) return null;
-    return { private_key: parsed.private_key };
-  } catch {
-    return null;
-  }
-}
-
-// ============================================================================
-// DCP Proxy Class
-// ============================================================================
 
 class DcpProxy {
   private config: ProxyConfig;
@@ -338,7 +297,6 @@ class DcpProxy {
   }
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    // Enable CORS for local agents
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -351,11 +309,11 @@ class DcpProxy {
 
     try {
       const url = new URL(req.url || '/', `http://127.0.0.1:${this.config.localPort}`);
-      const path = url.pathname;
+      const reqPath = url.pathname;
       const method = req.method || 'GET';
       const body = await this.readJsonBody(req);
 
-      if (method === 'GET' && path === '/health') {
+      if (method === 'GET' && reqPath === '/health') {
         this.sendJson(res, 200, {
           status: 'ok',
           initialized: true,
@@ -366,8 +324,8 @@ class DcpProxy {
         return;
       }
 
-      if (method === 'GET' && path.startsWith('/address/')) {
-        const chain = path.split('/')[2];
+      if (method === 'GET' && reqPath.startsWith('/address/')) {
+        const chain = reqPath.split('/')[2];
         const result = await this.client.getAddress(chain as 'solana' | 'base' | 'ethereum');
         this.sendJson(res, 200, {
           chain: result.chain,
@@ -376,7 +334,7 @@ class DcpProxy {
         return;
       }
 
-      if (method === 'GET' && path === '/budget/check') {
+      if (method === 'GET' && reqPath === '/budget/check') {
         const amount = parseFloat(url.searchParams.get('amount') || '');
         const currency = url.searchParams.get('currency') || '';
         const chain = url.searchParams.get('chain') || undefined;
@@ -406,7 +364,7 @@ class DcpProxy {
         return;
       }
 
-      if (method === 'POST' && path === '/v1/vault/sign') {
+      if (method === 'POST' && reqPath === '/v1/vault/sign') {
         const result = await this.client.signTx({
           chain: body.chain,
           unsignedTx: body.unsigned_tx,
@@ -426,7 +384,7 @@ class DcpProxy {
         return;
       }
 
-      if (method === 'POST' && path === '/v1/vault/sign_message') {
+      if (method === 'POST' && reqPath === '/v1/vault/sign_message') {
         const result = await this.client.signMessage({
           chain: body.chain,
           message: body.message,
@@ -442,7 +400,7 @@ class DcpProxy {
         return;
       }
 
-      if (method === 'POST' && path === '/v1/vault/sign_typed_data') {
+      if (method === 'POST' && reqPath === '/v1/vault/sign_typed_data') {
         const result = await this.client.signTypedData({
           chain: body.chain,
           typedData: body.typed_data,
@@ -457,7 +415,7 @@ class DcpProxy {
         return;
       }
 
-      if (method === 'POST' && path === '/v1/vault/sign_x402') {
+      if (method === 'POST' && reqPath === '/v1/vault/sign_x402') {
         const result = await this.client.signX402({
           network: body.network,
           payload: body.payload,
@@ -476,7 +434,7 @@ class DcpProxy {
         return;
       }
 
-      if (method === 'POST' && path === '/v1/vault/read') {
+      if (method === 'POST' && reqPath === '/v1/vault/read') {
         const result = await this.client.readCredential(body.scope, body.fields);
         this.sendJson(res, 200, {
           scope: result.scope,
@@ -488,7 +446,7 @@ class DcpProxy {
         return;
       }
 
-      if (method === 'POST' && path === '/v1/vault/write') {
+      if (method === 'POST' && reqPath === '/v1/vault/write') {
         const result = await this.client.writeCredential(body.scope, body.data);
         this.sendJson(res, 200, {
           scope: result.scope,
@@ -552,12 +510,29 @@ class DcpProxy {
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(payload));
   }
-
-  async stop(): Promise<void> {
-    if (this.httpServer) {
-      this.httpServer.close();
-      this.httpServer = null;
-    }
-    await this.client.close();
-  }
 }
+
+const program = new Command();
+
+program
+  .name('dcp-proxy')
+  .description('Run a local DCP proxy for remote agents')
+  .version(getPackageVersion())
+  .requiredOption('-v, --vault <id>', 'Vault ID to proxy for')
+  .option('-r, --relay <url>', 'Relay URL')
+  .requiredOption('-k, --hpke-key <key>', 'Vault HPKE public key (base64)')
+  .option('-p, --port <port>', 'Local port to listen on (default: 8420)', '8420')
+  .option('-s, --service-id <id>', 'Service identity')
+  .option('--service-key <key>', 'Service Ed25519 private key')
+  .option('--pair <token>', 'Pair this proxy using a pairing token (generates keys)')
+  .option('-a, --agent-name <name>', 'Agent name to use for all proxied requests')
+  .option('-d, --daemonize', 'Run in background')
+  .action(async (options) => {
+    try {
+      await runProxy(options);
+    } catch (err) {
+      handleProxyError(err);
+    }
+  });
+
+program.parse();

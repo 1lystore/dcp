@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DCP Vault Desktop - Cross-platform desktop app for DCP",
   "private": true,
   "type": "module",

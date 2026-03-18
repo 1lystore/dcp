@@ -10,6 +10,13 @@ This is the main tool for developers, operators, and headless environments.
 npm install -g @dcprotocol/cli
 ```
 
+## Linux Notes
+
+- This is the human/operator CLI, not the recommended VPS-agent package.
+- On Debian/Ubuntu, install `libsecret-1-0` for keychain-backed local vault usage.
+- For remote agents and VPS hosts, prefer `@dcprotocol/proxy` and `dcp-proxy`.
+- Example relay URLs in this README use the default public relay `wss://relay.dcp.1ly.store`; replace it if you run your own relay.
+
 ## What The CLI Covers
 
 - initialize and recover a vault
@@ -26,7 +33,7 @@ dcp init
 dcp create-wallet --chain solana
 dcp add address.home
 dcp add identity.email
-npx @dcprotocol/server
+npx -y @dcprotocol/server
 ```
 
 Open `http://127.0.0.1:8420` for the local approval UI.
@@ -73,7 +80,7 @@ Open `http://127.0.0.1:8420` for the local approval UI.
 | Command | Purpose |
 | --- | --- |
 | `dcp pairing start <service>` | Create a short-lived pairing token |
-| `dcp proxy ...` | Run a local proxy backed by a remote vault |
+| `dcp proxy ...` | Run a proxy from the operator CLI (advanced/local compatibility) |
 
 ## Common Flows
 
@@ -119,7 +126,7 @@ dcp pairing start openclaw-vps \
 ### 5. Start a proxy on the VPS
 
 ```bash
-npx -y @dcprotocol/cli proxy \
+npx -y -p @dcprotocol/proxy dcp-proxy \
   --pair "<pairing-token>" \
   --service-id "openclaw-vps" \
   --vault "<vault-id>" \
@@ -128,7 +135,7 @@ npx -y @dcprotocol/cli proxy \
   --port 8420
 ```
 
-The proxy stores its identity under `~/.dcp/proxy/<service-id>.json` and exposes a local DCP-compatible endpoint for the agent.
+The proxy stores its identity under `~/.dcp/proxy/<service-id>.json` and exposes a local DCP-compatible endpoint for the agent. For published/npm VPS installs, prefer `@dcprotocol/proxy` and `dcp-proxy` instead of the heavier human CLI path.
 
 ## Useful Flags
 

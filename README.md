@@ -14,16 +14,17 @@ DCP is an open protocol and reference implementation for letting AI agents use w
 
 ## Packages
 
-| Package | Purpose | Published |
+| Package | Purpose | npm |
 | --- | --- | --- |
-| `@dcprotocol/cli` | Human/operator CLI for vault setup, approval, trust, connect, pairing, and proxy flows | Yes |
-| `@dcprotocol/client` | Universal agent SDK for local or relay-backed access to a vault | Yes |
-| `@dcprotocol/core` | Encryption, storage, schema, budgets, trusted services, and audit primitives | Yes |
-| `@dcprotocol/server` | Local REST server and browser approval UI | Yes |
-| `@dcprotocol/mcp` | MCP server for Claude, Cursor, OpenClaw, and similar tools | Yes |
-| `@dcprotocol/relay` | Hosted or self-hosted relay for remote agents and services | Yes |
-| `@dcprotocol/relay-client` | Vault-side relay client used by the server/runtime | Yes |
-| `packages/dcp-desktop` | Desktop app source and bundle packaging | No |
+| `@dcprotocol/cli` | Human/operator CLI for vault setup, approval, trust, connect, pairing, and proxy flows | Public |
+| `@dcprotocol/client` | Universal agent SDK for local or relay-backed access to a vault | Public |
+| `@dcprotocol/core` | Encryption, storage, schema, budgets, trusted services, and audit primitives | Public |
+| `@dcprotocol/server` | Local REST server and browser approval UI | Public |
+| `@dcprotocol/mcp` | MCP server for Claude, Cursor, OpenClaw, and similar tools | Public |
+| `@dcprotocol/proxy` | Lightweight remote proxy binary for VPS agents and agent hosts | Public |
+| `@dcprotocol/relay` | Reference relay server for the default public relay or your own deployment | Public |
+| `@dcprotocol/relay-client` | Vault-side relay client used by the server/runtime | Public |
+| `packages/dcp-desktop` | Desktop app source and bundle packaging | Private |
 
 ## Ways To Run DCP
 
@@ -83,6 +84,12 @@ Good for:
 - Rust stable is required only for the desktop app
 - `better-sqlite3` may need a rebuild if you switch Node versions
 
+### Linux notes
+
+- `@dcprotocol/cli`, `@dcprotocol/core`, `@dcprotocol/server`, and `@dcprotocol/mcp` use local native/keychain components
+- on Debian/Ubuntu, install `libsecret-1-0` for keychain-backed operator flows
+- for remote VPS agents, prefer `@dcprotocol/proxy`; it is the lightweight path and does not require the local human CLI stack
+
 ## Developer Setup
 
 ### Clone and install
@@ -131,7 +138,7 @@ npm run tauri:build
 
 macOS bundle outputs:
 - `packages/dcp-desktop/src-tauri/target/release/bundle/macos/DCP Vault.app`
-- `packages/dcp-desktop/src-tauri/target/release/bundle/dmg/DCP Vault_0.1.0_aarch64.dmg`
+- `packages/dcp-desktop/src-tauri/target/release/bundle/dmg/DCP Vault_0.2.0_aarch64.dmg`
 
 ### Normal user path inside the desktop app
 
@@ -168,7 +175,7 @@ dcp add credentials.api.openai
 Start the local REST server:
 
 ```bash
-npx @dcprotocol/server
+npx -y @dcprotocol/server
 ```
 
 Open the local approval UI at `http://127.0.0.1:8420`.
@@ -226,7 +233,7 @@ const result = await dcp.signMessage({
 });
 ```
 
-Direct relay mode requires a service identity key. If you do not want the agent process to hold that identity, use `dcp proxy` on the remote machine instead.
+Direct relay mode requires a service identity key. If you do not want the agent process to hold that identity, use `@dcprotocol/proxy` on the remote machine instead.
 
 ## Remote Agent / VPS Flow
 
@@ -260,7 +267,7 @@ With the desktop app:
 Run the one-command proxy setup:
 
 ```bash
-npx -y @dcprotocol/cli proxy \
+npx -y -p @dcprotocol/proxy dcp-proxy \
   --pair "<pairing-token>" \
   --service-id "openclaw-vps" \
   --vault "<vault-id>" \
@@ -316,32 +323,43 @@ dcp connect my-service \
 
 ## Relay Server
 
-### Hosted relay
+### Default public relay
 
-The default public relay URL used throughout the repo is:
+The DCP maintainers run a default public relay at:
 
 ```text
 wss://relay.dcp.1ly.store
 ```
 
-This is the default for:
+Use it for convenience while testing or for normal desktop users.
+
+This relay is:
+- optional
+- replaceable
+- not required by the protocol
+
+You can swap it for your own relay anywhere DCP asks for a relay URL.
+
+The default public relay is used throughout the repo examples for:
 - `@dcprotocol/client`
 - desktop Connect page
 - `dcp connect`
-- `dcp proxy`
+- `@dcprotocol/proxy`
 
 ### Self-hosted relay
+
+If you do not want to depend on the public relay, run your own. The protocol does not require `relay.dcp.1ly.store`.
 
 Install or run it directly:
 
 ```bash
-npx @dcprotocol/relay
+npx -y @dcprotocol/relay
 ```
 
 Run with flags:
 
 ```bash
-npx @dcprotocol/relay --port 8421 --host 0.0.0.0 --rate-limit 60 --debug
+npx -y @dcprotocol/relay --port 8421 --host 0.0.0.0 --rate-limit 60 --debug
 ```
 
 ### Relay environment variables

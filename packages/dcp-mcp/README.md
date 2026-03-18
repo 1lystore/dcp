@@ -2,6 +2,8 @@
 
 MCP server for DCP Vault. Use this to connect AI agents (Claude, Cursor, OpenClaw, etc.) to a local DCP vault without exposing private keys.
 
+This package is for **local MCP usage**. If your agent runs on another machine, use the relay flow (`@dcprotocol/client` or DCP proxy) instead of trying to point a remote agent directly at local MCP.
+
 ## Install
 
 ```bash
@@ -11,8 +13,10 @@ npm install @dcprotocol/mcp
 ## Run
 
 ```bash
-npx @dcprotocol/mcp
+npx -y @dcprotocol/mcp
 ```
+
+The MCP server talks to the local vault. It does not expose a public network service by itself.
 
 ## Tools
 
@@ -67,8 +71,8 @@ vault_unlock({ "passphrase": "..." })
 
 To avoid typing your passphrase in chat, use the local UI:
 
-1) Start REST server: `npx @dcprotocol/server`  
-2) Open `http://127.0.0.1:8420`  
+1) Start REST server: `npx -y @dcprotocol/server`
+2) Open `http://127.0.0.1:8420`
 3) Click **Unlock MCP** (uses OS keychain; no passphrase is written to disk)
 
 ## Consent Flow

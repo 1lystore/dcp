@@ -106,4 +106,13 @@ describe('CLI', () => {
       expect(output).toContain('Show vault status');
     });
   });
+
+  describe('proxy --help', () => {
+    it('should display proxy command help', () => {
+      const output = runCli('proxy --help');
+      expect(output).toContain('Run a local proxy for remote agents');
+      expect(output).toContain('--pair');
+      expect(output).toContain('--hpke-key');
+    });
+  });
 });

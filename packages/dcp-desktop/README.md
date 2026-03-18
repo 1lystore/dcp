@@ -10,7 +10,7 @@ This package is the source for the desktop app. It is not published to npm as an
 - wallet creation and basic vault management
 - local consent and session approval UI
 - trusted service management
-- relay setup for hosted or self-hosted relays
+- relay setup for the default public relay or your own relay
 - one-command VPS pairing flow for remote agents
 - activity log and budget configuration
 - bundled local DCP server runtime for production builds
@@ -26,6 +26,8 @@ Open DCP Vault and finish onboarding.
 In **Connect**:
 - click **Use relay.dcp.1ly.store**
 - click **Save Relay**
+
+That hosted relay is the default public relay run by the DCP maintainers. It is optional; advanced users can replace it with their own relay URL.
 
 ### 3. Trust a service or create a VPS pairing token
 
@@ -47,10 +49,10 @@ Use the built-in consent screens when a request exceeds the current auto-approve
 ### Connect page
 
 - relay URL configuration
-- default hosted relay shortcut: `wss://relay.dcp.1ly.store`
+- default public relay shortcut: `wss://relay.dcp.1ly.store`
 - quick links for known services
 - pairing token generation for VPS agents
-- one-command `npx @dcprotocol/cli proxy --pair ...` output
+- one-command `npx -y -p @dcprotocol/proxy dcp-proxy --pair ...` output
 - advanced connection bundle copy
 
 ### Settings page
@@ -92,7 +94,7 @@ npm run tauri:build
 Build artifacts are created under:
 
 - `src-tauri/target/release/bundle/macos/DCP Vault.app`
-- `src-tauri/target/release/bundle/dmg/DCP Vault_0.1.0_aarch64.dmg`
+- `src-tauri/target/release/bundle/dmg/DCP Vault_0.2.0_aarch64.dmg`
 
 ## Packaging Notes
 

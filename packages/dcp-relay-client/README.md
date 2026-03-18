@@ -2,6 +2,10 @@
 
 Relay client for DCP - connects local vaults to the relay with HPKE encryption.
 
+This is the **vault-side** relay connector. It is used by the DCP server or any custom vault process that must stay connected to a relay.
+
+If you are building an agent or service that wants to call a vault, use `@dcprotocol/client` instead.
+
 ## Overview
 
 The DCP Relay Client enables local vaults to connect to the DCP Relay server, receiving and responding to encrypted requests from cloud MCP clients. It handles:
@@ -159,7 +163,7 @@ interface RelayClientConfig {
   vaultId: string;          // Vault identifier
   keyPair: HpkeKeyPair;     // HPKE keypair
   signingKeyPair: SigningKeyPair; // Ed25519 signing keypair (relay auth)
-  pairingToken?: string;    // Pairing token from 'dcp connect' flow
+  pairingToken?: string;    // Optional vault pairing token for relay registration
   autoReconnect: boolean;   // Default: true
   reconnectMinMs: number;   // Default: 1000
   reconnectMaxMs: number;   // Default: 60000
@@ -224,6 +228,12 @@ Example progression:
 2. **Ephemeral keys for forward secrecy** - Each encryption uses a fresh keypair
 3. **Memory zeroization** - Sensitive buffers are cleared after use
 4. **No key logging** - Debug mode never logs key material
+
+## Typical Use
+
+- `@dcprotocol/server` uses this package to connect a local vault to a relay
+- a custom desktop or headless vault can use it directly
+- it is not intended to be the primary package for agent developers
 
 ## License
 

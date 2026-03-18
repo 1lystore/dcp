@@ -63,5 +63,7 @@ storage.createRecord({
 ## Notes
 
 - This package assumes **local‑first** storage (SQLite + OS keychain).
+- It includes native dependencies such as `better-sqlite3`, `keytar`, and `sodium-native`.
+- On Linux, local keychain-backed usage may require system packages such as `libsecret-1-0`.
 - If you need agent access, use `@dcprotocol/mcp` or `@dcprotocol/server`.
 - See the root README for the full architecture and security model.

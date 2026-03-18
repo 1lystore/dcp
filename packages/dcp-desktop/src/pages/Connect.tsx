@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-shell';
@@ -10,12 +10,24 @@ interface DesktopCredentials {
   is_new: boolean;
 }
 
+function normalizeServiceId(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 48);
+}
+
+function shellEscape(value: string): string {
+  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
+
 export default function Connect() {
   const navigate = useNavigate();
   const [info, setInfo] = useState<RelayInfo | null>(null);
   const [knownServices, setKnownServices] = useState<KnownService[]>([]);
   const [relayUrl, setRelayUrl] = useState('');
-  const [pairingToken, setPairingToken] = useState('');
   const [vpsServiceId, setVpsServiceId] = useState('my-vps-agent');
   const [pairScopes, setPairScopes] = useState<string[]>(['sign:solana', 'budget:check']);
   const [pairBudgetDaily, setPairBudgetDaily] = useState('10');
@@ -27,8 +39,6 @@ export default function Connect() {
   const [status, setStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const defaultRelayUrl = 'wss://relay.dcp.1ly.store';
-  const keygenCommand =
-    'node -e "const c=require(\\\'crypto\\\');const {publicKey,privateKey}=c.generateKeyPairSync(\\\'ed25519\\\',{publicKeyEncoding:{type:\\\'spki\\\',format:\\\'der\\\'},privateKeyEncoding:{type:\\\'pkcs8\\\',format:\\\'der\\\'}});const pub=publicKey.slice(-32);const seed=privateKey.slice(-32);const secret=Buffer.concat([seed,pub]);console.log(\\\'PUBLIC=ed25519:\\\'+pub.toString(\\\'base64\\\'));console.log(\\\'PRIVATE=\\\'+secret.toString(\\\'base64\\\'));"';
 
   const ensureOwnerAuth = async (): Promise<boolean> => {
     try {
@@ -52,12 +62,11 @@ export default function Connect() {
     }
   };
 
-  const loadInfo = async () => {
+  const loadInfo = useCallback(async () => {
     try {
       const data = await api.getRelayInfo();
       setInfo(data);
       setRelayUrl(data.relay_url || '');
-      setPairingToken(data.pairing_token || '');
       setStatus(null);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load relay info';
@@ -68,7 +77,6 @@ export default function Connect() {
             const data = await api.getRelayInfo();
             setInfo(data);
             setRelayUrl(data.relay_url || '');
-            setPairingToken(data.pairing_token || '');
             setStatus(null);
             return;
           } catch (retryErr) {
@@ -79,12 +87,21 @@ export default function Connect() {
       }
       setStatus(message);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    loadInfo();
+    void loadInfo();
     loadKnownServices();
-  }, []);
+  }, [loadInfo]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      if (!api.hasOwnerToken()) return;
+      void loadInfo();
+    }, 5000);
+
+    return () => window.clearInterval(interval);
+  }, [loadInfo]);
 
   const loadKnownServices = async () => {
     try {
@@ -113,7 +130,7 @@ export default function Connect() {
     setLoading(true);
     setStatus(null);
     try {
-      await api.updateRelayConfig(relayUrl, pairingToken || undefined);
+      await api.updateRelayConfig(relayUrl);
       await loadInfo();
       setStatus('Relay settings saved');
     } catch (err) {
@@ -129,15 +146,19 @@ export default function Connect() {
           vault_id: info.vault_id,
           relay_url: info.relay_url,
           hpke_public_key: info.hpke_public_key,
-          pairing_token: info.pairing_token || undefined,
         },
         null,
         2
       )
     : '';
 
-  const vpsCommand = info
-    ? `npx -y @dcprotocol/cli proxy --pair "${pairResult?.token || '<pairing-token>'}" --service-id "${vpsServiceId || 'my-vps-agent'}" --vault "${info.vault_id}" --hpke-key "${info.hpke_public_key}" --relay "${info.relay_url || relayUrl || defaultRelayUrl}" --port 8420`
+  const normalizedVpsServiceId = useMemo(
+    () => normalizeServiceId(vpsServiceId) || 'my-vps-agent',
+    [vpsServiceId]
+  );
+  const hasVpsCommand = Boolean(info && pairResult?.token);
+  const vpsCommand = info && pairResult?.token
+    ? `npx -y -p @dcprotocol/proxy dcp-proxy --pair ${shellEscape(pairResult.token)} --service-id ${shellEscape(normalizedVpsServiceId)} --vault ${shellEscape(info.vault_id)} --hpke-key ${shellEscape(info.hpke_public_key)} --relay ${shellEscape(info.relay_url || relayUrl || defaultRelayUrl)} --port 8420`
     : '';
 
   const pairingScopes = useMemo(() => ([
@@ -194,8 +215,8 @@ export default function Connect() {
   };
 
   const createPairingToken = async () => {
-    if (!vpsServiceId.trim()) {
-      setStatus('Service ID is required for pairing');
+    if (!normalizedVpsServiceId) {
+      setStatus('Give this VPS a short name first');
       return;
     }
     if (pairScopes.length === 0) {
@@ -212,7 +233,7 @@ export default function Connect() {
       const ttlSeconds = Number(pairTtl);
 
       const res = await api.createPairingToken({
-        service_id: vpsServiceId.trim(),
+        service_id: normalizedVpsServiceId,
         scopes: pairScopes,
         budget: {
           daily: Number.isNaN(daily) ? 10 : daily,
@@ -222,6 +243,7 @@ export default function Connect() {
         ttl_seconds: Number.isNaN(ttlSeconds) ? 600 : ttlSeconds,
       });
 
+      setVpsServiceId(normalizedVpsServiceId);
       setPairResult({ token: res.token, expires_at: res.expires_at });
       setStatus('Pairing token generated');
     } catch (err) {
@@ -244,7 +266,7 @@ export default function Connect() {
     <div className="page">
       <div className="page-header">
         <h2>Connect</h2>
-        <p className="muted">Connect your vault to cloud tools or remote agents.</p>
+        <p className="muted">Connect your vault to trusted apps or your own remote agents.</p>
       </div>
 
       <div className="card">
@@ -260,7 +282,6 @@ export default function Connect() {
                 className="btn btn-primary"
                 onClick={() => {
                   setRelayUrl(defaultRelayUrl);
-                  setPairingToken('');
                 }}
                 disabled={loading}
               >
@@ -278,9 +299,9 @@ export default function Connect() {
           </div>
 
           <div style={{ padding: '12px', border: '1px solid var(--border)', borderRadius: 10, background: 'var(--bg-tertiary)' }}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>2) Trust a service</div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>2) Allow a service</div>
             <div className="muted small">
-              Choose a verified service or add a custom agent. Set permissions and budgets once.
+              Choose an app you trust and set its permissions once.
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
               <button className="btn btn-secondary" onClick={() => navigate('/settings')}>
@@ -295,7 +316,7 @@ export default function Connect() {
                     className="btn btn-secondary"
                     onClick={() => handleOpenConnect(service.service_id)}
                   >
-                    Connect {service.name}
+                    Set up {service.name}
                   </button>
                 ))}
               </div>
@@ -305,16 +326,19 @@ export default function Connect() {
           <div style={{ padding: '12px', border: '1px solid var(--border)', borderRadius: 10, background: 'var(--bg-tertiary)' }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>3) Run a remote agent (VPS)</div>
             <div className="muted small">
-              Generate a pairing token, then run the single command on your VPS. Your agent talks to localhost.
+              Give your VPS a simple name, choose what it can do, then copy one command. Your agent talks to localhost on the VPS.
             </div>
             <div style={{ marginTop: 10 }}>
-              <label className="label">Service ID (for this VPS)</label>
+              <label className="label">Name this VPS</label>
               <input
                 className="input"
                 value={vpsServiceId}
-                onChange={(e) => setVpsServiceId(e.target.value)}
+                onChange={(e) => setVpsServiceId(normalizeServiceId(e.target.value))}
                 placeholder="openclaw-vps"
               />
+              <div className="muted small" style={{ marginTop: 6 }}>
+                Use lowercase letters, numbers, and hyphens only.
+              </div>
             </div>
             <div style={{ marginTop: 12 }}>
               <label className="label">Permissions</label>
@@ -383,33 +407,25 @@ export default function Connect() {
               <button className="btn btn-primary" onClick={createPairingToken} disabled={pairingLoading}>
                 {pairingLoading ? 'Generating...' : 'Generate Pairing Token'}
               </button>
-              {pairResult?.token && (
-                <button className="btn btn-secondary" onClick={() => navigator.clipboard.writeText(pairResult.token)}>
-                  Copy Token
-                </button>
-              )}
             </div>
             {pairResult && (
               <div className="muted small" style={{ marginTop: 8 }}>
-                Token expires at {new Date(pairResult.expires_at).toLocaleString()}
+                Pairing token ready. It expires at {new Date(pairResult.expires_at).toLocaleString()}.
               </div>
             )}
             <textarea
               className="input"
               readOnly
               rows={6}
-              value={vpsCommand || 'Waiting for vault info...'}
+              value={hasVpsCommand ? vpsCommand : 'Generate a pairing token to get your one-line VPS setup command.'}
               style={{ marginTop: 10 }}
             />
             <div className="muted small" style={{ marginTop: 6 }}>
-              This command uses Node.js 18+ and installs the DCP CLI automatically via npx.
+              Run this once on the VPS. It uses Node.js 18+ and installs the DCP CLI automatically via npx.
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-              <button className="btn btn-secondary" onClick={copyVpsCommand} disabled={!vpsCommand}>
+              <button className="btn btn-secondary" onClick={copyVpsCommand} disabled={!hasVpsCommand}>
                 Copy VPS Command
-              </button>
-              <button className="btn btn-secondary" onClick={copyBundle} disabled={!bundle}>
-                Copy Connection Bundle
               </button>
             </div>
           </div>
@@ -420,7 +436,7 @@ export default function Connect() {
 
       {selectedService && (
         <div className="card" style={{ marginTop: 16 }}>
-          <h3>Connect {selectedService.name}</h3>
+          <h3>Set up {selectedService.name}</h3>
           <p className="muted">
             Use the links below to authenticate with {selectedService.name}, then paste the connection bundle if requested.
           </p>
@@ -459,26 +475,18 @@ export default function Connect() {
       )}
 
       <details className="card" style={{ marginTop: 16 }}>
-        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Advanced Relay Settings</summary>
+        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Custom Relay (Advanced)</summary>
         <div style={{ marginTop: 12 }}>
-          <div className="grid">
-            <div>
-              <label className="label">Relay URL</label>
-              <input
-                className="input"
-                value={relayUrl}
-                onChange={(e) => setRelayUrl(e.target.value)}
-                placeholder="wss://relay.dcprotocol.org"
-              />
-            </div>
-            <div>
-              <label className="label">Pairing Token (optional)</label>
-              <input
-                className="input"
-                value={pairingToken}
-                onChange={(e) => setPairingToken(e.target.value)}
-                placeholder="Paste token if required"
-              />
+          <div>
+            <label className="label">Relay URL</label>
+            <input
+              className="input"
+              value={relayUrl}
+              onChange={(e) => setRelayUrl(e.target.value)}
+              placeholder="wss://relay.dcprotocol.org"
+            />
+            <div className="muted small" style={{ marginTop: 6 }}>
+              Only change this if you are using your own relay.
             </div>
           </div>
           <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
@@ -491,12 +499,6 @@ export default function Connect() {
               </span>
             )}
           </div>
-        </div>
-        <div className="muted small" style={{ marginTop: 12 }}>
-          For manual service key generation (advanced):
-          <code style={{ display: 'block', marginTop: 6 }}>
-            {keygenCommand}
-          </code>
         </div>
       </details>
 

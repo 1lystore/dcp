@@ -2,6 +2,8 @@
 
 Encrypted message relay for DCP - enables cloud MCP clients to securely communicate with local vaults.
 
+This is the same relay software used for the default public relay at `wss://relay.dcp.1ly.store`. Running your own relay is fully supported.
+
 ## Overview
 
 The DCP Relay is a message bus that routes encrypted requests between cloud MCP clients (like Claude.ai, ChatGPT) and local DCP vaults. The relay never sees plaintext data - it only handles routing of opaque encrypted payloads.
@@ -29,11 +31,13 @@ npm install @dcprotocol/relay
 
 ```bash
 # Start relay on default port (8421)
-npx @dcprotocol/relay
+npx -y @dcprotocol/relay
 
 # With options
-npx @dcprotocol/relay --port 9000 --debug
+npx -y @dcprotocol/relay --port 9000 --debug
 ```
+
+If you self-host, point Desktop, `@dcprotocol/client`, `dcp connect`, or `@dcprotocol/proxy` at your own relay URL instead of the public one.
 
 ### As a Library
 
@@ -245,7 +249,7 @@ services:
   relay:
     image: node:20-alpine
     working_dir: /app
-    command: npx @dcprotocol/relay
+    command: npx -y @dcprotocol/relay
     ports:
       - "8421:8421"
     environment:
@@ -268,7 +272,7 @@ After=network.target
 [Service]
 Type=simple
 User=dcp
-ExecStart=/usr/bin/npx @dcprotocol/relay --port 8421
+ExecStart=/usr/bin/npx -y @dcprotocol/relay --port 8421
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production

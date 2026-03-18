@@ -9,6 +9,21 @@ import {
   type BudgetConfig,
 } from '../api';
 
+function normalizeServiceId(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 48);
+}
+
+function formatPublicKey(key: string): string {
+  const value = key.startsWith('ed25519:') ? key.slice('ed25519:'.length) : key;
+  if (value.length <= 20) return key;
+  return `${key.slice(0, 20)}...${key.slice(-10)}`;
+}
+
 export default function Settings() {
   const navigate = useNavigate();
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -256,7 +271,7 @@ export default function Settings() {
     setServiceForm({
       service_id: service.service_id,
       name: service.name,
-      public_key: '',
+      public_key: service.public_key,
       scopes: service.scopes.join(', '),
       budget_daily: String(service.budget.daily),
       budget_currency: service.budget.currency,
@@ -304,6 +319,8 @@ export default function Settings() {
         throw new Error('At least one scope is required');
       }
 
+      const isVerifiedService = editingService ? serviceForm.verified : selectedKnownService !== 'custom';
+
       const payload = {
         service_id: serviceForm.service_id.trim(),
         name: serviceForm.name.trim() || serviceForm.service_id.trim(),
@@ -315,7 +332,7 @@ export default function Settings() {
           auto_approve_under: Number.isNaN(autoApprove) ? 0 : autoApprove,
         },
         enabled: serviceForm.enabled,
-        verified: serviceForm.verified,
+        verified: isVerifiedService,
       };
 
       if (editingService) {
@@ -485,7 +502,7 @@ export default function Settings() {
         <div className="card-header">
           <div>
             <h2 className="card-title">Trusted Services</h2>
-            <p className="card-subtitle">Grant remote agents access to your vault</p>
+            <p className="card-subtitle">Choose which apps and agents are allowed to use your vault</p>
           </div>
           <button className="btn btn-secondary" onClick={loadServices}>
             Refresh
@@ -503,7 +520,7 @@ export default function Settings() {
 
         <div style={{ marginBottom: '20px' }}>
           <h3 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px' }}>
-            {editingService ? `Edit ${editingService}` : 'Add Trusted Service'}
+            {editingService ? `Edit ${editingService}` : 'Add App or Agent'}
           </h3>
 
           {knownServices.length > 0 && !editingService && (
@@ -535,9 +552,12 @@ export default function Settings() {
               className="input"
               placeholder="1ly"
               value={serviceForm.service_id}
-              disabled={!!editingService}
-              onChange={(e) => setServiceForm({ ...serviceForm, service_id: e.target.value })}
+              disabled={!!editingService || selectedKnownService !== 'custom'}
+              onChange={(e) => setServiceForm({ ...serviceForm, service_id: normalizeServiceId(e.target.value) })}
             />
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
+              Use lowercase letters, numbers, and hyphens only.
+            </div>
           </div>
 
           <div className="form-group">
@@ -556,11 +576,22 @@ export default function Settings() {
               className="input"
               placeholder="ed25519:..."
               value={serviceForm.public_key}
+              disabled={selectedKnownService !== 'custom' || (!!editingService && serviceForm.verified)}
               onChange={(e) => setServiceForm({ ...serviceForm, public_key: e.target.value })}
             />
-            {editingService && (
+            {serviceForm.public_key && (
               <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                Leave blank to keep the current key.
+                Current key: <code>{formatPublicKey(serviceForm.public_key)}</code>
+              </div>
+            )}
+            {selectedKnownService !== 'custom' && (
+              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
+                Verified services use the official public key from DCP.
+              </div>
+            )}
+            {!!editingService && serviceForm.verified && (
+              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
+                Verified service keys are locked here. Use a custom service if you need a manual override.
               </div>
             )}
           </div>
@@ -612,7 +643,7 @@ export default function Settings() {
               ))}
             </div>
             <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '8px' }}>
-              Advanced scopes (optional)
+              Advanced scopes (only if you know the exact scope names)
             </div>
             <input
               className="input"
@@ -667,14 +698,9 @@ export default function Settings() {
               />
               Enabled
             </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
-              <input
-                type="checkbox"
-                checked={serviceForm.verified}
-                onChange={(e) => setServiceForm({ ...serviceForm, verified: e.target.checked })}
-              />
-              Verified
-            </label>
+            <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+              {serviceForm.verified ? 'Verified service' : 'Custom service'}
+            </span>
           </div>
 
           <div style={{ display: 'flex', gap: '10px' }}>
@@ -683,7 +709,7 @@ export default function Settings() {
               onClick={handleSaveService}
               disabled={serviceSaving}
             >
-              {serviceSaving ? 'Saving...' : editingService ? 'Update Service' : 'Trust Service'}
+              {serviceSaving ? 'Saving...' : editingService ? 'Update Service' : 'Allow Service'}
             </button>
             {editingService && (
               <button

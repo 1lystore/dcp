@@ -6,8 +6,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## Unreleased
 
+## 0.2.0 — 2026-03-19
+
 ### Added
 - `@dcprotocol/client`, a universal SDK for local or relay-backed vault access.
+- `@dcprotocol/proxy`, a lightweight remote proxy package and `dcp-proxy` binary for VPS agents.
 - CLI support for trusted services with `dcp trust`.
 - CLI support for service connection handoff with `dcp connect`.
 - CLI support for short-lived proxy pairing tokens with `dcp pairing start`.

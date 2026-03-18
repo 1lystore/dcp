@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/server",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "REST API server for DCP Vault - localhost:8420",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -46,8 +46,8 @@
   "author": "DCP Protocol",
   "license": "Apache-2.0",
   "dependencies": {
-    "@dcprotocol/core": "^0.1.0",
-    "@dcprotocol/relay-client": "^0.1.1",
+    "@dcprotocol/core": "^0.2.0",
+    "@dcprotocol/relay-client": "^0.2.0",
     "@fastify/cors": "^10.0.2",
     "fastify": "^5.2.1",
     "keytar": "^7.9.0",

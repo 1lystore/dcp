@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/mcp",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "MCP Server for DCP Vault - Agent interface for secure wallet signing and data access",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -48,9 +48,12 @@
   "author": "DCP Protocol",
   "license": "Apache-2.0",
   "dependencies": {
-    "@dcprotocol/core": "^0.1.0",
+    "@dcprotocol/core": "^0.2.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "keytar": "^7.9.0"
+    "@hono/node-server": "^1.19.11",
+    "keytar": "^7.9.0",
+    "express-rate-limit": "^8.3.1",
+    "hono": "^4.12.8"
   },
   "devDependencies": {
     "vite": "^6.0.0",

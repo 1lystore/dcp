@@ -18,7 +18,9 @@ Use `@dcprotocol/client` when:
 - you need DCP from a custom framework or app
 - you want one SDK for address lookup, signing, data reads, writes, and budget checks
 
-Do **not** use direct relay mode if you do not want the agent process to hold a service identity key. In that case, run `dcp proxy` on the remote machine and let the agent talk to localhost.
+Do **not** use direct relay mode if you do not want the agent process to hold a service identity key. In that case, run `dcp-proxy` from `@dcprotocol/proxy` on the remote machine and let the agent talk to localhost.
+
+Examples below use the default public relay `wss://relay.dcp.1ly.store`. You can replace that with any compatible self-hosted relay.
 
 ## Quick Start
 
@@ -67,7 +69,7 @@ const result = await dcp.signTx({
 
 ### Pairing a remote proxy
 
-This is used by `dcp proxy --pair ...` and by any infrastructure that needs to turn a pairing token into a trusted proxy identity.
+This is used by `dcp-proxy --pair ...` and by any infrastructure that needs to turn a pairing token into a trusted proxy identity.
 
 ```ts
 import { DcpClient, generateSigningKeyPair } from '@dcprotocol/client';
@@ -177,7 +179,7 @@ try {
 
 - Critical secrets never leave the vault.
 - Relay mode authenticates the caller with a service identity key.
-- If you want remote agents to avoid holding that key directly, run `dcp proxy` and point the agent to `http://127.0.0.1:<port>` instead.
+- If you want remote agents to avoid holding that key directly, run `dcp-proxy` from `@dcprotocol/proxy` and point the agent to `http://127.0.0.1:<port>` instead.
 - Call `close()` when your process shuts down.
 
 ## Requirements
