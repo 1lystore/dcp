@@ -283,7 +283,32 @@ export DCP_URL=http://127.0.0.1:8420
 export DCP_MODE=local
 ```
 
-That keeps the agent logic simple. The proxy handles relay transport and service identity.
+Agents should start with:
+
+```bash
+curl http://127.0.0.1:8420/v1/capabilities
+```
+
+That returns the supported proxy routes, operations, example scopes, and capability notes.
+
+### Agent bootstrap
+
+Keep bootstrap simple:
+
+1. Give the agent a single base URL:
+   - `DCP_URL=http://127.0.0.1:8420`
+2. The agent calls:
+   - `GET /v1/capabilities`
+3. The agent uses the returned operations and routes.
+
+Example discovery response includes:
+
+- address lookup
+- budget checks
+- reads such as `identity.email` and `credentials.api.openai`
+- signing routes for normal messages, typed data, and x402
+
+The proxy handles relay transport and service identity. The agent only needs the local proxy URL.
 
 ## Service / Marketplace Flow
 

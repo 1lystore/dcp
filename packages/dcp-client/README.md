@@ -180,6 +180,7 @@ try {
 - Critical secrets never leave the vault.
 - Relay mode authenticates the caller with a service identity key.
 - If you want remote agents to avoid holding that key directly, run `dcp-proxy` from `@dcprotocol/proxy` and point the agent to `http://127.0.0.1:<port>` instead.
+- In proxy mode, agents should first call `GET /v1/capabilities` on the proxy URL to discover supported operations and example scopes.
 - Call `close()` when your process shuts down.
 
 ## Requirements

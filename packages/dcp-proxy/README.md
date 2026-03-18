@@ -50,8 +50,25 @@ export DCP_MODE=local
 
 ## Endpoints
 
-The proxy exposes a subset of the local DCP REST surface:
+Agents should start with `GET /v1/capabilities` to discover what the proxy supports.
 
+Minimal agent bootstrap:
+
+1. set `DCP_URL=http://127.0.0.1:8420`
+2. call `GET $DCP_URL/v1/capabilities`
+3. use the returned routes and operation names
+
+Example read call after discovery:
+
+```bash
+curl -X POST http://127.0.0.1:8420/v1/vault/read \
+  -H "Content-Type: application/json" \
+  -d '{"scope":"identity.email"}'
+```
+
+The proxy exposes this local HTTP surface:
+
+- `GET /v1/capabilities`
 - `GET /health`
 - `GET /address/:chain`
 - `GET /budget/check`
@@ -67,6 +84,7 @@ The proxy exposes a subset of the local DCP REST surface:
 - Proxy identity is stored at `~/.dcp/proxy/<service-id>.json`
 - Vault secrets do not move to the VPS
 - The relay remains transport-only
+- Read and write operations use vault scopes such as `identity.email` or `credentials.api.openai`
 
 ## Related Docs
 

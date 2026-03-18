@@ -53,14 +53,14 @@ const DEFAULT_VAULT_DIR =
 /** Keychain service name */
 const KEYCHAIN_SERVICE = 'dcp';
 
-/** Keychain account for master key */
-const KEYCHAIN_ACCOUNT = 'master-key';
-
-/** Keychain account for salt */
-const KEYCHAIN_SALT_ACCOUNT = 'master-salt';
+/** Keychain account prefix for vault-scoped master keys */
+const KEYCHAIN_ACCOUNT_PREFIX = 'master-key:';
 
 /** File permissions for vault.key (owner read/write only) */
 const KEY_FILE_MODE = 0o600;
+
+/** Non-secret marker used to distinguish a provisioned vault from bare schema tables */
+const INIT_MARKER_FILE = 'vault.initialized';
 
 function generateId(): string {
   if (typeof randomUUID === 'function') {
@@ -332,6 +332,7 @@ export class VaultStorage {
       if (!stored) {
         this.storeMasterKeyInFile(ciphertext, nonce, salt);
       }
+      this.writeInitializationMarker();
 
       this.masterKey = masterKey;
       return masterKey;
@@ -365,6 +366,7 @@ export class VaultStorage {
       if (!stored) {
         this.storeMasterKeyInFile(ciphertext, nonce, salt);
       }
+      this.writeInitializationMarker();
 
       this.masterKey = masterKey;
     } finally {
@@ -410,6 +412,7 @@ export class VaultStorage {
       // If passphrase is wrong, this will throw (authentication tag mismatch)
       const masterKey = tryDecrypt(keyData);
       this.masterKey = masterKey;
+      this.writeInitializationMarker();
       return masterKey;
     } catch (error) {
       // If keychain entry is stale but file exists, try file before failing.
@@ -419,6 +422,7 @@ export class VaultStorage {
           try {
             const masterKey = tryDecrypt(fileData);
             this.masterKey = masterKey;
+            this.writeInitializationMarker();
             // Refresh keychain to avoid future mismatches
             await this.storeMasterKeyInKeychain(
               fileData.encryptedKey,
@@ -498,7 +502,7 @@ export class VaultStorage {
         version: '2.0', // Version 2.0 = AEAD encryption
       });
 
-      await keytar.setPassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, data);
+      await keytar.setPassword(KEYCHAIN_SERVICE, this.getKeychainAccount(), data);
       return true;
     } catch {
       // Keychain not available (CI, headless system, etc.)
@@ -516,7 +520,7 @@ export class VaultStorage {
     salt: Buffer;
   } | null> {
     try {
-      const dataStr = await keytar.getPassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+      const dataStr = await keytar.getPassword(KEYCHAIN_SERVICE, this.getKeychainAccount());
 
       if (!dataStr) {
         return null;
@@ -553,6 +557,69 @@ export class VaultStorage {
     };
 
     fs.writeFileSync(keyPath, JSON.stringify(data, null, 2), { mode: KEY_FILE_MODE });
+  }
+
+  private getInitializationMarkerPath(): string {
+    return path.join(this.vaultDir, INIT_MARKER_FILE);
+  }
+
+  private getKeychainAccount(): string {
+    const normalizedVaultDir = path.resolve(this.vaultDir);
+    const vaultHash = createHash('sha256')
+      .update(normalizedVaultDir)
+      .digest('hex')
+      .slice(0, 32);
+    return `${KEYCHAIN_ACCOUNT_PREFIX}${vaultHash}`;
+  }
+
+  private writeInitializationMarker(): void {
+    fs.writeFileSync(
+      this.getInitializationMarkerPath(),
+      JSON.stringify({ initialized: true, version: '1.0' }, null, 2),
+      { mode: KEY_FILE_MODE }
+    );
+  }
+
+  private hasInitializationMarker(): boolean {
+    return fs.existsSync(this.getInitializationMarkerPath());
+  }
+
+  private hasLocalInitializationArtifacts(): boolean {
+    return this.hasInitializationMarker() || this.loadMasterKeyFromFile() !== null;
+  }
+
+  private hasVaultRecords(): boolean {
+    const stmt = this.db.prepare(`
+      SELECT COUNT(*) as count FROM vault_records
+    `);
+    const row = stmt.get() as { count: number };
+    return row.count > 0;
+  }
+
+  async hasStoredMasterKey(): Promise<boolean> {
+    if (this.hasLocalInitializationArtifacts()) {
+      return true;
+    }
+
+    const keyData = await this.loadMasterKeyFromKeychain();
+    if (keyData && this.hasVaultRecords()) {
+      this.writeInitializationMarker();
+      return true;
+    }
+
+    return false;
+  }
+
+  async isProvisioned(): Promise<boolean> {
+    const dbPath = path.join(this.vaultDir, 'vault.db');
+    if (!fs.existsSync(dbPath)) return false;
+
+    const stmt = this.db.prepare(`
+      SELECT COUNT(*) as count FROM sqlite_master
+      WHERE type='table' AND name='vault_records'
+    `);
+    const row = stmt.get() as { count: number };
+    return row.count > 0 && (await this.hasStoredMasterKey());
   }
 
   /**

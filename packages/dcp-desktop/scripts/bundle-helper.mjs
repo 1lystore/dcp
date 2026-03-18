@@ -9,9 +9,11 @@ import { build } from 'esbuild';
 import { execFileSync } from 'child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, rmSync } from 'fs';
 import { dirname, join, relative } from 'path';
+import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 const outDir = join(__dirname, '..', 'src-tauri', 'resources');
 const helperOutFile = join(outDir, 'dcp-helper-bundle.cjs');
 const serverOutFile = join(outDir, 'dcp-server-bundle.cjs');
@@ -39,6 +41,11 @@ const EXTERNAL_MODULES = [
   'bindings',
   'file-uri-to-path',
 ];
+
+// Root runtime modules for the helper bundle. Their full dependency closure
+// must be copied into resources/node_modules because the packaged app no longer
+// resolves against the monorepo's node_modules.
+const HELPER_RUNTIME_ROOTS = [...EXTERNAL_MODULES];
 
 // The helper source code
 const helperSource = `
@@ -91,7 +98,7 @@ async function main() {
   if (action === 'init') {
     if (passphrase.length < 8) fail('Passphrase must be at least 8 characters');
     const storage = new VaultStorage(vaultDir);
-    if (storage.isInitialized()) fail('Vault already initialized');
+    if (await storage.isProvisioned()) fail('Vault already initialized');
 
     const recoveryPhrase = generateRecoveryMnemonic();
     const masterKey = deriveKeyFromMnemonic(recoveryPhrase);
@@ -111,7 +118,7 @@ async function main() {
   if (action === 'create_wallets') {
     if (passphrase.length < 8) fail('Passphrase must be at least 8 characters');
     const storage = new VaultStorage(vaultDir);
-    if (!storage.isInitialized()) fail('Vault not initialized');
+    if (!(await storage.isProvisioned())) fail('Vault not initialized');
 
     try {
       await storage.unlock(passphrase);
@@ -230,6 +237,60 @@ function stageServerRuntime() {
   console.log(`[bundle-helper] Server runtime staged in ${serverRuntimeDir}`);
 }
 
+function resolvePackageDir(name) {
+  const entry = require.resolve(name, { paths: [monorepoRoot] });
+  let cursor = dirname(entry);
+
+  while (cursor !== dirname(cursor)) {
+    const packageJsonPath = join(cursor, 'package.json');
+    if (existsSync(packageJsonPath)) {
+      const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+      if (pkg.name === name) {
+        return cursor;
+      }
+    }
+    cursor = dirname(cursor);
+  }
+
+  return null;
+}
+
+function collectRuntimeDependencyClosure(rootModules) {
+  const queue = [...rootModules];
+  const seen = new Set();
+  const ordered = [];
+
+  while (queue.length > 0) {
+    const name = queue.shift();
+    if (!name || seen.has(name)) {
+      continue;
+    }
+
+    const packageDir = resolvePackageDir(name);
+    if (!packageDir) {
+      console.warn(`[bundle-helper] WARNING: Runtime dependency not found: ${name}`);
+      continue;
+    }
+
+    seen.add(name);
+    ordered.push({ name, packageDir });
+
+    const packageJson = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'));
+    const runtimeDeps = {
+      ...(packageJson.dependencies || {}),
+      ...(packageJson.optionalDependencies || {}),
+    };
+
+    for (const depName of Object.keys(runtimeDeps)) {
+      if (!seen.has(depName)) {
+        queue.push(depName);
+      }
+    }
+  }
+
+  return ordered;
+}
+
 console.log('[bundle-helper] Bundling DCP helper with @dcprotocol/core...');
 console.log('[bundle-helper] Native modules will be copied separately:', NATIVE_MODULES.join(', '));
 
@@ -269,39 +330,23 @@ try {
 
   console.log(`[bundle-helper] Server bundle created: ${serverOutFile}`);
 
-  // Step 2: Copy native modules to resources/node_modules
+  // Step 2: Copy the full helper runtime dependency tree to resources/node_modules.
+  // The onboarding helper uses native modules (sodium-native, better-sqlite3,
+  // keytar) plus their transitive JS dependencies. Missing any of those causes
+  // packaged desktop startup/create-vault flows to fail at runtime.
   if (existsSync(nodeModulesOut)) {
     rmSync(nodeModulesOut, { recursive: true });
   }
   mkdirSync(nodeModulesOut, { recursive: true });
 
-  for (const mod of NATIVE_MODULES) {
-    const srcPath = join(monorepoNodeModules, mod);
-    const destPath = join(nodeModulesOut, mod);
-
-    if (existsSync(srcPath)) {
-      console.log(`[bundle-helper] Copying native module: ${mod}`);
-      cpSync(srcPath, destPath, { recursive: true });
-    } else {
-      console.warn(`[bundle-helper] WARNING: Native module not found: ${mod}`);
-    }
+  for (const { name, packageDir } of collectRuntimeDependencyClosure(HELPER_RUNTIME_ROOTS)) {
+    const destPath = join(nodeModulesOut, ...name.split('/'));
+    console.log(`[bundle-helper] Copying helper runtime module: ${name}`);
+    mkdirSync(dirname(destPath), { recursive: true });
+    cpSync(packageDir, destPath, { recursive: true, dereference: true });
   }
 
-  // Step 3: Also copy bindings (for better-sqlite3)
-  const bindingsPath = join(monorepoNodeModules, 'bindings');
-  if (existsSync(bindingsPath)) {
-    console.log('[bundle-helper] Copying bindings module');
-    cpSync(bindingsPath, join(nodeModulesOut, 'bindings'), { recursive: true });
-  }
-
-  // Step 4: Copy file-uri-to-path (dependency of bindings)
-  const fileUriPath = join(monorepoNodeModules, 'file-uri-to-path');
-  if (existsSync(fileUriPath)) {
-    console.log('[bundle-helper] Copying file-uri-to-path module');
-    cpSync(fileUriPath, join(nodeModulesOut, 'file-uri-to-path'), { recursive: true });
-  }
-
-  // Step 5: Stage an exact runtime copy of the server dependency tree.
+  // Step 3: Stage an exact runtime copy of the server dependency tree.
   stageServerRuntime();
 
   console.log(`[bundle-helper] SUCCESS: Bundle and native modules ready in ${outDir}`);

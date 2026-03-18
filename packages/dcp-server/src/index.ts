@@ -435,9 +435,10 @@ async function buildServer(): Promise<FastifyInstance> {
   // ============================================================================
 
   server.get('/health', async () => {
+    const initialized = await storage.isProvisioned();
     return {
       status: 'ok',
-      initialized: storage.isInitialized(),
+      initialized,
       unlocked: storage.isUnlocked(),
       version: PACKAGE_VERSION,
     };
@@ -818,7 +819,7 @@ async function buildServer(): Promise<FastifyInstance> {
       await storage.unlock(body.passphrase);
 
       // Start relay client if not already connected (e.g., first unlock after init)
-      if (!relayConnected && storage.isInitialized()) {
+      if (!relayConnected && (await storage.isProvisioned())) {
         startRelayClient(server).catch((err) => {
           server.log.error(err, 'Relay client failed to start after unlock');
         });
@@ -3200,7 +3201,7 @@ async function main() {
     server.log.info(`DCP Vault REST Server running at http://${HOST}:${port}`);
     server.log.info('SECURITY: Bound to localhost only');
     // Only start relay client if vault is initialized
-    if (storage.isInitialized()) {
+    if (await storage.isProvisioned()) {
       try {
         await startRelayClient(server);
         if (relayConnected) {

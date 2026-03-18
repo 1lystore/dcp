@@ -421,7 +421,7 @@ export default function Connect() {
               style={{ marginTop: 10 }}
             />
             <div className="muted small" style={{ marginTop: 6 }}>
-              Run this once on the VPS. It uses Node.js 18+ and installs the DCP CLI automatically via npx.
+              Run this once on the VPS. It uses Node.js 18+ and installs the DCP proxy automatically via npx.
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
               <button className="btn btn-secondary" onClick={copyVpsCommand} disabled={!hasVpsCommand}>

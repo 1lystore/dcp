@@ -34,6 +34,96 @@ interface ProxyConfig {
   agentName: string;
 }
 
+interface CapabilityRoute {
+  method: 'GET' | 'POST';
+  path: string;
+  operation: string;
+  description: string;
+}
+
+function buildCapabilities(config: ProxyConfig): Record<string, unknown> {
+  const routes: CapabilityRoute[] = [
+    {
+      method: 'GET',
+      path: '/health',
+      operation: 'health_check',
+      description: 'Check whether the proxy is running',
+    },
+    {
+      method: 'GET',
+      path: '/address/:chain',
+      operation: 'get_address',
+      description: 'Get a wallet address for solana, base, or ethereum',
+    },
+    {
+      method: 'GET',
+      path: '/budget/check',
+      operation: 'budget_check',
+      description: 'Check whether an amount is within configured budget limits',
+    },
+    {
+      method: 'POST',
+      path: '/v1/vault/read',
+      operation: 'vault_read',
+      description: 'Read stored data such as identity or API credentials',
+    },
+    {
+      method: 'POST',
+      path: '/v1/vault/write',
+      operation: 'vault_write',
+      description: 'Write structured data into the vault',
+    },
+    {
+      method: 'POST',
+      path: '/v1/vault/sign',
+      operation: 'vault_sign_tx',
+      description: 'Sign a transaction payload',
+    },
+    {
+      method: 'POST',
+      path: '/v1/vault/sign_message',
+      operation: 'vault_sign_message',
+      description: 'Sign a plain message',
+    },
+    {
+      method: 'POST',
+      path: '/v1/vault/sign_typed_data',
+      operation: 'vault_sign_typed_data',
+      description: 'Sign EIP-712 typed data',
+    },
+    {
+      method: 'POST',
+      path: '/v1/vault/sign_x402',
+      operation: 'vault_sign_x402',
+      description: 'Sign an x402 payment payload',
+    },
+  ];
+
+  return {
+    name: 'dcp-proxy',
+    version: getPackageVersion(),
+    mode: 'proxy',
+    relay_url: config.relayUrl,
+    local_url: `http://127.0.0.1:${config.localPort}`,
+    service_id: config.serviceId,
+    default_agent_name: config.agentName,
+    chains: ['solana', 'base', 'ethereum'],
+    routes,
+    scope_examples: [
+      'identity.email',
+      'identity.name',
+      'credentials.api.openai',
+      'credentials.api.github',
+      'address.shipping.primary',
+    ],
+    notes: [
+      'Authorization still depends on trusted-service scopes and budgets configured in the vault.',
+      'Read and write operations use POST /v1/vault/read and POST /v1/vault/write with a scope string.',
+      'Sensitive operations may return requires_consent until the desktop user approves them.',
+    ],
+  };
+}
+
 function success(message: string): void {
   console.log(chalk.green('✓'), message);
 }
@@ -321,6 +411,11 @@ class DcpProxy {
           version: 'proxy',
           mode: 'proxy',
         });
+        return;
+      }
+
+      if (method === 'GET' && (reqPath === '/v1/capabilities' || reqPath === '/capabilities')) {
+        this.sendJson(res, 200, buildCapabilities(this.config));
         return;
       }
 
