@@ -3,7 +3,7 @@ kill_signal = "SIGINT"
 kill_timeout = "5s"
 
 [build]
-  dockerfile = "Dockerfile.relay"
+  dockerfile = "Dockerfile"
 
 [env]
   NODE_ENV = "production"
