@@ -1,103 +1,181 @@
 # DCP — Delegated Custody Protocol
 
-**Your keys. Your data. Agents use them — never see them.**
+**Your keys and sensitive data stay in your vault. Agents get results, not possession.**
 
-DCP is an open protocol for secure agent operations. Store your wallet keys, personal data, and sensitive credentials in an encrypted local vault. AI agents request access, you consent, the vault executes internally. Agents get results — never raw secrets.
+DCP is an open protocol and reference implementation for letting AI agents use wallets, API keys, identity data, addresses, and other sensitive records without taking custody of the raw secrets.
 
-## The Problem
+## What DCP Gives You
 
-AI agents are doing more every day — booking flights, buying groceries, trading crypto, managing subscriptions, filing paperwork. To do any of this, they need access to your most sensitive data.
+- A local encrypted vault for wallets, credentials, identity, addresses, and preferences
+- Local MCP and REST interfaces for same-machine agents
+- Relay support for remote services and VPS agents
+- Consent, sessions, budgets, and audit logs around every access path
+- A desktop app for normal users and a CLI/SDK path for developers
 
+## Packages
+
+| Package | Purpose | Published |
+| --- | --- | --- |
+| `@dcprotocol/cli` | Human/operator CLI for vault setup, approval, trust, connect, pairing, and proxy flows | Yes |
+| `@dcprotocol/client` | Universal agent SDK for local or relay-backed access to a vault | Yes |
+| `@dcprotocol/core` | Encryption, storage, schema, budgets, trusted services, and audit primitives | Yes |
+| `@dcprotocol/server` | Local REST server and browser approval UI | Yes |
+| `@dcprotocol/mcp` | MCP server for Claude, Cursor, OpenClaw, and similar tools | Yes |
+| `@dcprotocol/relay` | Hosted or self-hosted relay for remote agents and services | Yes |
+| `@dcprotocol/relay-client` | Vault-side relay client used by the server/runtime | Yes |
+| `packages/dcp-desktop` | Desktop app source and bundle packaging | No |
+
+## Ways To Run DCP
+
+### 1. Desktop app
+
+Use this if you want the easiest local human-operated vault.
+
+Good for:
+- normal users
+- local desktop approvals
+- hosted relay setup
+- generating a single VPS proxy command
+
+### 2. CLI + local REST server
+
+Use this if you want an HTTP interface for local tools or browser-based approvals.
+
+Good for:
+- local development
+- non-MCP agent runtimes
+- headless environments
+- SSH-managed vaults
+
+### 3. CLI + MCP server
+
+Use this when your agent runtime supports MCP.
+
+Good for:
+- Claude Desktop
+- Cursor
+- OpenClaw
+- any MCP-compatible host
+
+### 4. `@dcprotocol/client`
+
+Use this when you want to integrate DCP directly into code.
+
+Good for:
+- custom apps
+- non-MCP agents
+- direct local REST access
+- direct relay-backed service integrations
+
+### 5. VPS proxy + relay
+
+Use this when your agent runs on a different machine from the vault, but you still want the agent to talk to a simple localhost-style DCP endpoint.
+
+Good for:
+- remote VPS agents
+- OpenClaw on a server
+- agent fleets that should not speak relay directly
+
+## Prerequisites
+
+- Node.js `>=18 <23`
+- Node 20 LTS is the safest default for native module stability
+- Rust stable is required only for the desktop app
+- `better-sqlite3` may need a rebuild if you switch Node versions
+
+## Developer Setup
+
+### Clone and install
+
+```bash
+git clone https://github.com/1lystore/dcp.git
+cd dcp
+npm install
 ```
-Your travel agent needs your passport number.
-Your shopping agent needs your shipping address and sizes.
-Your trading agent needs your wallet private key.
-Your financial agent needs to make payments on your behalf.
-Your health agent needs your allergies and prescriptions.
 
-Today, you have two options:
+### Build everything
 
-  1. Re-enter everything, every time, for every agent.
-     "What size? Ship where? Passport number? Which wallet?"
-     Same questions. Every agent. Forever.
-
-  2. Hand your secrets directly to agents.
-     Private keys in .env files. Passwords in memory.
-     One prompt injection = everything leaks.
-
-Both options are broken.
+```bash
+npm run build
 ```
 
-DCP is the third option: store everything once in an encrypted vault. Agents request access, you consent, the vault handles it. Sensitive data like addresses flows with permission. Critical data like private keys never leaves — the vault executes operations internally and returns only the result.
+### Run the full test suite
 
-```
-Without DCP:
-  You: "Buy me running shoes"
-  Agent: "What size? Ship where? Max budget? Brand?"
-  [4 questions before anything happens]
-
-  You: "Swap 1 SOL for USDC"
-  Agent holds your private key in plaintext memory.
-  Agent gets prompt-injected. Wallet drained.
-
-With DCP:
-  You: "Buy me running shoes"
-  Agent reads vault -> Size 11, home address, max $150, Nike
-  Agent: "Found Nike Pegasus for $129. Buy?"
-  You: "Yes"
-
-  You: "Swap 1 SOL for USDC"
-  Agent sends unsigned tx -> vault signs internally -> returns signed tx
-  Agent never sees the private key. Nothing to leak.
+```bash
+npm test
 ```
 
-## Quickstart (Local OSS)
+### If native modules break
 
-All npm packages are published under the **@dcprotocol** scope.  
-Do **not** install the unscoped package name `dcp`.
+```bash
+npm rebuild better-sqlite3
+```
 
-### 1. Install
+## Normal User Flow
+
+### Desktop app from source
+
+```bash
+npm install
+npm -w @dcprotocol/server run build
+cd packages/dcp-desktop
+npm run tauri:dev
+```
+
+### Build a distributable app bundle
+
+```bash
+cd packages/dcp-desktop
+npm run tauri:build
+```
+
+macOS bundle outputs:
+- `packages/dcp-desktop/src-tauri/target/release/bundle/macos/DCP Vault.app`
+- `packages/dcp-desktop/src-tauri/target/release/bundle/dmg/DCP Vault_0.1.0_aarch64.dmg`
+
+### Normal user path inside the desktop app
+
+1. Create or unlock the vault
+2. Create one or more wallets
+3. Open **Connect**
+4. Set relay to `wss://relay.dcp.1ly.store` or your own relay
+5. Open **Settings** to trust a service or configure budgets
+6. Approve requests in the built-in consent UI
+
+## Developer Flow: CLI + Local REST
+
+Install the published CLI:
 
 ```bash
 npm install -g @dcprotocol/cli
 ```
 
-### 2. Initialize your vault
+Initialize a vault and create a wallet:
 
 ```bash
 dcp init
-```
-
-**Important:** your 12‑word recovery phrase is shown **once** and is **never stored**. Save it.
-
-### 3. Create a wallet (choose one)
-
-```bash
 dcp create-wallet --chain solana
-# or
-dcp create-wallet --chain ethereum
-# or
-dcp create-wallet --chain base
 ```
 
-### 4. Add personal data (optional)
+Add some records:
 
 ```bash
 dcp add address.home
 dcp add identity.email
-dcp add preferences.sizes
+dcp add credentials.api.openai
 ```
 
-### 5. Start the REST server (optional)
+Start the local REST server:
 
 ```bash
 npx @dcprotocol/server
 ```
 
-Open `http://127.0.0.1:8420` to approve/deny requests in the browser.
-The UI also includes an **Unlock MCP** button to unlock the MCP process without typing your passphrase in Claude.
+Open the local approval UI at `http://127.0.0.1:8420`.
 
-### 6. Connect an MCP agent
+## Developer Flow: MCP
+
+Add the DCP MCP server to your MCP client:
 
 ```json
 {
@@ -110,291 +188,396 @@ The UI also includes an **Unlock MCP** button to unlock the MCP process without 
 }
 ```
 
-If the vault is locked, call `vault_unlock` once from the agent before reads/signing.
-By default MCP uses **non‑TTY** consent: it creates a pending request and waits until you approve in the UI or CLI.  
-To allow interactive terminal prompts, set `DCP_MCP_ALLOW_TTY=1`.
-
-If you use multiple MCP processes, set a stable agent name to keep sessions consistent:
+Recommended environment for stable session reuse:
 
 ```bash
 MCP_AGENT_NAME=claude-desktop
 ```
 
-## Environment Variables
+If the vault is locked, call `vault_unlock` once before reads or signing.
+
+## Developer Flow: `@dcprotocol/client`
+
+Install:
+
+```bash
+npm install @dcprotocol/client
+```
+
+Local-first example:
+
+```ts
+import { DcpClient } from '@dcprotocol/client';
+
+const dcp = new DcpClient({
+  mode: 'auto',
+  agentName: 'my-agent',
+  vaultId: process.env.DCP_VAULT_ID,
+  relayUrl: process.env.DCP_RELAY_URL,
+  vaultHpkePublicKey: process.env.DCP_VAULT_HPKE_PUBLIC_KEY,
+  serviceId: process.env.DCP_SERVICE_ID,
+  servicePrivateKey: process.env.DCP_SERVICE_PRIVATE_KEY,
+});
+
+const { address } = await dcp.getAddress('solana');
+const result = await dcp.signMessage({
+  chain: 'solana',
+  message: 'hello from DCP',
+});
+```
+
+Direct relay mode requires a service identity key. If you do not want the agent process to hold that identity, use `dcp proxy` on the remote machine instead.
+
+## Remote Agent / VPS Flow
+
+This is the simplest operator flow for a remote agent that must use your local DCP vault.
+
+### Vault side
+
+1. Run the vault locally via Desktop or CLI/server
+2. Connect it to a relay
+3. Generate a pairing token with scopes and budgets
+
+With the CLI:
+
+```bash
+dcp pairing start openclaw-vps \
+  --scopes sign:solana,budget:check \
+  --budget 10usdc/day \
+  --auto-approve-under 1usdc
+```
+
+With the desktop app:
+- open **Connect**
+- click **Use relay.dcp.1ly.store**
+- click **Save Relay**
+- choose permissions and budget
+- click **Generate Pairing Token**
+- copy the generated VPS command
+
+### VPS side
+
+Run the one-command proxy setup:
+
+```bash
+npx -y @dcprotocol/cli proxy \
+  --pair "<pairing-token>" \
+  --service-id "openclaw-vps" \
+  --vault "<vault-id>" \
+  --hpke-key "<vault-hpke-public-key>" \
+  --relay "wss://relay.dcp.1ly.store" \
+  --port 8420
+```
+
+Then your remote agent can talk to local DCP-style endpoints on the VPS:
+
+```bash
+export DCP_URL=http://127.0.0.1:8420
+export DCP_MODE=local
+```
+
+That keeps the agent logic simple. The proxy handles relay transport and service identity.
+
+## Service / Marketplace Flow
+
+Use this flow when the remote party is a stable service with its own identity, such as `1ly`.
+
+### Trust the service
+
+```bash
+dcp trust 1ly
+```
+
+### Connect it
+
+```bash
+dcp connect 1ly
+```
+
+For custom services:
+
+```bash
+dcp trust my-service \
+  --key ed25519:<base64-public-key> \
+  --scopes sign:solana,read:credentials.api.* \
+  --budget 10usdc/day \
+  --auto-approve-under 1usdc
+
+dcp connect my-service \
+  --url https://example.com/api/dcp/connect \
+  --auth-url https://example.com/settings/dcp
+```
+
+`dcp connect` sends the vault routing bundle to the service:
+- `vault_id`
+- `hpke_public_key`
+- `relay_url`
+- granted scopes
+
+## Relay Server
+
+### Hosted relay
+
+The default public relay URL used throughout the repo is:
+
+```text
+wss://relay.dcp.1ly.store
+```
+
+This is the default for:
+- `@dcprotocol/client`
+- desktop Connect page
+- `dcp connect`
+- `dcp proxy`
+
+### Self-hosted relay
+
+Install or run it directly:
+
+```bash
+npx @dcprotocol/relay
+```
+
+Run with flags:
+
+```bash
+npx @dcprotocol/relay --port 8421 --host 0.0.0.0 --rate-limit 60 --debug
+```
+
+### Relay environment variables
 
 | Variable | Purpose | Default |
-|----------|---------|---------|
-| `VAULT_DIR` | Vault storage directory | `~/.dcp` |
-| `VAULT_PORT` | REST server port | `8420` |
-| `DCP_MCP_ALLOW_TTY` | Enable terminal consent prompts | `0` |
-| `MCP_AGENT_NAME` | Stable agent name for session reuse | `MCP Agent` |
-| `DCP_CLI_SESSION_MINUTES` | CLI unlock cache duration | `30` |
-| `DCP_CLI_INSECURE_SESSION` | File‑based cache when keychain unavailable | `0` |
-| `DCP_MCP_SESSION_MINUTES` | MCP auto‑unlock session duration | `30` |
+| --- | --- | --- |
+| `DCP_RELAY_PORT` | Relay listen port | `8421` |
+| `DCP_RELAY_HOST` | Relay bind host | `0.0.0.0` |
+| `DCP_RELAY_DEBUG` | Debug logging | `false` |
+| `DCP_RELAY_RATE_LIMIT` | Max requests per vault per minute | `60` |
 
-## Sessions, Limits, and Rate Limiting
+### Relay endpoints
 
-**Session timeouts**
-- 30 minutes idle
-- 4 hours max duration
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/health` | GET | Health check |
+| `/stats` | GET | Relay stats |
+| `/metrics` | GET | JSON or Prometheus metrics |
+| `/relay/request` | POST | Submit encrypted request |
+| `/relay/response/:requestId` | GET | Poll for encrypted response |
+| `/relay/poll` | POST | Long-poll fallback for vaults |
+| `/relay/respond` | POST | Long-poll response submission |
+| `/ws` | WebSocket | Vault connection endpoint |
+| `/ws-client` | WebSocket | Client/service connection endpoint |
 
-**Default budgets (per currency)**
-- SOL: `tx_limit=5`, `daily_budget=20`, `approval_threshold=2`
-- ETH: `tx_limit=0.5`, `daily_budget=1`, `approval_threshold=0.1`
-- USDC: `tx_limit=200`, `daily_budget=500`, `approval_threshold=100`
-- USDT: `tx_limit=200`, `daily_budget=500`, `approval_threshold=100`
-- BASE_ETH: `tx_limit=0.2`, `daily_budget=0.5`, `approval_threshold=0.05`
+### Relay deployment notes
 
-**Rate limiting**
-- 5 executions/minute per agent session
+- Relay is transport only. It should not see plaintext vault data.
+- Relay can be hosted publicly.
+- Vaults connect outbound to the relay.
+- Remote services or proxies target the relay, not the local vault directly.
+- Metrics and rate limiting are built in.
 
-**Stablecoin note**
-- For **USDC/USDT**, include the chain when checking budgets via REST/MCP (`chain: solana|ethereum|base`).
+## REST API Surface (`@dcprotocol/server`)
 
-### 7. Approve a consent request (when prompted)
+DCP server binds to `127.0.0.1` only by default. It is for local use.
 
-```bash
-dcp approve --list
-dcp approve <consent_id>
-```
+### Core local routes
 
-### Quick Demo (1–2 minutes)
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/` | GET | Local approval UI |
+| `/health` | GET | Health check |
+| `/scopes` | GET | List stored scopes |
+| `/address/:chain` | GET | Get wallet address |
+| `/budget/check` | GET | Budget check |
+| `/agents` | GET | List active sessions |
+| `/consent` | GET | List pending consents |
+| `/consent/:id/approve` | POST | Approve consent |
+| `/consent/:id/deny` | POST | Deny consent |
+| `/revoke/:agent` | POST | Revoke all sessions for an agent |
+| `/v1/vault/unlock` | POST | Unlock the server process |
+| `/v1/vault/lock` | POST | Lock the server process |
+| `/v1/vault/unlock-mcp` | POST | Queue MCP unlock via keychain |
+| `/v1/vault/mcp-status` | GET | MCP lock/running status |
 
-```bash
-./examples/demo.sh
-```
+### Owner-only routes
 
-Runs end-to-end: init vault, create wallet, add sample data, start server, and run both examples.
+These are mainly for the desktop app and authenticated local owner operations.
 
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/v1/desktop/register` | POST | Register desktop identity |
+| `/v1/desktop/challenge` | GET | Fetch challenge for desktop auth |
+| `/v1/desktop/verify` | POST | Verify challenge and issue owner token |
+| `/v1/relay/info` | GET | Get vault relay bundle |
+| `/v1/relay/config` | POST | Update relay URL or relay pairing token |
+| `/v1/pairing/start` | POST | Create pairing token for a VPS/service |
+| `/v1/vault/budgets` | GET | Read vault budgets |
+| `/v1/vault/budgets` | POST | Update vault budgets |
+| `/v1/services` | GET | List trusted services |
+| `/v1/services/known` | GET | List known service presets |
+| `/v1/services` | POST | Create trusted service |
+| `/v1/services/:id` | PATCH | Update trusted service |
+| `/v1/services/:id` | DELETE | Revoke trusted service |
 
-## What Agents Can Do
+### Vault operation routes
 
-| Agent Calls | Agent Gets | Sees Raw Secret? |
-|-------------|-----------|------------------|
-| `vault_sign_tx({ chain, unsigned_tx })` | Signed transaction | Never |
-| `vault_get_address(chain)` | Public address | N/A (public) |
-| `vault_read("address.home")` | Address JSON | With consent |
-| `vault_read("preferences.sizes")` | Sizes JSON | With consent |
-| `vault_read("crypto.wallet.solana")` | Reference only | Never |
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/v1/vault/read` | POST | Read a scope with consent/session checks |
+| `/v1/vault/write` | POST | Write an allowed scope |
+| `/v1/vault/delete` | POST | Delete an allowed scope |
+| `/v1/vault/sign` | POST | Sign a transaction |
+| `/v1/vault/sign-message` | POST | Sign a message |
+| `/v1/vault/sign_message` | POST | Alias for message signing |
+| `/v1/vault/sign_typed_data` | POST | Sign EIP-712 typed data |
+| `/v1/vault/sign_x402` | POST | Sign x402 payload |
+| `/v1/vault/activity` | GET | Read audit activity |
+| `/v1/vault/agents/:id/revoke` | POST | Revoke a specific session |
 
-**Rule: critical data (private keys) never leaves the vault. Agents get USE of data, not POSSESSION.**
+### Example REST calls
 
-## How Signing Works
-
-```
-You: "Swap 1.5 SOL for USDC on Jupiter"
-
-Agent builds unsigned swap transaction
-Agent calls -> `vault_sign_tx({ chain, unsigned_tx })`
-
-  Vault checks:
-    - Agent has consent (session approved)
-    - 1.5 SOL <= 5 SOL per-tx limit
-    - Daily spend: 1.5 / 20 SOL budget
-    - Below 2 SOL threshold -> auto-approved
-
-  Vault internally:
-    Decrypt key -> sign tx -> zeroize key from memory (~5ms)
-
-  Returns -> signed transaction bytes
-
-Agent submits to Solana -> confirmed.
-Private key exposure: zero.
-```
-
-## Budget Controls
-
-```bash
-dcp config set tx_limit.SOL 5            # max per transaction
-dcp config set daily_budget.USDC 100     # max per day
-dcp config set approval_threshold.SOL 2  # above this -> manual approve
-```
-
-Compromised agent tries to drain wallet:
-
-- 100 SOL transfer -> **BLOCKED** (exceeds tx limit)
-- 4 SOL transfer -> **PAUSED** (above threshold, you must approve)
-- Many 1.9 SOL transfers -> **BLOCKED** after daily limit hit
-
-Worst case with DCP: bounded by your daily budget. Without DCP: entire wallet gone instantly.
-
-## Also Stores Personal Data
-
-Not just wallets. Store anything agents need:
+Unlock:
 
 ```bash
-dcp add identity.name
-dcp add identity.email
-dcp add identity.phone
-dcp add identity.passport
-dcp add identity.drivers_license
-
-dcp add address.home
-dcp add address.work
-
-dcp add preferences.sizes
-dcp add preferences.brands
-dcp add preferences.diet
-dcp add preferences.travel
-
-dcp add credentials.api
-dcp add health.profile
-dcp add budget.default
-```
-
-Every record includes `schema_version`. See full canonical schema in `SCHEMA.md`.
-
-## Choose the Right Package
-
-| Package | When to use it |
-|---------|----------------|
-| `@dcprotocol/cli` | You’re a human managing the vault (init, add data, approve) |
-| `@dcprotocol/mcp` | Your agent runtime supports MCP (Claude, Cursor, OpenClaw) |
-| `@dcprotocol/server` | You want a local REST API + browser approval UI |
-| `@dcprotocol/core` | You’re embedding DCP inside your own app or service |
-
-## CLI Reference
-
-| Command | Description |
-|---------|-------------|
-| `dcp init` | Initialize vault (shows recovery phrase once) |
-| `dcp create-wallet --chain <solana|ethereum|base>` | Generate wallet (key never leaves vault) |
-| `dcp add <scope>` | Store personal data |
-| `dcp read <scope>` | Read STANDARD/SENSITIVE data (CRITICAL never shown) |
-| `dcp list` | List stored items (no values shown) |
-| `dcp update <scope>` | Update existing data |
-| `dcp remove <scope>` | Remove data |
-| `dcp status` | Show vault status |
-| `dcp approve` | Approve pending consent requests |
-| `dcp agents` | List active sessions |
-| `dcp revoke <agent|session_id>` | Revoke agent access |
-| `dcp config` | View/edit budget limits |
-| `dcp activity` | View audit log |
-| `dcp recovery show-phrase` | Explain recovery phrase is only shown once |
-| `dcp recovery restore` | Restore vault from phrase |
-
-## REST API
-
-For non-MCP agents. Binds to `127.0.0.1:8420` only (never exposed to internet).
-
-```bash
-npx @dcprotocol/server
-
-# Unlock the vault for this REST process
 curl -X POST http://127.0.0.1:8420/v1/vault/unlock \
   -H "Content-Type: application/json" \
   -d '{"passphrase":"<your-passphrase>"}'
-
-# Unlock MCP (local bridge)
-curl -X POST http://127.0.0.1:8420/v1/vault/unlock-mcp \
-  -H "Content-Type: application/json" \
-  -d '{"passphrase":"<your-passphrase>"}'
-
-# Sign a transaction
-curl -X POST http://127.0.0.1:8420/v1/vault/sign \
-  -H "Content-Type: application/json" \
-  -d '{"chain":"solana","unsigned_tx":"<base64>","agent_name":"my-bot"}'
-
-# Read personal data
-curl -X POST http://127.0.0.1:8420/v1/vault/read \
-  -H "Content-Type: application/json" \
-  -d '{"scope":"address.home","agent_name":"my-bot"}'
-
-# Lock the vault when done
-curl -X POST http://127.0.0.1:8420/v1/vault/lock
 ```
 
-## Architecture
-
-```
-+-------------+
-|  AI Agent   |  Never sees private keys or critical data
-+------+------+
-       | MCP / REST
-       v
-+----------------------------------------------+
-|                DCP Core                       |
-|  +--------+ +--------+ +--------+ +--------+ |
-|  | Crypto | | Wallet | | Budget | | Audit  | |
-|  | Engine | | Manager| | Engine | | Logger | |
-|  +--------+ +--------+ +--------+ +--------+ |
-|  +------------------------------------------+ |
-|  |  SQLite (encrypted) + OS Keychain        | |
-|  +------------------------------------------+ |
-+----------------------------------------------+
-```
-
-No Docker. No database server. No cloud. SQLite file + OS Keychain.
-
-## Security
-
-| Threat | Protection |
-|--------|-----------|
-| Prompt injection leaks key | Key never in agent memory. Nothing to leak. |
-| Database stolen | Encrypted blobs. Master key in OS Keychain, not in DB. |
-| Agent overspends | Per-tx limits, daily budgets, approval thresholds. |
-| Brute force | Argon2id (64MB memory, 3 iterations). |
-| Replay attack | Idempotency keys, expiring tokens, nonce-based. |
-| Network sniffing | REST binds to localhost only. |
-
-Full threat model: [SECURITY.md](./SECURITY.md)
-
-## Common Error Codes
-
-| Code | Meaning |
-|------|---------|
-| `VAULT_LOCKED` | Vault process is locked (unlock required) |
-| `CONSENT_DENIED` | User denied consent |
-| `CONSENT_TIMEOUT` | Consent expired |
-| `RECORD_NOT_FOUND` | Scope not found |
-| `BUDGET_EXCEEDED_TX` | Per‑tx limit exceeded |
-| `BUDGET_EXCEEDED_DAILY` | Daily budget exceeded |
-| `RATE_LIMITED` | Too many requests per minute |
-
-## Packages
-
-| Package | Description |
-|---------|-------------|
-| `@dcprotocol/core` | Encryption, wallet, storage, budget, audit |
-| `@dcprotocol/cli` | Command-line interface |
-| `@dcprotocol/mcp` | MCP server for AI agents |
-| `@dcprotocol/server` | REST API (localhost:8420) |
-
-## Supported Chains
-
-| Chain | Key Type | Status |
-|-------|----------|--------|
-| Solana | Ed25519 | Supported |
-| Ethereum | secp256k1 | Supported |
-| Base | secp256k1 | Supported |
-
-## Development
+Read:
 
 ```bash
-git clone https://github.com/1lystore/dcp.git
-cd dcp && npm install && npm run build
-npm test
+curl -X POST http://127.0.0.1:8420/v1/vault/read \
+  -H "Content-Type: application/json" \
+  -d '{"scope":"identity.email","agent_name":"my-bot"}'
 ```
 
-## Community
+Sign message:
 
-- [Discord](https://discord.gg/3pgAgQgpBn) — `#dcp-general` for questions, `#dcp-help` for support
-- [GitHub Issues](https://github.com/1lystore/dcp/issues) — Bug reports & feature requests
+```bash
+curl -X POST http://127.0.0.1:8420/v1/vault/sign_message \
+  -H "Content-Type: application/json" \
+  -d '{"chain":"solana","message":"hello","agent_name":"my-bot"}'
+```
 
-## Contributing
+## MCP Tools (`@dcprotocol/mcp`)
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md). We accept: bug fixes, new chain support, new data schemas, framework integrations, docs, tests.
+Available tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `vault_list_scopes` | List available scopes |
+| `vault_get_address` | Get a public address |
+| `vault_budget_check` | Check budget limits |
+| `vault_read` | Read data or credentials |
+| `vault_sign_tx` | Sign a transaction |
+| `vault_sign_message` | Sign a message |
+| `vault_sign_typed_data` | Sign EIP-712 typed data |
+| `vault_sign_x402` | Sign x402 payloads |
+| `vault_write` | Write supported scopes |
+| `vault_unlock` | Unlock MCP process access |
+| `vault_lock` | Lock MCP process access |
+
+## Client SDK Methods (`@dcprotocol/client`)
+
+| Method | Purpose |
+| --- | --- |
+| `isAvailable()` | Check whether the vault can be reached |
+| `getAddress(chain)` | Get a public wallet address |
+| `signTx(input)` | Sign a transaction |
+| `signMessage(input)` | Sign a message |
+| `signTypedData(input)` | Sign EIP-712 typed data |
+| `signX402(input)` | Sign x402 payload |
+| `readCredential(scope, fields?)` | Read a scope |
+| `readData(scope, fields?)` | Alias for `readCredential` |
+| `writeCredential(scope, data)` | Write an allowed scope |
+| `budgetCheck(input)` | Check a budget before signing |
+| `pairService(input)` | Pair a remote proxy/service |
+| `clearSession()` | Drop cached session IDs |
+| `close()` | Close sockets and zeroize local key material |
+
+## Shared Environment Variables
+
+| Variable | Used by | Purpose |
+| --- | --- | --- |
+| `VAULT_DIR` | CLI, MCP, server | Vault storage directory |
+| `VAULT_PORT` | Server | REST server port |
+| `DCP_URL` | Client, agents via proxy | Local DCP URL |
+| `DCP_MODE` | Client | `auto`, `local`, or `relay` |
+| `DCP_VAULT_ID` | Client, proxy | Target vault ID for relay |
+| `DCP_RELAY_URL` | Client, proxy, server | Relay URL |
+| `DCP_VAULT_HPKE_PUBLIC_KEY` | Client, proxy | Vault relay encryption key |
+| `DCP_SERVICE_ID` | Client, proxy | Service identity |
+| `DCP_SERVICE_PRIVATE_KEY` | Client, proxy | Service signing key |
+| `MCP_AGENT_NAME` | MCP, client | Stable agent name |
+| `DCP_MCP_ALLOW_TTY` | MCP | Allow interactive terminal prompts |
+| `DCP_MCP_SESSION_MINUTES` | MCP, server | Auto-unlock session duration |
+| `DCP_CLI_SESSION_MINUTES` | CLI | CLI unlock cache duration |
+| `DCP_CLI_INSECURE_SESSION` | CLI | File-based session fallback |
+
+## Security Model
+
+DCP is built around one rule:
+
+**Critical secrets stay in the vault.**
+
+That means:
+- private keys never leave the vault
+- agents get signatures, not raw keys
+- services get transport to the vault, not custody of the vault
+- budgets and thresholds limit damage from bad prompts or bad logic
+- every request is auditable
+- relay is transport, not plaintext business logic
+
+See `SECURITY.md` for the full threat model.
+
+## Troubleshooting
+
+### Native dependency mismatch
+
+```bash
+npm rebuild better-sqlite3
+```
+
+### Local ports already in use
+
+DCP defaults:
+- `8420` for the local vault server
+- `8421` for a local relay during development
+
+Check who is using them:
+
+```bash
+lsof -nP -iTCP:8420 -sTCP:LISTEN
+lsof -nP -iTCP:8421 -sTCP:LISTEN
+```
+
+### Desktop build runs but the installed app looks stale
+
+Open the newly built bundle directly first:
+
+```bash
+open "packages/dcp-desktop/src-tauri/target/release/bundle/macos/DCP Vault.app"
+```
+
+Then replace the older installed copy.
+
+## Package-Specific Docs
+
+- `packages/dcp-cli/README.md`
+- `packages/dcp-client/README.md`
+- `packages/dcp-desktop/README.md`
+- `packages/dcp-relay/README.md`
+- `packages/dcp-server/README.md`
+- `packages/dcp-mcp/README.md`
+
+## Additional Docs
+
+- `ARCHITECTURE.md`
+- `SECURITY.md`
+- `SCHEMA.md`
+- `CONTRIBUTING.md`
+- `RELEASE.md`
 
 ## License
 
-Apache-2.0 — see `LICENSE`.
-
-## Links
-
-- [Discord](https://discord.gg/3pgAgQgpBn)
-- [Architecture](./ARCHITECTURE.md)
-- [Security Model](./SECURITY.md)
-- [Roadmap](./ROADMAP.md)
-- [Contributing](./CONTRIBUTING.md)
-- [Code of Conduct](./CODE_OF_CONDUCT.md)
-- [Release](./RELEASE.md)
+Apache-2.0

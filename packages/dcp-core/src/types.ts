@@ -257,6 +257,124 @@ export interface TokenPayload {
 }
 
 // ============================================================================
+// Trusted Service Types (PRD Section B2)
+// ============================================================================
+
+/**
+ * A trusted service that can make requests via relay
+ *
+ * Services (1ly, Virtuals, etc.) authenticate with their own Ed25519 keypair.
+ * User trusts them once; agents run autonomously within policies.
+ */
+export interface TrustedService {
+  /** Service identifier (e.g., '1ly', 'virtuals') */
+  service_id: string;
+
+  /** Human-readable service name */
+  name: string;
+
+  /** Ed25519 public key for signature verification (base64 or ed25519:xxx format) */
+  public_key: string;
+
+  /** Allowed scopes (e.g., ['sign:solana', 'read:credentials.api.1ly']) */
+  scopes: string[];
+
+  /** Budget configuration */
+  budget: {
+    /** Daily spending limit in USD */
+    daily: number;
+    /** Currency (default: 'USDC') */
+    currency: string;
+    /** Auto-approve threshold (under this amount, no popup) */
+    auto_approve_under: number;
+  };
+
+  /** When the service was trusted */
+  trusted_at: string;
+
+  /** When the service was last connected (via dcp connect) */
+  connected_at?: string;
+
+  /** Whether the service is currently enabled */
+  enabled: boolean;
+
+  /** Whether this is a verified/known service */
+  verified: boolean;
+}
+
+/**
+ * Service connection info (sent to service during dcp connect)
+ */
+export interface ServiceConnectionInfo {
+  /** Vault ID for relay routing */
+  vault_id: string;
+
+  /** HPKE X25519 public key for relay encryption */
+  hpke_public_key: string;
+
+  /** Relay URL to send requests to */
+  relay_url: string;
+
+  /** Scopes granted to this service */
+  scopes_granted: string[];
+}
+
+/**
+ * Known/verified service registry entry
+ */
+export interface KnownService {
+  /** Service identifier */
+  service_id: string;
+
+  /** Display name */
+  name: string;
+
+  /** Service connection endpoint (for dcp connect) */
+  connect_url: string;
+
+  /** Service auth URL (for user login) */
+  auth_url: string;
+
+  /** Ed25519 public key */
+  public_key: string;
+
+  /** Default scopes to request */
+  default_scopes: string[];
+
+  /** Whether this is a verified service */
+  verified: boolean;
+
+  /** Optional description */
+  description?: string;
+
+  /** Optional icon URL */
+  icon_url?: string;
+}
+
+/**
+ * Proxy configuration (for Tier 3 remote agents)
+ */
+export interface ProxyConfig {
+  /** Vault ID to proxy for */
+  vault_id: string;
+
+  /** Relay URL to connect to */
+  relay_url: string;
+
+  /** HPKE public key for the vault */
+  vault_hpke_public_key: string;
+
+  /** Local port to listen on (default: 8420) */
+  local_port: number;
+
+  /** Service identity (if acting as a service) */
+  service_id?: string;
+
+  /** Service private key (if acting as a service) */
+  service_private_key?: string;
+}
+
+// ============================================================================
 // Error Types (from PRD Section 7)
 // ============================================================================
 
@@ -275,10 +393,17 @@ export type VaultErrorCode =
   | 'TOKEN_REVOKED'
   | 'INVALID_CHAIN'
   | 'INVALID_TX'
+  | 'INVALID_SCHEMA'
   | 'IDEMPOTENCY_CONFLICT'
   | 'RATE_LIMITED'
   | 'RECORD_NOT_FOUND'
-  | 'INTERNAL_ERROR';
+  | 'INTERNAL_ERROR'
+  | 'SERVICE_NOT_TRUSTED'
+  | 'SERVICE_NOT_FOUND'
+  | 'SERVICE_ALREADY_TRUSTED'
+  | 'INVALID_SERVICE_SIGNATURE'
+  | 'SERVICE_SCOPE_VIOLATION'
+  | 'INVALID_PUBLIC_KEY';
 
 export class VaultError extends Error {
   constructor(

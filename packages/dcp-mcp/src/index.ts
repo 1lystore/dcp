@@ -15,6 +15,10 @@
  * - vault_budget_check(amount, currency) - Check budget (no consent)
  * - vault_read(scope, fields?) - Read data (consent required)
  * - vault_sign_tx(chain, unsigned_tx, description?) - Sign transaction (consent required)
+ * - vault_sign_message(chain, message, encoding?) - Sign arbitrary message (consent required)
+ * - vault_sign_typed_data(chain, typed_data) - Sign EIP-712 typed data (consent required)
+ * - vault_sign_x402(network, payload, ...) - Sign x402 payment payload (consent required)
+ * - vault_write(scope, data) - Write data (consent required)
  * - vault_unlock(passphrase) - Unlock vault for this MCP process
  * - vault_lock() - Lock vault for this MCP process
  */
@@ -46,6 +50,10 @@ import {
   vault_budget_check,
   vault_read,
   vault_sign_tx,
+  vault_sign_message,
+  vault_sign_typed_data,
+  vault_sign_x402,
+  vault_write,
   vault_unlock,
   vault_lock,
   ToolContext,
@@ -56,6 +64,10 @@ import {
   BudgetCheckInput,
   ReadInput,
   SignTxInput,
+  SignMessageInput,
+  SignTypedDataInput,
+  SignX402Input,
+  WriteInput,
   UnlockInput,
 } from './types.js';
 
@@ -201,6 +213,114 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'vault_sign_message',
+        description: 'Sign an arbitrary message using the vault wallet. Requires user consent.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            chain: {
+              type: 'string',
+              enum: ['solana', 'base', 'ethereum'],
+              description: 'The blockchain for the message signing',
+            },
+            message: {
+              type: 'string',
+              description: 'The message to sign (utf8 or base64)',
+            },
+            encoding: {
+              type: 'string',
+              enum: ['utf8', 'base64'],
+              description: 'Message encoding (default: utf8)',
+            },
+            description: {
+              type: 'string',
+              description: 'Human-readable description of what the message represents',
+            },
+          },
+          required: ['chain', 'message'],
+        },
+      },
+      {
+        name: 'vault_sign_typed_data',
+        description: 'Sign EIP-712 typed data using the vault wallet. Requires user consent.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            chain: {
+              type: 'string',
+              enum: ['base', 'ethereum'],
+              description: 'The EVM chain for typed data signing',
+            },
+            typed_data: {
+              type: 'object',
+              description: 'EIP-712 typed data object',
+            },
+            description: {
+              type: 'string',
+              description: 'Human-readable description of what the typed data represents',
+            },
+          },
+          required: ['chain', 'typed_data'],
+        },
+      },
+      {
+        name: 'vault_sign_x402',
+        description: 'Sign an x402 payment payload. Requires user consent.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            network: {
+              type: 'string',
+              enum: ['solana', 'base'],
+              description: 'Payment network',
+            },
+            payload: {
+              type: 'string',
+              description: 'Base64-encoded x402 payload',
+            },
+            amount: {
+              type: ['string', 'number'],
+              description: 'Payment amount',
+            },
+            currency: {
+              type: 'string',
+              description: 'Payment currency (e.g., USDC)',
+            },
+            recipient: {
+              type: 'string',
+              description: 'Recipient identifier',
+            },
+            purpose: {
+              type: 'string',
+              description: 'Human-readable payment purpose',
+            },
+            typed_data: {
+              type: 'object',
+              description: 'Optional EIP-712 typed data for Base',
+            },
+          },
+          required: ['network', 'payload'],
+        },
+      },
+      {
+        name: 'vault_write',
+        description: 'Write data to a vault scope. Requires user consent.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            scope: {
+              type: 'string',
+              description: 'The scope to write (e.g., "credentials.api.1ly")',
+            },
+            data: {
+              type: 'object',
+              description: 'The data to store at the scope',
+            },
+          },
+          required: ['scope', 'data'],
+        },
+      },
+      {
         name: 'vault_unlock',
         description: 'Unlock the vault for this MCP process (local only).',
         inputSchema: {
@@ -313,6 +433,74 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const result = await vault_sign_tx(ctx, input);
         // Update session ID if changed
+        sessionId = ctx.sessionId;
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'vault_sign_message': {
+        const input = args as unknown as SignMessageInput;
+        if (!input.chain || !input.message) {
+          throw new McpError(ErrorCode.InvalidParams, 'chain and message are required');
+        }
+        const result = await vault_sign_message(ctx, input);
+        sessionId = ctx.sessionId;
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'vault_sign_typed_data': {
+        const input = args as unknown as SignTypedDataInput;
+        if (!input.chain || !input.typed_data) {
+          throw new McpError(ErrorCode.InvalidParams, 'chain and typed_data are required');
+        }
+        const result = await vault_sign_typed_data(ctx, input);
+        sessionId = ctx.sessionId;
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'vault_sign_x402': {
+        const input = args as unknown as SignX402Input;
+        if (!input.network || !input.payload) {
+          throw new McpError(ErrorCode.InvalidParams, 'network and payload are required');
+        }
+        const result = await vault_sign_x402(ctx, input);
+        sessionId = ctx.sessionId;
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'vault_write': {
+        const input = args as unknown as WriteInput;
+        if (!input.scope || !input.data) {
+          throw new McpError(ErrorCode.InvalidParams, 'scope and data are required');
+        }
+        const result = await vault_write(ctx, input);
         sessionId = ctx.sessionId;
         return {
           content: [

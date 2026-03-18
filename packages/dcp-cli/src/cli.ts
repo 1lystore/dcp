@@ -25,6 +25,10 @@ import { activityCommand } from './commands/activity.js';
 import { recoveryCommand } from './commands/recovery.js';
 import { updateCommand } from './commands/update.js';
 import { removeCommand } from './commands/remove.js';
+import { trustCommand } from './commands/trust.js';
+import { connectCommand } from './commands/connect.js';
+import { proxyCommand } from './commands/proxy.js';
+import { pairingCommand } from './commands/pairing.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -64,6 +68,10 @@ program.addCommand(activityCommand);
 program.addCommand(recoveryCommand);
 program.addCommand(updateCommand);
 program.addCommand(removeCommand);
+program.addCommand(trustCommand);
+program.addCommand(connectCommand);
+program.addCommand(proxyCommand);
+program.addCommand(pairingCommand);
 
 // Parse arguments
 program.parse();

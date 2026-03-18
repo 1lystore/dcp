@@ -39,6 +39,38 @@ export interface SignTxInput {
   idempotency_key?: string;
 }
 
+/** Input for vault_sign_message tool */
+export interface SignMessageInput {
+  chain: Chain;
+  message: string;
+  encoding?: 'utf8' | 'base64';
+  description?: string;
+}
+
+/** Input for vault_sign_typed_data tool */
+export interface SignTypedDataInput {
+  chain: Chain;
+  typed_data: Record<string, unknown>;
+  description?: string;
+}
+
+/** Input for vault_sign_x402 tool */
+export interface SignX402Input {
+  network: 'solana' | 'base';
+  payload: string; // base64
+  amount?: string | number;
+  currency?: string;
+  recipient?: string;
+  purpose?: string;
+  typed_data?: Record<string, unknown>;
+}
+
+/** Input for vault_write tool */
+export interface WriteInput {
+  scope: string;
+  data: Record<string, unknown>;
+}
+
 /** Input for vault_unlock tool */
 export interface UnlockInput {
   passphrase: string;
@@ -105,6 +137,35 @@ export interface SignTxOutput {
   };
 }
 
+/** Output for vault_sign_message tool */
+export interface SignMessageOutput {
+  signature: string;
+  public_key: string;
+  chain: Chain;
+}
+
+/** Output for vault_sign_typed_data tool */
+export interface SignTypedDataOutput {
+  signature: string;
+  public_key: string;
+  chain: Chain;
+}
+
+/** Output for vault_sign_x402 tool */
+export interface SignX402Output {
+  signature: string;
+  public_key: string;
+  chain: Chain;
+}
+
+/** Output for vault_write tool */
+export interface WriteOutput {
+  scope: string;
+  created: boolean;
+  updated: boolean;
+  sensitivity: SensitivityLevel;
+}
+
 /** Output for vault_unlock tool */
 export interface UnlockOutput {
   unlocked: boolean;
@@ -119,7 +180,13 @@ export interface LockOutput {
 // Consent Types (from PRD Section 3.1.6)
 // ============================================================================
 
-export type ConsentAction = 'read' | 'sign_tx' | 'sign_message';
+export type ConsentAction =
+  | 'read'
+  | 'sign_tx'
+  | 'sign_message'
+  | 'sign_typed_data'
+  | 'sign_x402'
+  | 'write';
 
 export interface ConsentRequest {
   id: string;
@@ -130,6 +197,9 @@ export interface ConsentRequest {
   amount?: number;
   currency?: string;
   chain?: Chain;
+  recipient?: string;
+  purpose?: string;
+  network?: string;
   expires_at: string;
 }
 

@@ -19,7 +19,7 @@ import * as keytar from 'keytar';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { randomBytes, randomUUID } from 'crypto';
+import { randomBytes, randomUUID, createHash } from 'crypto';
 import {
   VaultRecord,
   AgentSession,
@@ -36,6 +36,7 @@ import {
   TrustTier,
   SpendStatus,
   ConsentStatus,
+  TrustedService,
 } from './types.js';
 import { generateKey, deriveKeyFromPassphrase, generateSalt, zeroize, encrypt, decrypt, envelopeEncrypt, envelopeDecrypt } from './crypto.js';
 
@@ -44,7 +45,10 @@ import { generateKey, deriveKeyFromPassphrase, generateSalt, zeroize, encrypt, d
 // ============================================================================
 
 /** Default vault directory */
-const DEFAULT_VAULT_DIR = path.join(os.homedir(), '.dcp');
+const DEFAULT_VAULT_DIR =
+  process.env.DCP_VAULT_DIR ||
+  process.env.VAULT_DIR ||
+  path.join(os.homedir(), '.dcp');
 
 /** Keychain service name */
 const KEYCHAIN_SERVICE = 'dcp';
@@ -196,6 +200,21 @@ export class VaultStorage {
         updated_at TEXT NOT NULL
       );
 
+      -- Trusted services (PRD Section B2)
+      CREATE TABLE IF NOT EXISTS trusted_services (
+        service_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        public_key TEXT NOT NULL,
+        scopes TEXT NOT NULL,
+        budget_daily REAL NOT NULL,
+        budget_currency TEXT NOT NULL DEFAULT 'USDC',
+        budget_auto_approve_under REAL NOT NULL DEFAULT 0,
+        trusted_at TEXT NOT NULL,
+        connected_at TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        verified INTEGER NOT NULL DEFAULT 0
+      );
+
       -- Create indexes
       CREATE INDEX IF NOT EXISTS idx_vault_records_scope ON vault_records(scope);
       CREATE INDEX IF NOT EXISTS idx_vault_records_chain ON vault_records(chain);
@@ -206,6 +225,23 @@ export class VaultStorage {
       CREATE INDEX IF NOT EXISTS idx_audit_events_type ON audit_events(event_type);
       CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at);
       CREATE INDEX IF NOT EXISTS idx_pending_consents_status ON pending_consents(status);
+      CREATE INDEX IF NOT EXISTS idx_trusted_services_enabled ON trusted_services(enabled);
+      CREATE INDEX IF NOT EXISTS idx_trusted_services_connected ON trusted_services(connected_at);
+
+      -- Pairing tokens (for proxy pairing flow)
+      CREATE TABLE IF NOT EXISTS pairing_tokens (
+        token_hash TEXT PRIMARY KEY,
+        service_id TEXT NOT NULL,
+        scopes TEXT NOT NULL,
+        budget_daily REAL NOT NULL,
+        budget_currency TEXT NOT NULL DEFAULT 'USDC',
+        budget_auto_approve_under REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pairing_tokens_expires ON pairing_tokens(expires_at);
     `);
 
     // Migration: Add last_used_at column if it doesn't exist (for existing DBs)
@@ -230,6 +266,29 @@ export class VaultStorage {
 
     if (!hasSessionId) {
       this.db.exec('ALTER TABLE pending_consents ADD COLUMN session_id TEXT');
+    }
+
+    // Ensure pairing_tokens table exists (for existing vaults)
+    const pairingTable = this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='pairing_tokens'"
+    ).get() as { name?: string } | undefined;
+
+    if (!pairingTable) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS pairing_tokens (
+          token_hash TEXT PRIMARY KEY,
+          service_id TEXT NOT NULL,
+          scopes TEXT NOT NULL,
+          budget_daily REAL NOT NULL,
+          budget_currency TEXT NOT NULL DEFAULT 'USDC',
+          budget_auto_approve_under REAL NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          used_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pairing_tokens_expires ON pairing_tokens(expires_at);
+      `);
     }
   }
 
@@ -1236,6 +1295,387 @@ export class VaultStorage {
     `);
     const result = stmt.run(now, now);
     return result.changes;
+  }
+
+  // ==========================================================================
+  // Trusted Services CRUD (PRD Section B2)
+  // ==========================================================================
+
+  /**
+   * Add a trusted service
+   *
+   * @param service - Service configuration
+   * @returns Created trusted service
+   * @throws VaultError with SERVICE_ALREADY_TRUSTED if service already exists
+   */
+  addTrustedService(service: Omit<TrustedService, 'trusted_at' | 'enabled' | 'connected_at'>): TrustedService {
+    const now = new Date().toISOString();
+
+    // Check if service already exists
+    const existing = this.getTrustedService(service.service_id);
+    if (existing) {
+      throw new VaultError('SERVICE_ALREADY_TRUSTED', `Service '${service.service_id}' is already trusted`);
+    }
+
+    const stmt = this.db.prepare(`
+      INSERT INTO trusted_services (
+        service_id, name, public_key, scopes,
+        budget_daily, budget_currency, budget_auto_approve_under,
+        trusted_at, enabled, verified
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+    `);
+
+    stmt.run(
+      service.service_id,
+      service.name,
+      service.public_key,
+      JSON.stringify(service.scopes),
+      service.budget.daily,
+      service.budget.currency,
+      service.budget.auto_approve_under,
+      now,
+      service.verified ? 1 : 0
+    );
+
+    // Log audit event
+    this.logAudit('CONFIG', 'success', {
+      operation: 'trust_service',
+      details: JSON.stringify({
+        service_id: service.service_id,
+        scopes: service.scopes,
+        budget_daily: service.budget.daily,
+      }),
+    });
+
+    return {
+      ...service,
+      trusted_at: now,
+      enabled: true,
+    };
+  }
+
+  /**
+   * Get a trusted service by ID
+   */
+  getTrustedService(serviceId: string): TrustedService | null {
+    const stmt = this.db.prepare('SELECT * FROM trusted_services WHERE service_id = ?');
+    const row = stmt.get(serviceId) as {
+      service_id: string;
+      name: string;
+      public_key: string;
+      scopes: string;
+      budget_daily: number;
+      budget_currency: string;
+      budget_auto_approve_under: number;
+      trusted_at: string;
+      connected_at: string | null;
+      enabled: number;
+      verified: number;
+    } | undefined;
+
+    if (!row) return null;
+
+    return {
+      service_id: row.service_id,
+      name: row.name,
+      public_key: row.public_key,
+      scopes: JSON.parse(row.scopes),
+      budget: {
+        daily: row.budget_daily,
+        currency: row.budget_currency,
+        auto_approve_under: row.budget_auto_approve_under,
+      },
+      trusted_at: row.trusted_at,
+      connected_at: row.connected_at || undefined,
+      enabled: row.enabled === 1,
+      verified: row.verified === 1,
+    };
+  }
+
+  /**
+   * List all trusted services
+   */
+  listTrustedServices(enabledOnly = false): TrustedService[] {
+    let query = 'SELECT * FROM trusted_services';
+    if (enabledOnly) {
+      query += ' WHERE enabled = 1';
+    }
+    query += ' ORDER BY trusted_at DESC';
+
+    const stmt = this.db.prepare(query);
+    const rows = stmt.all() as Array<{
+      service_id: string;
+      name: string;
+      public_key: string;
+      scopes: string;
+      budget_daily: number;
+      budget_currency: string;
+      budget_auto_approve_under: number;
+      trusted_at: string;
+      connected_at: string | null;
+      enabled: number;
+      verified: number;
+    }>;
+
+    return rows.map((row) => ({
+      service_id: row.service_id,
+      name: row.name,
+      public_key: row.public_key,
+      scopes: JSON.parse(row.scopes),
+      budget: {
+        daily: row.budget_daily,
+        currency: row.budget_currency,
+        auto_approve_under: row.budget_auto_approve_under,
+      },
+      trusted_at: row.trusted_at,
+      connected_at: row.connected_at || undefined,
+      enabled: row.enabled === 1,
+      verified: row.verified === 1,
+    }));
+  }
+
+  /**
+   * Update a trusted service
+   */
+  updateTrustedService(
+    serviceId: string,
+    updates: Partial<Pick<TrustedService, 'name' | 'public_key' | 'scopes' | 'budget' | 'enabled' | 'verified'>>
+  ): boolean {
+    const existing = this.getTrustedService(serviceId);
+    if (!existing) {
+      throw new VaultError('SERVICE_NOT_FOUND', `Service '${serviceId}' not found`);
+    }
+
+    const fields: string[] = [];
+    const values: unknown[] = [];
+
+    if (updates.name !== undefined) {
+      fields.push('name = ?');
+      values.push(updates.name);
+    }
+    if (updates.public_key !== undefined) {
+      fields.push('public_key = ?');
+      values.push(updates.public_key);
+    }
+    if (updates.scopes !== undefined) {
+      fields.push('scopes = ?');
+      values.push(JSON.stringify(updates.scopes));
+    }
+    if (updates.budget !== undefined) {
+      fields.push('budget_daily = ?', 'budget_currency = ?', 'budget_auto_approve_under = ?');
+      values.push(updates.budget.daily, updates.budget.currency, updates.budget.auto_approve_under);
+    }
+    if (updates.enabled !== undefined) {
+      fields.push('enabled = ?');
+      values.push(updates.enabled ? 1 : 0);
+    }
+    if (updates.verified !== undefined) {
+      fields.push('verified = ?');
+      values.push(updates.verified ? 1 : 0);
+    }
+
+    if (fields.length === 0) return false;
+
+    values.push(serviceId);
+    const stmt = this.db.prepare(`UPDATE trusted_services SET ${fields.join(', ')} WHERE service_id = ?`);
+    const result = stmt.run(...values);
+
+    // Log audit event
+    this.logAudit('CONFIG', 'success', {
+      operation: 'update_service',
+      details: JSON.stringify({ service_id: serviceId, updates }),
+    });
+
+    return result.changes > 0;
+  }
+
+  /**
+   * Mark a service as connected (after dcp connect)
+   */
+  markServiceConnected(serviceId: string): boolean {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare('UPDATE trusted_services SET connected_at = ? WHERE service_id = ?');
+    const result = stmt.run(now, serviceId);
+
+    // Log audit event
+    this.logAudit('CONFIG', 'success', {
+      operation: 'connect_service',
+      details: JSON.stringify({ service_id: serviceId }),
+    });
+
+    return result.changes > 0;
+  }
+
+  /**
+   * Revoke (delete) a trusted service
+   */
+  revokeTrustedService(serviceId: string): boolean {
+    const stmt = this.db.prepare('DELETE FROM trusted_services WHERE service_id = ?');
+    const result = stmt.run(serviceId);
+
+    if (result.changes > 0) {
+      // Log audit event
+      this.logAudit('REVOKE', 'success', {
+        operation: 'revoke_service',
+        details: JSON.stringify({ service_id: serviceId }),
+      });
+    }
+
+    return result.changes > 0;
+  }
+
+  // ==========================================================================
+  // Pairing Tokens (Proxy Pairing Flow)
+  // ==========================================================================
+
+  /**
+   * Create a pairing token for a service/proxy
+   */
+  createPairingToken(input: {
+    service_id: string;
+    scopes: string[];
+    budget: { daily: number; currency: string; auto_approve_under: number };
+    ttl_seconds?: number;
+  }): { token: string; expires_at: string } {
+    const now = new Date();
+    const ttlSeconds = input.ttl_seconds ?? 600;
+    const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
+    const token = randomBytes(32).toString('base64url');
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+
+    const stmt = this.db.prepare(`
+      INSERT INTO pairing_tokens (
+        token_hash, service_id, scopes,
+        budget_daily, budget_currency, budget_auto_approve_under,
+        created_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      tokenHash,
+      input.service_id,
+      JSON.stringify(input.scopes),
+      input.budget.daily,
+      input.budget.currency,
+      input.budget.auto_approve_under,
+      now.toISOString(),
+      expiresAt.toISOString()
+    );
+
+    this.logAudit('CONFIG', 'success', {
+      operation: 'pairing_token',
+      details: JSON.stringify({
+        service_id: input.service_id,
+        scopes: input.scopes,
+        expires_at: expiresAt.toISOString(),
+      }),
+    });
+
+    return { token, expires_at: expiresAt.toISOString() };
+  }
+
+  /**
+   * Get a pairing token record by plaintext token
+   */
+  getPairingToken(token: string): {
+    service_id: string;
+    scopes: string[];
+    budget: { daily: number; currency: string; auto_approve_under: number };
+    expires_at: string;
+    used_at?: string | null;
+  } | null {
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    const stmt = this.db.prepare('SELECT * FROM pairing_tokens WHERE token_hash = ?');
+    const row = stmt.get(tokenHash) as {
+      service_id: string;
+      scopes: string;
+      budget_daily: number;
+      budget_currency: string;
+      budget_auto_approve_under: number;
+      expires_at: string;
+      used_at: string | null;
+    } | undefined;
+
+    if (!row) return null;
+
+    const now = new Date();
+    const expires = new Date(row.expires_at);
+    if (expires < now) {
+      return null;
+    }
+
+    if (row.used_at) {
+      return null;
+    }
+
+    return {
+      service_id: row.service_id,
+      scopes: JSON.parse(row.scopes),
+      budget: {
+        daily: row.budget_daily,
+        currency: row.budget_currency,
+        auto_approve_under: row.budget_auto_approve_under,
+      },
+      expires_at: row.expires_at,
+      used_at: row.used_at,
+    };
+  }
+
+  /**
+   * Mark a pairing token as used
+   */
+  markPairingTokenUsed(token: string): boolean {
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare('UPDATE pairing_tokens SET used_at = ? WHERE token_hash = ?');
+    const result = stmt.run(now, tokenHash);
+    return result.changes > 0;
+  }
+
+  /**
+   * Check if a service is trusted and has permission for a scope
+   */
+  isServiceAuthorized(serviceId: string, scope: string): { authorized: boolean; service?: TrustedService; reason?: string } {
+    const service = this.getTrustedService(serviceId);
+
+    if (!service) {
+      return { authorized: false, reason: 'Service not trusted' };
+    }
+
+    if (!service.enabled) {
+      return { authorized: false, service, reason: 'Service is disabled' };
+    }
+
+    // Check if scope is allowed
+    const isAllowed = service.scopes.some((allowedScope) => {
+      // Exact match
+      if (allowedScope === scope) return true;
+
+      // Wildcard match with :* (e.g., 'sign:*' matches 'sign:solana')
+      if (allowedScope.endsWith(':*')) {
+        const prefix = allowedScope.slice(0, -1); // Remove '*'
+        return scope.startsWith(prefix);
+      }
+
+      // Wildcard match with .* (e.g., 'read:credentials.api.*' matches 'read:credentials.api.openai')
+      if (allowedScope.endsWith('.*')) {
+        const prefix = allowedScope.slice(0, -1); // Remove '*', keep '.'
+        return scope.startsWith(prefix);
+      }
+
+      // Prefix match for credentials (e.g., 'read:credentials.api.1ly' allows 'read:credentials.api.1ly.key')
+      if (scope.startsWith(allowedScope + '.')) {
+        return true;
+      }
+
+      return false;
+    });
+
+    if (!isAllowed) {
+      return { authorized: false, service, reason: `Scope '${scope}' not allowed for service` };
+    }
+
+    return { authorized: true, service };
   }
 
   // ==========================================================================

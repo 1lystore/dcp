@@ -7,6 +7,9 @@
  * - vault_budget_check(amount, currency) - Check budget (no consent)
  * - vault_read(scope, fields?) - Read data (consent required)
  * - vault_sign_tx(chain, unsigned_tx, description?) - Sign transaction (consent required)
+ * - vault_sign_message(chain, message, encoding?) - Sign message (consent required)
+ * - vault_sign_typed_data(chain, typed_data) - Sign typed data (consent required)
+ * - vault_sign_x402(network, payload, ...) - Sign x402 payload (consent required)
  */
 
 import {
@@ -15,6 +18,9 @@ import {
   VaultError,
   Chain,
   signTransaction,
+  signSolanaMessage,
+  signEvmMessage,
+  signEvmTypedData,
   envelopeDecrypt,
 } from '@dcprotocol/core';
 
@@ -27,10 +33,18 @@ import {
   ReadInput,
   ReadOutput,
   SignTxInput,
- SignTxOutput,
- ScopeInfo,
- UnlockInput,
- UnlockOutput,
+  SignTxOutput,
+  SignMessageInput,
+  SignMessageOutput,
+  SignTypedDataInput,
+  SignTypedDataOutput,
+  SignX402Input,
+  SignX402Output,
+  WriteInput,
+  WriteOutput,
+  ScopeInfo,
+  UnlockInput,
+  UnlockOutput,
  LockOutput,
 } from './types.js';
 
@@ -604,4 +618,671 @@ export async function vault_sign_tx(
       per_tx: limits.tx_limit,
     },
   };
+}
+
+// ============================================================================
+// vault_sign_message - Consent required
+// ============================================================================
+
+/**
+ * Sign an arbitrary message
+ *
+ * Consent: Yes (first time per session)
+ */
+export async function vault_sign_message(
+  ctx: ToolContext,
+  input: SignMessageInput
+): Promise<SignMessageOutput> {
+  if (!ctx.storage.isUnlocked()) {
+    throw new VaultError('VAULT_LOCKED', 'Vault is locked. Unlock at http://127.0.0.1:8420', {
+      approval_url: APPROVAL_URL,
+    });
+  }
+
+  if (!input.chain || !input.message) {
+    throw new VaultError('INTERNAL_ERROR', 'chain and message are required');
+  }
+
+  const walletScope = getWalletScope(input.chain);
+
+  if (!ctx.sessionId) {
+    const existingSessionId = getActiveAgentSessionId(ctx.storage, ctx.agentName, walletScope);
+    if (existingSessionId) {
+      ctx.sessionId = existingSessionId;
+    }
+  }
+
+  const records = ctx.storage.listRecords();
+  const walletRecord = records.find(
+    (r) => r.item_type === 'WALLET_KEY' && r.chain === input.chain
+  );
+
+  if (!walletRecord || !walletRecord.public_address) {
+    throw new VaultError('RECORD_NOT_FOUND', `No wallet found for chain: ${input.chain}`, {
+      chain: input.chain,
+    });
+  }
+
+  const needsConsent =
+    !ctx.sessionId || !hasSessionScope(ctx.storage, ctx.sessionId, walletScope);
+
+  if (needsConsent) {
+    const consentResponse = await requestConsent(
+      ctx.storage,
+      ctx.agentName,
+      'sign_message',
+      walletScope,
+      {
+        description: input.description,
+        chain: input.chain,
+        sessionId: ctx.sessionId,
+      }
+    );
+
+    if (!consentResponse.approved) {
+      ctx.storage.logAudit('DENY', 'denied', {
+        agentName: ctx.agentName,
+        scope: walletScope,
+        operation: 'sign_message',
+        details: JSON.stringify({
+          chain: input.chain,
+        }),
+      });
+
+      throw new VaultError('CONSENT_DENIED', 'User denied consent for sign_message', {
+        chain: input.chain,
+      });
+    }
+
+    if (consentResponse.mode === 'session') {
+      if (consentResponse.session_id) {
+        ctx.sessionId = consentResponse.session_id;
+      } else {
+        const session = ctx.storage.createSession(
+          ctx.agentName,
+          [walletScope],
+          'session',
+          new Date(Date.now() + 4 * 60 * 60 * 1000)
+        );
+        ctx.sessionId = session.id;
+      }
+    }
+  } else if (ctx.sessionId) {
+    touchSession(ctx.storage, ctx.sessionId);
+  }
+
+  const masterKey = getMasterKeySafe(ctx.storage);
+  const encryptedKey = ctx.storage.getEncryptedPayload(walletScope);
+  if (!encryptedKey) {
+    throw new VaultError('RECORD_NOT_FOUND', `Wallet not found: ${walletScope}`, {
+      chain: input.chain,
+    });
+  }
+
+  const encoding = input.encoding || 'utf8';
+  let signature: string;
+  if (input.chain === 'solana') {
+    signature = signSolanaMessage(encryptedKey, masterKey, input.message, encoding);
+  } else {
+    const messagePayload =
+      encoding === 'base64' ? Buffer.from(input.message, 'base64') : input.message;
+    signature = await signEvmMessage(encryptedKey, masterKey, messagePayload);
+  }
+
+  ctx.storage.logAudit('EXECUTE', 'success', {
+    agentName: ctx.agentName,
+    scope: walletScope,
+    operation: 'sign_message',
+    details: JSON.stringify({ chain: input.chain }),
+  });
+
+  return {
+    signature,
+    public_key: walletRecord.public_address,
+    chain: input.chain,
+  };
+}
+
+// ============================================================================
+// vault_sign_typed_data - Consent required
+// ============================================================================
+
+/**
+ * Sign EIP-712 typed data (EVM)
+ *
+ * Consent: Yes (first time per session)
+ */
+export async function vault_sign_typed_data(
+  ctx: ToolContext,
+  input: SignTypedDataInput
+): Promise<SignTypedDataOutput> {
+  if (!ctx.storage.isUnlocked()) {
+    throw new VaultError('VAULT_LOCKED', 'Vault is locked. Unlock at http://127.0.0.1:8420', {
+      approval_url: APPROVAL_URL,
+    });
+  }
+
+  if (!input.chain || !input.typed_data) {
+    throw new VaultError('INTERNAL_ERROR', 'chain and typed_data are required');
+  }
+
+  if (input.chain !== 'base' && input.chain !== 'ethereum') {
+    throw new VaultError('INVALID_CHAIN', `Unsupported chain for typed data: ${input.chain}`);
+  }
+
+  const walletScope = getWalletScope(input.chain);
+
+  if (!ctx.sessionId) {
+    const existingSessionId = getActiveAgentSessionId(ctx.storage, ctx.agentName, walletScope);
+    if (existingSessionId) {
+      ctx.sessionId = existingSessionId;
+    }
+  }
+
+  const records = ctx.storage.listRecords();
+  const walletRecord = records.find(
+    (r) => r.item_type === 'WALLET_KEY' && r.chain === input.chain
+  );
+
+  if (!walletRecord || !walletRecord.public_address) {
+    throw new VaultError('RECORD_NOT_FOUND', `No wallet found for chain: ${input.chain}`, {
+      chain: input.chain,
+    });
+  }
+
+  const needsConsent =
+    !ctx.sessionId || !hasSessionScope(ctx.storage, ctx.sessionId, walletScope);
+
+  if (needsConsent) {
+    const consentResponse = await requestConsent(
+      ctx.storage,
+      ctx.agentName,
+      'sign_typed_data',
+      walletScope,
+      {
+        description: input.description,
+        chain: input.chain,
+        sessionId: ctx.sessionId,
+      }
+    );
+
+    if (!consentResponse.approved) {
+      ctx.storage.logAudit('DENY', 'denied', {
+        agentName: ctx.agentName,
+        scope: walletScope,
+        operation: 'sign_typed_data',
+        details: JSON.stringify({
+          chain: input.chain,
+        }),
+      });
+
+      throw new VaultError('CONSENT_DENIED', 'User denied consent for sign_typed_data', {
+        chain: input.chain,
+      });
+    }
+
+    if (consentResponse.mode === 'session') {
+      if (consentResponse.session_id) {
+        ctx.sessionId = consentResponse.session_id;
+      } else {
+        const session = ctx.storage.createSession(
+          ctx.agentName,
+          [walletScope],
+          'session',
+          new Date(Date.now() + 4 * 60 * 60 * 1000)
+        );
+        ctx.sessionId = session.id;
+      }
+    }
+  } else if (ctx.sessionId) {
+    touchSession(ctx.storage, ctx.sessionId);
+  }
+
+  const masterKey = getMasterKeySafe(ctx.storage);
+  const encryptedKey = ctx.storage.getEncryptedPayload(walletScope);
+  if (!encryptedKey) {
+    throw new VaultError('RECORD_NOT_FOUND', `Wallet not found: ${walletScope}`, {
+      chain: input.chain,
+    });
+  }
+
+  const signature = await signEvmTypedData(encryptedKey, masterKey, input.typed_data);
+
+  ctx.storage.logAudit('EXECUTE', 'success', {
+    agentName: ctx.agentName,
+    scope: walletScope,
+    operation: 'sign_typed_data',
+    details: JSON.stringify({ chain: input.chain }),
+  });
+
+  return {
+    signature,
+    public_key: walletRecord.public_address,
+    chain: input.chain,
+  };
+}
+
+// ============================================================================
+// vault_sign_x402 - Consent required
+// ============================================================================
+
+/**
+ * Sign an x402 payload with optional typed data for EVM
+ *
+ * Consent: Yes (first time per session, and above approval threshold)
+ */
+export async function vault_sign_x402(
+  ctx: ToolContext,
+  input: SignX402Input
+): Promise<SignX402Output> {
+  if (!ctx.storage.isUnlocked()) {
+    throw new VaultError('VAULT_LOCKED', 'Vault is locked. Unlock at http://127.0.0.1:8420', {
+      approval_url: APPROVAL_URL,
+    });
+  }
+
+  if (!input.network || !input.payload) {
+    throw new VaultError('INTERNAL_ERROR', 'network and payload are required');
+  }
+
+  const chain: Chain = input.network === 'solana' ? 'solana' : 'base';
+  const walletScope = getWalletScope(chain);
+
+  if (!ctx.sessionId) {
+    const existingSessionId = getActiveAgentSessionId(ctx.storage, ctx.agentName, walletScope);
+    if (existingSessionId) {
+      ctx.sessionId = existingSessionId;
+    }
+  }
+
+  const records = ctx.storage.listRecords();
+  const walletRecord = records.find(
+    (r) => r.item_type === 'WALLET_KEY' && r.chain === chain
+  );
+
+  if (!walletRecord || !walletRecord.public_address) {
+    throw new VaultError('RECORD_NOT_FOUND', `No wallet found for chain: ${chain}`, {
+      chain,
+    });
+  }
+
+  const amount = normalizeAmount(input.amount);
+  const currency = input.currency;
+
+  if (amount !== undefined && !currency) {
+    throw new VaultError('INTERNAL_ERROR', 'currency is required when amount is provided');
+  }
+
+  if (amount !== undefined && currency) {
+    const budgetResult = ctx.budget.checkBudget(amount, currency, chain);
+    if (!budgetResult.allowed) {
+      throw new VaultError(
+        budgetResult.reason?.includes('BUDGET_EXCEEDED_TX')
+          ? 'BUDGET_EXCEEDED_TX'
+          : 'BUDGET_EXCEEDED_DAILY',
+        budgetResult.reason || 'Budget exceeded',
+        {
+          remaining_daily: budgetResult.remaining_daily,
+          remaining_tx: budgetResult.remaining_tx,
+        }
+      );
+    }
+  }
+
+  const limits = currency ? ctx.budget.getLimits(currency) : undefined;
+  const needsMandatoryApproval =
+    currency && amount !== undefined && limits
+      ? requiresMandatoryApproval(amount, limits.approval_threshold)
+      : false;
+
+  const needsConsent =
+    needsMandatoryApproval ||
+    !ctx.sessionId ||
+    !hasSessionScope(ctx.storage, ctx.sessionId, walletScope);
+
+  if (needsConsent) {
+    const consentResponse = await requestConsent(
+      ctx.storage,
+      ctx.agentName,
+      'sign_x402',
+      walletScope,
+      {
+        description: input.purpose,
+        amount,
+        currency,
+        chain,
+        recipient: input.recipient,
+        purpose: input.purpose,
+        network: input.network,
+        sessionId: ctx.sessionId,
+      }
+    );
+
+    if (!consentResponse.approved) {
+      ctx.storage.logAudit('DENY', 'denied', {
+        agentName: ctx.agentName,
+        scope: walletScope,
+        operation: 'sign_x402',
+        details: JSON.stringify({
+          chain,
+          amount,
+          currency,
+          recipient: input.recipient,
+          purpose: input.purpose,
+        }),
+      });
+
+      throw new VaultError('CONSENT_DENIED', 'User denied consent for sign_x402', {
+        chain,
+        amount,
+        currency,
+      });
+    }
+
+    if (consentResponse.mode === 'session') {
+      if (consentResponse.session_id) {
+        ctx.sessionId = consentResponse.session_id;
+      } else {
+        const session = ctx.storage.createSession(
+          ctx.agentName,
+          [walletScope],
+          'session',
+          new Date(Date.now() + 4 * 60 * 60 * 1000)
+        );
+        ctx.sessionId = session.id;
+      }
+    }
+  } else if (ctx.sessionId) {
+    touchSession(ctx.storage, ctx.sessionId);
+  }
+
+  const masterKey = getMasterKeySafe(ctx.storage);
+  const encryptedKey = ctx.storage.getEncryptedPayload(walletScope);
+  if (!encryptedKey) {
+    throw new VaultError('RECORD_NOT_FOUND', `Wallet not found: ${walletScope}`, {
+      chain,
+    });
+  }
+
+  let signature: string;
+  if (chain === 'solana') {
+    signature = signSolanaMessage(encryptedKey, masterKey, input.payload, 'base64');
+  } else if (input.typed_data) {
+    signature = await signEvmTypedData(encryptedKey, masterKey, input.typed_data);
+  } else {
+    const payloadBytes = Buffer.from(input.payload, 'base64');
+    signature = await signEvmMessage(encryptedKey, masterKey, payloadBytes);
+  }
+
+  if (amount !== undefined && currency) {
+    ctx.storage.recordSpend(
+      ctx.sessionId || ctx.agentName,
+      amount,
+      currency,
+      chain,
+      'sign_x402',
+      'committed',
+      {
+        destination: input.recipient,
+      }
+    );
+  }
+
+  ctx.storage.logAudit('EXECUTE', 'success', {
+    agentName: ctx.agentName,
+    scope: walletScope,
+    operation: 'sign_x402',
+    details: JSON.stringify({
+      chain,
+      amount,
+      currency,
+      recipient: input.recipient,
+      purpose: input.purpose,
+    }),
+  });
+
+  return {
+    signature,
+    public_key: walletRecord.public_address,
+    chain,
+  };
+}
+
+function normalizeAmount(amount?: string | number): number | undefined {
+  if (amount === undefined || amount === null) return undefined;
+  if (typeof amount === 'number') return amount;
+  if (typeof amount === 'string' && amount.trim().length > 0) {
+    const parsed = Number(amount);
+    if (!Number.isFinite(parsed)) {
+      throw new VaultError('INTERNAL_ERROR', 'Invalid amount');
+    }
+    return parsed;
+  }
+  return undefined;
+}
+
+// ============================================================================
+// vault_write - Consent required
+// ============================================================================
+
+/**
+ * Write data to a scope
+ *
+ * Consent: Yes (first time per session)
+ */
+export async function vault_write(
+  ctx: ToolContext,
+  input: WriteInput
+): Promise<WriteOutput> {
+  if (!input.scope || !input.data) {
+    throw new VaultError('INTERNAL_ERROR', 'scope and data are required');
+  }
+
+  if (!ctx.storage.isUnlocked()) {
+    throw new VaultError('VAULT_LOCKED', 'Vault is locked. Unlock at http://127.0.0.1:8420', {
+      approval_url: APPROVAL_URL,
+    });
+  }
+
+  if (!isWriteAllowed(ctx, input.scope)) {
+    throw new VaultError(
+      'SCOPE_VIOLATION',
+      `Agent ${ctx.agentName} not authorized to write scope: ${input.scope}`
+    );
+  }
+
+  if (!ctx.sessionId) {
+    const existingSessionId = getActiveAgentSessionId(ctx.storage, ctx.agentName, input.scope);
+    if (existingSessionId) {
+      ctx.sessionId = existingSessionId;
+    }
+  }
+
+  const needsConsent =
+    !ctx.sessionId || !hasSessionScope(ctx.storage, ctx.sessionId, input.scope);
+
+  if (needsConsent) {
+    const consentResponse = await requestConsent(
+      ctx.storage,
+      ctx.agentName,
+      'write',
+      input.scope,
+      { sessionId: ctx.sessionId }
+    );
+
+    if (!consentResponse.approved) {
+      ctx.storage.logAudit('DENY', 'denied', {
+        agentName: ctx.agentName,
+        scope: input.scope,
+        operation: 'write',
+        details: 'Consent denied by user',
+      });
+
+      throw new VaultError('CONSENT_DENIED', 'User denied consent for write operation', {
+        scope: input.scope,
+      });
+    }
+
+    if (consentResponse.mode === 'session') {
+      if (consentResponse.session_id) {
+        ctx.sessionId = consentResponse.session_id;
+      } else {
+        const session = ctx.storage.createSession(
+          ctx.agentName,
+          [input.scope],
+          'session',
+          new Date(Date.now() + 4 * 60 * 60 * 1000)
+        );
+        ctx.sessionId = session.id;
+      }
+    }
+  } else if (ctx.sessionId) {
+    touchSession(ctx.storage, ctx.sessionId);
+  }
+
+  const masterKey = getMasterKeySafe(ctx.storage);
+  const existing = ctx.storage.getRecord(input.scope);
+  const data = normalizeWriteData(input.scope, input.data);
+
+  if (existing) {
+    ctx.storage.updateRecord(existing.id, data, masterKey);
+  } else {
+    ctx.storage.createRecord({
+      scope: input.scope,
+      item_type: inferItemType(input.scope),
+      sensitivity: inferSensitivity(input.scope),
+      data,
+    });
+  }
+
+  ctx.storage.logAudit('EXECUTE', 'success', {
+    agentName: ctx.agentName,
+    scope: input.scope,
+    operation: 'write',
+  });
+
+  return {
+    scope: input.scope,
+    created: !existing,
+    updated: !!existing,
+    sensitivity: existing?.sensitivity || inferSensitivity(input.scope),
+  };
+}
+
+function isWriteAllowed(ctx: ToolContext, scope: string): boolean {
+  const config = ctx.budget.getConfig();
+  const permissions = config.write_permissions || {};
+  const allowed = permissions[ctx.agentName];
+  if (!allowed || allowed.length === 0) {
+    return false;
+  }
+  return allowed.some((pattern) => scopeMatches(pattern, scope));
+}
+
+function scopeMatches(pattern: string, scope: string): boolean {
+  if (pattern === scope) return true;
+  if (pattern.endsWith('.*')) {
+    const prefix = pattern.slice(0, -2);
+    return scope.startsWith(prefix + '.');
+  }
+  return false;
+}
+
+function inferItemType(scope: string): ScopeInfo['type'] {
+  if (scope.startsWith('identity.')) return 'IDENTITY';
+  if (scope.startsWith('address.')) return 'ADDRESS';
+  if (scope.startsWith('preferences.')) return 'PREFERENCES';
+  if (scope.startsWith('crypto.')) return 'WALLET_KEY';
+  if (scope.startsWith('credentials.')) return 'CREDENTIALS';
+  if (scope.startsWith('health.')) return 'HEALTH';
+  if (scope.startsWith('budget.')) return 'BUDGET';
+  return 'PREFERENCES';
+}
+
+function inferSensitivity(scope: string): ScopeInfo['sensitivity'] {
+  if (
+    scope.startsWith('identity.passport') ||
+    scope.startsWith('identity.drivers_license') ||
+    scope.startsWith('crypto.')
+  ) {
+    return 'critical';
+  }
+  if (scope.startsWith('credentials.')) {
+    // Credentials are sensitive (readable with consent), not critical
+    return 'sensitive';
+  }
+  if (scope.startsWith('identity.') || scope.startsWith('address.') || scope.startsWith('health.')) {
+    return 'sensitive';
+  }
+  return 'standard';
+}
+
+function ensureSchemaVersion(data: Record<string, unknown>): Record<string, unknown> {
+  if ('schema_version' in data) {
+    return data;
+  }
+  return { ...data, schema_version: '1.0' };
+}
+
+function normalizeWriteData(scope: string, data: Record<string, unknown>): Record<string, unknown> {
+  const base = ensureSchemaVersion(data);
+  if (scope.startsWith('credentials.api.')) {
+    return validateAndNormalizeCredentialsApi(base);
+  }
+  return base;
+}
+
+function validateAndNormalizeCredentialsApi(data: Record<string, unknown>): Record<string, unknown> {
+  const allowedKeys = [
+    'schema_version',
+    'label',
+    'service',
+    'key',
+    'base_url',
+    'auth_type',
+    'headers',
+  ];
+
+  for (const key of Object.keys(data)) {
+    if (!allowedKeys.includes(key)) {
+      throw new VaultError('INVALID_SCHEMA', `Unexpected field in credentials.api: ${key}`);
+    }
+  }
+
+  const normalized: Record<string, unknown> = {
+    schema_version: String(data.schema_version || '1.0'),
+    label: data.label ?? null,
+    service: data.service ?? null,
+    key: data.key ?? null,
+    base_url: data.base_url ?? null,
+    auth_type: data.auth_type ?? null,
+    headers: data.headers ?? null,
+  };
+
+  if (typeof normalized.schema_version !== 'string') {
+    throw new VaultError('INVALID_SCHEMA', 'schema_version must be a string');
+  }
+  if (normalized.label !== null && typeof normalized.label !== 'string') {
+    throw new VaultError('INVALID_SCHEMA', 'label must be a string or null');
+  }
+  if (normalized.service !== null && typeof normalized.service !== 'string') {
+    throw new VaultError('INVALID_SCHEMA', 'service must be a string or null');
+  }
+  if (normalized.key !== null && typeof normalized.key !== 'string') {
+    throw new VaultError('INVALID_SCHEMA', 'key must be a string or null');
+  }
+  if (normalized.base_url !== null && typeof normalized.base_url !== 'string') {
+    throw new VaultError('INVALID_SCHEMA', 'base_url must be a string or null');
+  }
+  if (normalized.auth_type !== null && typeof normalized.auth_type !== 'string') {
+    throw new VaultError('INVALID_SCHEMA', 'auth_type must be a string or null');
+  }
+  if (
+    normalized.headers !== null &&
+    (typeof normalized.headers !== 'object' || Array.isArray(normalized.headers))
+  ) {
+    throw new VaultError('INVALID_SCHEMA', 'headers must be an object or null');
+  }
+
+  return normalized;
 }

@@ -7,6 +7,7 @@
     "packages/*"
   ],
   "scripts": {
+    "preinstall": "node scripts/check-node.mjs",
     "build": "npm run build -w @dcprotocol/core && npm run build --workspaces --if-present",
     "dev:cli": "npm run build -w @dcprotocol/core && npm run dev -w @dcprotocol/cli --",
     "test": "npm run test --workspaces --if-present",
@@ -32,6 +33,6 @@
   "author": "DCP Protocol",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18 <23"
   }
 }

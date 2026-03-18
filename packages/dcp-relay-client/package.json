@@ -1,0 +1,67 @@
+{
+  "name": "@dcprotocol/relay-client",
+  "version": "0.1.1",
+  "description": "Relay client for DCP - connects local vaults to the relay with HPKE encryption",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1lystore/dcp.git",
+    "directory": "packages/dcp-relay-client"
+  },
+  "homepage": "https://github.com/1lystore/dcp#readme",
+  "bugs": {
+    "url": "https://github.com/1lystore/dcp/issues"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts --clean",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "relay",
+    "client",
+    "websocket",
+    "hpke",
+    "encryption",
+    "vault",
+    "mcp"
+  ],
+  "author": "DCP Protocol",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@dcprotocol/relay": "^0.1.1",
+    "@hpke/core": "^1.6.0",
+    "@hpke/chacha20poly1305": "^1.6.0",
+    "@hpke/dhkem-x25519": "^1.6.0",
+    "sodium-native": "^4.3.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0",
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "@types/sodium-native": "^2.3.9",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18 <23"
+  }
+}

@@ -32,7 +32,10 @@ import { VaultStorage } from './storage.js';
 // ============================================================================
 
 /** Default vault directory */
-const DEFAULT_VAULT_DIR = path.join(os.homedir(), '.dcp');
+const DEFAULT_VAULT_DIR =
+  process.env.DCP_VAULT_DIR ||
+  process.env.VAULT_DIR ||
+  path.join(os.homedir(), '.dcp');
 
 /** Default configuration file name */
 const CONFIG_FILE = 'config.json';
@@ -72,6 +75,13 @@ const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 // Full Vault Configuration (from PRD Section 17)
 // ============================================================================
 
+/** Desktop owner registration info */
+export interface DesktopOwner {
+  desktop_id: string;
+  public_key: string;
+  registered_at: string;
+}
+
 export interface VaultConfig {
   version: string;
   server_port: number;
@@ -85,6 +95,16 @@ export interface VaultConfig {
   rate_limit_per_minute: number;
   trust_sources: string[];
   keychain_service: string;
+  write_permissions?: Record<string, string[]>;
+  desktop_owner?: DesktopOwner;
+  // Relay / pairing
+  vault_id?: string;
+  relay_url?: string;
+  relay_hpke_public_key?: string;
+  relay_hpke_private_key?: string;
+  relay_signing_public_key?: string;
+  relay_signing_private_key?: string;
+  relay_pairing_token?: string;
 }
 
 /** Default vault configuration */
@@ -102,6 +122,7 @@ export const DEFAULT_VAULT_CONFIG: VaultConfig = {
   rate_limit_per_minute: RATE_LIMIT_PER_MINUTE,
   trust_sources: [],
   keychain_service: 'dcp',
+  write_permissions: {},
 };
 
 /**
@@ -114,6 +135,15 @@ function deepCloneConfig(config: VaultConfig): VaultConfig {
     tx_limit: { ...config.tx_limit },
     approval_threshold: { ...config.approval_threshold },
     trust_sources: [...config.trust_sources],
+    write_permissions: config.write_permissions ? { ...config.write_permissions } : {},
+    desktop_owner: config.desktop_owner ? { ...config.desktop_owner } : undefined,
+    vault_id: config.vault_id,
+    relay_url: config.relay_url,
+    relay_hpke_public_key: config.relay_hpke_public_key,
+    relay_hpke_private_key: config.relay_hpke_private_key,
+    relay_signing_public_key: config.relay_signing_public_key,
+    relay_signing_private_key: config.relay_signing_private_key,
+    relay_pairing_token: config.relay_pairing_token,
   };
 }
 
@@ -158,6 +188,10 @@ export class BudgetEngine {
           daily_budget: { ...defaults.daily_budget, ...data.daily_budget },
           tx_limit: { ...defaults.tx_limit, ...data.tx_limit },
           approval_threshold: { ...defaults.approval_threshold, ...data.approval_threshold },
+          write_permissions: {
+            ...(defaults.write_permissions || {}),
+            ...(data.write_permissions || {}),
+          },
         };
       } catch {
         // Invalid config, use defaults

@@ -6,6 +6,9 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildServer } from '../src/index.js';
+import { readFileSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { VaultStorage, resetStorage, generateRecoveryMnemonic, deriveKeyFromMnemonic, zeroize } from '@dcprotocol/core';
 import type { FastifyInstance } from 'fastify';
 import * as fs from 'fs';
@@ -70,8 +73,13 @@ describe('REST Server', () => {
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.body);
       expect(body.status).toBe('ok');
+      expect(typeof body.initialized).toBe('boolean');
       expect(typeof body.unlocked).toBe('boolean');
-      expect(body.version).toBe('0.1.0');
+      const here = dirname(fileURLToPath(import.meta.url));
+      const pkg = JSON.parse(
+        readFileSync(join(here, '..', 'package.json'), 'utf8')
+      ) as { version?: string };
+      expect(body.version).toBe(pkg.version);
     });
   });
 

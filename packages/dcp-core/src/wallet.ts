@@ -17,7 +17,7 @@
  */
 
 import { Keypair, Transaction, VersionedTransaction } from '@solana/web3.js';
-import { Wallet, Transaction as EthTransaction } from 'ethers';
+import { Wallet, Transaction as EthTransaction, TypedDataField, TypedDataDomain } from 'ethers';
 import {
   Chain,
   KeyType,
@@ -372,13 +372,13 @@ export function signSolanaMessage(
  *
  * @param encryptedKey - Encrypted wallet from storage
  * @param masterKey - Master key from OS Keychain
- * @param message - Message to sign
+ * @param message - Message to sign (utf8 string or raw bytes)
  * @returns Hex encoded signature
  */
 export async function signEvmMessage(
   encryptedKey: EncryptedPayload,
   masterKey: Buffer,
-  message: string
+  message: string | Uint8Array
 ): Promise<string> {
   const privateKey = envelopeDecrypt(encryptedKey, masterKey);
 
@@ -387,6 +387,54 @@ export async function signEvmMessage(
     const wallet = new Wallet(privateKeyHex);
 
     const signature = await wallet.signMessage(message);
+    return signature;
+  } finally {
+    zeroize(privateKey);
+  }
+}
+
+/**
+ * Sign typed data (EIP-712, EVM)
+ *
+ * @param encryptedKey - Encrypted wallet from storage
+ * @param masterKey - Master key from OS Keychain
+ * @param typedData - EIP-712 typed data object
+ * @returns Hex encoded signature
+ */
+export async function signEvmTypedData(
+  encryptedKey: EncryptedPayload,
+  masterKey: Buffer,
+  typedData: {
+    domain?: TypedDataDomain;
+    types?: Record<string, TypedDataField[]>;
+    message?: Record<string, unknown>;
+  }
+): Promise<string> {
+  if (!typedData || typeof typedData !== 'object') {
+    throw new VaultError('INTERNAL_ERROR', 'typed_data is required');
+  }
+
+  const { domain, types, message } = typedData;
+  if (!domain || !types || !message) {
+    throw new VaultError('INTERNAL_ERROR', 'typed_data must include domain, types, and message');
+  }
+
+  const privateKey = envelopeDecrypt(encryptedKey, masterKey);
+
+  try {
+    const privateKeyHex = '0x' + privateKey.toString('hex');
+    const wallet = new Wallet(privateKeyHex);
+
+    const typedTypes = { ...types } as Record<string, TypedDataField[]>;
+    if (typedTypes.EIP712Domain) {
+      delete typedTypes.EIP712Domain;
+    }
+
+    const signature = await wallet.signTypedData(
+      domain as Record<string, unknown>,
+      typedTypes,
+      message as Record<string, unknown>
+    );
     return signature;
   } finally {
     zeroize(privateKey);

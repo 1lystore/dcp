@@ -15,12 +15,22 @@
 # Dependencies
 node_modules/
 .pnpm-store/
+.claude/
 
 # Build outputs
 *.tgz
 dist/
 build/
 *.tsbuildinfo
+target/
+
+# Desktop generated runtime artifacts
+packages/dcp-desktop/src-tauri/bin/node
+packages/dcp-desktop/src-tauri/bin/node.exe
+packages/dcp-desktop/src-tauri/resources/dcp-helper-bundle.cjs
+packages/dcp-desktop/src-tauri/resources/dcp-server-bundle.cjs
+packages/dcp-desktop/src-tauri/resources/node_modules/
+packages/dcp-desktop/src-tauri/resources/dcp-server-runtime/
 
 # Test coverage
 coverage/

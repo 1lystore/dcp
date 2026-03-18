@@ -23,6 +23,10 @@ Available tools:
 - `vault_budget_check`
 - `vault_read`
 - `vault_sign_tx`
+- `vault_sign_message`
+- `vault_sign_typed_data`
+- `vault_sign_x402`
+- `vault_write`
 - `vault_unlock`
 - `vault_lock`
 
@@ -35,6 +39,18 @@ Available tools:
 **vault_sign_tx**
 - Input: `{ chain, unsigned_tx, description?, amount?, currency?, destination?, idempotency_key? }`
 - Budget enforcement uses `amount` + `currency` if provided.
+
+**vault_sign_message**
+- Input: `{ chain, message, encoding?, description? }`
+
+**vault_sign_typed_data**
+- Input: `{ chain, typed_data, description? }`
+
+**vault_sign_x402**
+- Input: `{ network, payload, amount?, currency?, recipient?, purpose?, typed_data? }`
+
+**vault_write**
+- Input: `{ scope, data }`
 
 **vault_budget_check**
 - Input: `{ amount, currency, chain? }`  

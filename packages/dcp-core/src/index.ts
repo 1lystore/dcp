@@ -60,6 +60,7 @@ export {
   // Message signing
   signSolanaMessage,
   signEvmMessage,
+  signEvmTypedData,
 
   // Wallet import
   importWallet,
@@ -82,7 +83,20 @@ export {
 
   // Configuration
   VaultConfig,
+  DesktopOwner,
   DEFAULT_BUDGET_CONFIG,
   DEFAULT_VAULT_CONFIG,
   RATE_LIMIT_PER_MINUTE,
 } from './budget.js';
+
+// Known Services Registry
+export {
+  KNOWN_SERVICES,
+  getKnownService,
+  listKnownServices,
+  isKnownService,
+  parsePublicKey,
+  isValidPublicKey,
+  DEFAULT_RELAY_URL,
+  RELAY_URLS,
+} from './services.js';
