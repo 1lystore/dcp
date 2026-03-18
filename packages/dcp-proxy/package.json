@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/proxy",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Lightweight VPS/local proxy for DCP - connect remote agents to a vault through the relay",
   "type": "module",
   "main": "dist/index.js",
