@@ -3153,7 +3153,10 @@ async function startRelayClient(server: FastifyInstance): Promise<void> {
     relayConnected = false;
   });
   relayClient.on('error', () => {
-    relayConnected = false;
+    // Relay client errors are not always fatal. The websocket can remain open
+    // while a request-level or transient transport error is reported. Only mark
+    // the relay disconnected when the client is actually no longer connected.
+    relayConnected = relayClient?.isConnected() ?? false;
   });
 
   let pendingEnvelope: { request_id: string; action_type: string; vault_id: string; version: string } | null = null;
