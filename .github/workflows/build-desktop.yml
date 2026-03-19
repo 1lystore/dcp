@@ -87,7 +87,7 @@ jobs:
           name: linux-x86_64
           path: |
             packages/dcp-desktop/src-tauri/target/release/bundle/deb/*.deb
-            packages/dcp-desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+            packages/dcp-desktop/src-tauri/target/release/bundle/rpm/*.rpm
 
       - name: Upload Windows artifacts
         if: matrix.platform == 'windows-latest'
@@ -115,5 +115,6 @@ jobs:
             macos-x86_64/**/*
             linux-x86_64/**/*
             windows-x86_64/**/*
-          draft: true
+          draft: false
           generate_release_notes: true
+          prerelease: false
