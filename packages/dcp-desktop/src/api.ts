@@ -1,6 +1,6 @@
 /**
  * DCP Server API Client
- * Communicates with the local DCP server at http://127.0.0.1:8420
+ * Communicates with the local DCP server at http://127.0.0.1:8421
  *
  * Owner Trust Model:
  * - Desktop app uses challenge-response auth with Ed25519 keypair
@@ -9,7 +9,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
-const API_BASE = 'http://127.0.0.1:8420';
+const API_BASE = 'http://127.0.0.1:8421';
 
 export interface HealthResponse {
   status: string;

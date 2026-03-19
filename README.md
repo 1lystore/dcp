@@ -584,14 +584,18 @@ npm rebuild better-sqlite3
 ### Local ports already in use
 
 DCP defaults:
-- `8420` for the local vault server
-- `8421` for a local relay during development
+- `8420` for the CLI vault server
+- `8421` for the desktop app vault server (or local relay during development)
+
+**Note:** Desktop app and local relay both use port 8421 by default. This is fine because:
+- Most users connect to the public relay (`wss://relay.dcp.1ly.store`) - no conflict
+- If running a local relay alongside desktop app, use a custom port: `npx @dcprotocol/relay --port 9000`
 
 Check who is using them:
 
 ```bash
-lsof -nP -iTCP:8420 -sTCP:LISTEN
-lsof -nP -iTCP:8421 -sTCP:LISTEN
+lsof -nP -iTCP:8420 -sTCP:LISTEN  # CLI server
+lsof -nP -iTCP:8421 -sTCP:LISTEN  # Desktop app or local relay
 ```
 
 ### Desktop build runs but the installed app looks stale

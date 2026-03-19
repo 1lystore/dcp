@@ -18,7 +18,7 @@ use uuid::Uuid;
 const KEYCHAIN_SERVICE: &str = "dcp-vault-desktop";
 const KEYCHAIN_PRIVATE_KEY: &str = "private-key";
 const KEYCHAIN_DESKTOP_ID: &str = "desktop-id";
-const SERVER_URL: &str = "http://127.0.0.1:8420";
+const SERVER_URL: &str = "http://127.0.0.1:8421";
 
 static RESOURCE_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
 
@@ -692,11 +692,16 @@ async fn start_server(state: State<'_, ServerState>, app: AppHandle) -> Result<(
                 .unwrap_or_else(|| std::path::Path::new(".")),
         );
 
+        // Desktop app uses port 8421 (CLI uses 8420)
+        cmd.env("VAULT_PORT", "8421");
+
         cmd.spawn()
             .map_err(|e| format!("Failed to start server: {}", e))?
     } else {
-        Command::new(&server_path)
-            .spawn()
+        let mut cmd = Command::new(&server_path);
+        // Desktop app uses port 8421 (CLI uses 8420)
+        cmd.env("VAULT_PORT", "8421");
+        cmd.spawn()
             .map_err(|e| format!("Failed to start server: {}", e))?
     };
 

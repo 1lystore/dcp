@@ -109,6 +109,83 @@ To add a new data type:
 
 Formal schema registry and validation is on the roadmap.
 
+## Adding Your Service to Known Services Registry
+
+If you're building a service or platform that integrates with DCP (like Virtuals, Eliza, 1ly), you can add yourself to the **Known Services Registry** so users see your service as "verified" in DCP Desktop and CLI.
+
+### Quick Process
+
+1. **Edit the registry file:**
+   ```bash
+   # File: packages/dcp-core/src/services.ts
+   ```
+
+2. **Add your service to `KNOWN_SERVICES` object:**
+   ```typescript
+   export const KNOWN_SERVICES: Record<string, KnownService> = {
+     '1ly': { ... },
+     'virtuals': { ... },
+
+     // Add your service:
+     'your-service-id': {
+       service_id: 'your-service-id',
+       name: 'Your Service Name',
+       connect_url: 'https://yourservice.com/api/dcp/connect',
+       auth_url: 'https://yourservice.com/settings/dcp',
+       public_key: 'ed25519:<your-base64-public-key>',
+       default_scopes: [
+         'sign:solana',
+         'sign:base',
+         'read:credentials.api.your-service'
+       ],
+       verified: true,
+       description: 'Brief description of your service',
+       icon_url: 'https://yourservice.com/favicon.ico'
+     }
+   };
+   ```
+
+3. **What you need to provide:**
+   - **Service ID**: Unique identifier (lowercase, no spaces)
+   - **Public Key**: Your Ed25519 public key (for signing relay requests)
+   - **Connect URL**: Your API endpoint that receives vault routing info
+   - **Auth URL**: Where users log into your service
+   - **Default Scopes**: Permissions your service typically needs
+   - **Icon**: Your service logo/favicon (optional)
+
+4. **Requirements for verification:**
+   - ✅ Service must implement `/api/dcp/connect` endpoint
+   - ✅ Service must handle vault routing info: `{ vault_id, hpke_public_key, relay_url, scopes_granted }`
+   - ✅ Service must sign relay requests with Ed25519 private key
+   - ✅ Service must respect granted scopes and budgets
+   - ✅ Documentation showing how users connect their DCP wallet
+
+5. **Submit PR with:**
+   - Your service added to `KNOWN_SERVICES`
+   - Brief description in PR of what your service does
+   - Link to your DCP integration docs
+   - Test showing your connect endpoint works
+
+### Example PR Title
+```
+feat: add YourService to known services registry
+```
+
+### What This Gives Users
+When you're in the registry:
+- Users can run: `dcp trust your-service-id` (auto-fills everything)
+- Users see "✓ Verified" badge in DCP Desktop
+- Your icon shows up in the UI
+- Connect flow is one command instead of manual setup
+
+### Integration Help
+Not sure how to implement the DCP connect endpoint? Check:
+- Example: `packages/dcp-server/` (reference implementation)
+- Client SDK: `@dcprotocol/client` (what you'll use on backend)
+- Docs: `README.md` section on "Service / Marketplace Flow"
+
+Questions? Open a discussion or issue - we'll help you integrate!
+
 ## Pull Requests
 
 Keep PRs focused. One feature or fix per PR. Include:

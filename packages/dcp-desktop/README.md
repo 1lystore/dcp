@@ -107,7 +107,7 @@ End users do **not** need Node installed to run the packaged app.
 
 ## Runtime Behavior
 
-- the local server listens on `http://127.0.0.1:8420`
+- the local server listens on `http://127.0.0.1:8421`
 - the server binds to localhost only
 - closing the main window hides the app to tray
 - quitting the app stops the bundled server and exits fully
@@ -129,8 +129,8 @@ open "src-tauri/target/release/bundle/macos/DCP Vault.app"
 Check the local vault and relay ports:
 
 ```bash
-lsof -nP -iTCP:8420 -sTCP:LISTEN
-lsof -nP -iTCP:8421 -sTCP:LISTEN
+lsof -nP -iTCP:8420 -sTCP:LISTEN  # CLI server
+lsof -nP -iTCP:8421 -sTCP:LISTEN  # Desktop app server
 ```
 
 ### Native dependency mismatch during builds

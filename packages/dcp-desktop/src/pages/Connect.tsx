@@ -158,7 +158,7 @@ export default function Connect() {
   );
   const hasVpsCommand = Boolean(info && pairResult?.token);
   const vpsCommand = info && pairResult?.token
-    ? `npx -y -p @dcprotocol/proxy dcp-proxy --pair ${shellEscape(pairResult.token)} --service-id ${shellEscape(normalizedVpsServiceId)} --vault ${shellEscape(info.vault_id)} --hpke-key ${shellEscape(info.hpke_public_key)} --relay ${shellEscape(info.relay_url || relayUrl || defaultRelayUrl)} --port 8420`
+    ? `npx -y -p @dcprotocol/proxy dcp-proxy --pair ${shellEscape(pairResult.token)} --service-id ${shellEscape(normalizedVpsServiceId)} --vault ${shellEscape(info.vault_id)} --hpke-key ${shellEscape(info.hpke_public_key)} --relay ${shellEscape(info.relay_url || relayUrl || defaultRelayUrl)} --port 8421`
     : '';
 
   const pairingScopes = useMemo(() => ([

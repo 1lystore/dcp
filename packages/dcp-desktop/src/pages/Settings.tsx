@@ -492,7 +492,7 @@ export default function Settings() {
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span style={{ color: 'var(--text-secondary)' }}>Server URL</span>
-              <code>http://127.0.0.1:8420</code>
+              <code>http://127.0.0.1:8421</code>
             </div>
           </div>
         </div>
