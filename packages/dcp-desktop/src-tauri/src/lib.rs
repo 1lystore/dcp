@@ -882,10 +882,21 @@ pub fn run() {
 
             // Kill any orphaned server from previous crashed session
             // This ensures a clean state on startup
-            let _ = Command::new("sh")
-                .arg("-c")
-                .arg("lsof -ti:8421 | xargs kill -9 2>/dev/null || true")
-                .output();
+            #[cfg(target_family = "unix")]
+            {
+                let _ = Command::new("sh")
+                    .arg("-c")
+                    .arg("lsof -ti:8421 | xargs kill -9 2>/dev/null || true")
+                    .output();
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                // On Windows, try to kill any process using port 8421
+                let _ = Command::new("cmd")
+                    .args(["/C", "for /f \"tokens=5\" %a in ('netstat -aon ^| findstr :8421') do taskkill /F /PID %a >nul 2>&1"])
+                    .output();
+            }
 
             // Brief delay to ensure port is free
             std::thread::sleep(std::time::Duration::from_millis(500));
