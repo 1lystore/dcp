@@ -51,8 +51,8 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Build DCP Server
-        run: npm -w @dcprotocol/server run build
+      - name: Build all packages
+        run: npm run build
 
       - name: Build Desktop App
         run: |
