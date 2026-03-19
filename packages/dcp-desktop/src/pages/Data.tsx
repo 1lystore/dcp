@@ -115,7 +115,7 @@ const DATA_TEMPLATES: Record<string, DataTemplate> = {
     icon: '🔑',
     fields: [
       { key: 'label', label: 'Label/Name', type: 'text', placeholder: 'My OpenAI Key' },
-      { key: 'service', label: 'Service', type: 'text', placeholder: 'openai' },
+      { key: 'service', label: 'Service ID (for scoping)', type: 'text', placeholder: 'openai, claude, stripe, etc.' },
       { key: 'key', label: 'API Key', type: 'password', placeholder: 'sk-...' },
       { key: 'base_url', label: 'Base URL (optional)', type: 'text', placeholder: 'https://api.openai.com' },
     ]
@@ -123,6 +123,19 @@ const DATA_TEMPLATES: Record<string, DataTemplate> = {
 };
 
 type TemplateKey = string;
+
+// Helper to get template for a scope (supports prefix matching for API credentials)
+const getTemplateForScope = (scopeKey: string) => {
+  // Direct match first
+  if (DATA_TEMPLATES[scopeKey]) {
+    return DATA_TEMPLATES[scopeKey];
+  }
+  // Check if it's an API credential (credentials.api.*)
+  if (scopeKey.startsWith('credentials.api.')) {
+    return DATA_TEMPLATES['credentials.api'];
+  }
+  return null;
+};
 
 // Modal overlay styles
 const modalOverlayStyle: React.CSSProperties = {
@@ -190,7 +203,7 @@ export default function Data() {
         try {
           const res = await api.readData(scopeKey);
           if (res.data) {
-            const template = DATA_TEMPLATES[scopeKey];
+            const template = getTemplateForScope(scopeKey);
             if (template) {
               const newFormData: Record<string, string> = {};
               template.fields.forEach(field => {
@@ -253,8 +266,9 @@ export default function Data() {
     setSaving(true);
 
     try {
-      const template = DATA_TEMPLATES[editingScope];
+      const template = getTemplateForScope(editingScope);
       let data: Record<string, unknown>;
+      let finalScope = editingScope;
 
       if (template) {
         data = {};
@@ -268,11 +282,19 @@ export default function Data() {
             }
           }
         });
+
+        // For new API credentials, use service name in scope if provided
+        if (editingScope.startsWith('credentials.api.') && !isExistingScope) {
+          const serviceName = formData['service']?.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+          if (serviceName) {
+            finalScope = `credentials.api.${serviceName}`;
+          }
+        }
       } else {
         data = JSON.parse(formData._json || '{}');
       }
 
-      await api.writeData(editingScope, data);
+      await api.writeData(finalScope, data);
       setSuccess('Saved successfully!');
       await loadScopes();
 
@@ -317,7 +339,7 @@ export default function Data() {
     return acc;
   }, {} as Record<string, Scope[]>);
 
-  const currentTemplate = editingScope ? DATA_TEMPLATES[editingScope] : null;
+  const currentTemplate = editingScope ? getTemplateForScope(editingScope) : null;
   const isExistingScope = editingScope ? scopes.some((s) => s.scope === editingScope) : false;
 
 
@@ -358,7 +380,11 @@ export default function Data() {
                 <button
                   key={key}
                   onClick={() => {
-                    openEditor(key);
+                    // For API credentials, generate unique scope with timestamp
+                    const scopeKey = key === 'credentials.api'
+                      ? `credentials.api.${Date.now()}`
+                      : key;
+                    openEditor(scopeKey);
                   }}
                   style={{
                     display: 'flex',
@@ -412,7 +438,7 @@ export default function Data() {
               </h3>
               {items.map((scope) => {
                 const templateKey = scope.scope as TemplateKey;
-                const template = DATA_TEMPLATES[templateKey];
+                const template = getTemplateForScope(templateKey);
                 const isWallet = scope.type === 'WALLET_KEY';
                 const canEdit = !isWallet && scope.sensitivity !== 'critical';
 

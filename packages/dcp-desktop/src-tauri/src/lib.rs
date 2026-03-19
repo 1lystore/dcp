@@ -27,6 +27,18 @@ struct ServerState {
     process: Mutex<Option<Child>>,
 }
 
+impl Drop for ServerState {
+    fn drop(&mut self) {
+        // Ensure server is killed when ServerState is dropped (app exit)
+        if let Ok(mut process_guard) = self.process.lock() {
+            if let Some(ref mut child) = *process_guard {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
 // Owner authentication state
 struct OwnerState {
     token: Mutex<Option<String>>,
@@ -409,9 +421,12 @@ async fn get_or_create_desktop_credentials() -> Result<DesktopCredentials, Strin
     keychain_set(KEYCHAIN_SERVICE, KEYCHAIN_PRIVATE_KEY, &private_key_b64)?;
     keychain_set(KEYCHAIN_SERVICE, KEYCHAIN_DESKTOP_ID, &desktop_id)?;
 
-    // Verify the write worked
+    // Verify both writes worked
     if keychain_get(KEYCHAIN_SERVICE, KEYCHAIN_PRIVATE_KEY).is_none() {
-        return Err("Keychain write verification failed - key not persisted".to_string());
+        return Err("Keychain write verification failed - private-key not persisted".to_string());
+    }
+    if keychain_get(KEYCHAIN_SERVICE, KEYCHAIN_DESKTOP_ID).is_none() {
+        return Err("Keychain write verification failed - desktop_id not persisted".to_string());
     }
 
     Ok(DesktopCredentials {
@@ -865,6 +880,16 @@ pub fn run() {
                 }
             }
 
+            // Kill any orphaned server from previous crashed session
+            // This ensures a clean state on startup
+            let _ = Command::new("sh")
+                .arg("-c")
+                .arg("lsof -ti:8421 | xargs kill -9 2>/dev/null || true")
+                .output();
+
+            // Brief delay to ensure port is free
+            std::thread::sleep(std::time::Duration::from_millis(500));
+
             // Create tray menu
             let quit = MenuItem::with_id(app, "quit", "Quit & Stop Server", true, None::<&str>)?;
             let open = MenuItem::with_id(app, "open", "Open DCP Vault", true, None::<&str>)?;
@@ -879,12 +904,16 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
-                        let app_handle = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let state = app_handle.state::<ServerState>();
-                            let _ = stop_server(state).await;
-                            app_handle.exit(0);
-                        });
+                        // Stop server synchronously before exit
+                        let state = app.state::<ServerState>();
+                        if let Ok(mut process_guard) = state.process.lock() {
+                            if let Some(ref mut child) = *process_guard {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                            }
+                            *process_guard = None;
+                        }
+                        app.exit(0);
                     }
                     "open" => {
                         if let Some(window) = app.get_webview_window("main") {
@@ -956,14 +985,25 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            if let RunEvent::ExitRequested { api, .. } = event {
-                api.prevent_exit();
-                let app_handle = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
+            match event {
+                RunEvent::ExitRequested { api, code, .. } => {
+                    // Prevent default exit to ensure cleanup completes
+                    api.prevent_exit();
+
+                    // Stop server synchronously using blocking task
                     let state = app_handle.state::<ServerState>();
-                    let _ = stop_server(state).await;
-                    app_handle.exit(0);
-                });
+                    if let Ok(mut process_guard) = state.process.lock() {
+                        if let Some(ref mut child) = *process_guard {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        *process_guard = None;
+                    }
+
+                    // Exit with the requested code
+                    app_handle.exit(code.unwrap_or(0));
+                }
+                _ => {}
             }
         });
 }
