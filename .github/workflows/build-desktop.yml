@@ -57,7 +57,7 @@ jobs:
       - name: Build Desktop App
         run: |
           cd packages/dcp-desktop
-          npm run tauri:build ${{ matrix.args }}
+          npm run tauri:build -- ${{ matrix.args }}
         env:
           TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
