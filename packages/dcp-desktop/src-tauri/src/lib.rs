@@ -14,6 +14,9 @@ use tauri::{
 };
 use uuid::Uuid;
 
+#[cfg(not(target_os = "macos"))]
+use keyring::Entry;
+
 // Constants
 const KEYCHAIN_SERVICE: &str = "dcp-vault-desktop";
 const KEYCHAIN_PRIVATE_KEY: &str = "private-key";
