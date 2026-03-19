@@ -101,7 +101,7 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
 
     steps:
       - name: Download all artifacts
@@ -115,6 +115,8 @@ jobs:
             macos-x86_64/**/*
             linux-x86_64/**/*
             windows-x86_64/**/*
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('dev-{0}', github.sha) || github.ref_name }}
+          name: ${{ github.event_name == 'workflow_dispatch' && format('Development Build ({0})', github.sha) || github.ref_name }}
           draft: false
           generate_release_notes: true
-          prerelease: false
+          prerelease: ${{ github.event_name == 'workflow_dispatch' }}
