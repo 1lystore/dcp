@@ -114,12 +114,45 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            macos-aarch64/**/*
-            macos-x86_64/**/*
-            linux-x86_64/**/*
-            windows-x86_64/**/*
+            macos-aarch64/**/*.dmg
+            macos-aarch64/**/*.app
+            macos-x86_64/**/*.dmg
+            macos-x86_64/**/*.app
+            linux-x86_64/**/*.deb
+            linux-x86_64/**/*.rpm
+            windows-x86_64/**/*.msi
+            windows-x86_64/**/*.exe
           tag_name: ${{ github.event_name == 'workflow_dispatch' && format('dev-{0}', github.sha) || github.ref_name }}
           name: ${{ github.event_name == 'workflow_dispatch' && format('Development Build ({0})', github.sha) || github.ref_name }}
+          body: |
+            ## DCP Vault Desktop v0.2.0
+
+            Cross-platform desktop application for DCP Vault - securely manage your personal data with AI agents.
+
+            ### Downloads
+
+            **macOS:**
+            - Apple Silicon (M1/M2/M3): Download the `aarch64` DMG
+            - Intel: Download the `x86_64` DMG
+
+            **Windows:**
+            - Download the `.msi` installer or `.exe` installer
+
+            **Linux:**
+            - Download the `.deb` package (Debian/Ubuntu)
+            - Download the `.rpm` package (Fedora/RHEL)
+
+            ### Installation
+
+            - **macOS**: Open the DMG file and drag DCP Vault to your Applications folder
+            - **Windows**: Run the MSI or EXE installer
+            - **Linux**: Install the DEB or RPM package using your package manager
+
+            ### Features
+
+            - Secure local data storage with encryption
+            - System tray integration
+            - Auto-start on system boot
+            - Cross-platform support (macOS, Windows, Linux)
           draft: false
-          generate_release_notes: true
           prerelease: ${{ github.event_name == 'workflow_dispatch' }}
