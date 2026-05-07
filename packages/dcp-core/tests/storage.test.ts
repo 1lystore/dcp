@@ -249,6 +249,91 @@ describe('Storage Layer', () => {
     });
   });
 
+  describe('Agent Connections', () => {
+    it('should create and retrieve an agent connection', () => {
+      const connection = storage.createAgentConnection({
+        name: 'vps-trading-bot',
+        mode: 'proxy',
+        service_id: 'vps-trading-bot',
+        permission_scopes: ['sign:solana', 'budget:check'],
+        budget: {
+          daily: 10,
+          currency: 'USDC',
+          auto_approve_under: 1,
+        },
+        tier: 'free',
+        token_hash: 'token-hash',
+      });
+
+      expect(connection.agent_id).toMatch(/^agent_/);
+      expect(connection.status).toBe('pending');
+      expect(connection.request_count).toBe(0);
+
+      const retrieved = storage.getAgentConnection(connection.agent_id);
+      expect(retrieved).not.toBeNull();
+      expect(retrieved!.name).toBe('vps-trading-bot');
+      expect(retrieved!.mode).toBe('proxy');
+      expect(retrieved!.service_id).toBe('vps-trading-bot');
+      expect(retrieved!.permission_scopes).toEqual(['sign:solana', 'budget:check']);
+      expect(retrieved!.budget.currency).toBe('USDC');
+      expect(retrieved!.token_hash).toBe('token-hash');
+    });
+
+    it('should mark paired, heartbeat, request, and revoke an agent connection', () => {
+      const connection = storage.createAgentConnection({
+        name: 'hosted-research',
+        mode: 'proxy',
+        permission_scopes: ['read:credentials.api.*'],
+        budget: {
+          daily: 0,
+          currency: 'USDC',
+          auto_approve_under: 0,
+        },
+      });
+
+      expect(storage.markAgentPaired(connection.agent_id, 'session-token-hash')).toBe(true);
+
+      let updated = storage.getAgentConnection(connection.agent_id);
+      expect(updated!.status).toBe('active');
+      expect(updated!.paired_at).toBeTruthy();
+      expect(updated!.last_seen_at).toBeTruthy();
+      expect(updated!.token_hash).toBe('session-token-hash');
+
+      expect(storage.recordAgentHeartbeat(connection.agent_id)).toBe(true);
+      expect(storage.recordAgentRequest(connection.agent_id)).toBe(true);
+
+      updated = storage.getAgentConnection(connection.agent_id);
+      expect(updated!.request_count).toBe(1);
+      expect(updated!.last_request_at).toBeTruthy();
+
+      expect(storage.revokeAgentConnection(connection.agent_id)).toBe(true);
+
+      updated = storage.getAgentConnection(connection.agent_id);
+      expect(updated!.status).toBe('revoked');
+      expect(updated!.revoked_at).toBeTruthy();
+      expect(updated!.token_hash).toBeUndefined();
+    });
+
+    it('should list agent connections', () => {
+      storage.createAgentConnection({
+        name: 'agent-one',
+        mode: 'sdk',
+        permission_scopes: ['read:identity.*'],
+        budget: { daily: 0, currency: 'USDC', auto_approve_under: 0 },
+      });
+      storage.createAgentConnection({
+        name: 'agent-two',
+        mode: 'mcp',
+        permission_scopes: ['read:identity.*'],
+        budget: { daily: 0, currency: 'USDC', auto_approve_under: 0 },
+      });
+
+      const connections = storage.listAgentConnections();
+      expect(connections).toHaveLength(2);
+      expect(connections.map((c) => c.name).sort()).toEqual(['agent-one', 'agent-two']);
+    });
+  });
+
   describe('Spend Events', () => {
     it('should record a spend event', () => {
       const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
@@ -443,6 +528,234 @@ describe('Storage Layer', () => {
       expect(storage.isUnlocked()).toBe(true);
 
       zeroize(correctKey);
+    });
+  });
+
+  describe('Telegram Configuration', () => {
+    const passphrase = 'telegram-test-passphrase';
+
+    beforeEach(async () => {
+      // Initialize and unlock vault for telegram tests
+      await storage.initializeMasterKey(passphrase);
+    });
+
+    afterEach(() => {
+      // Clean up telegram config between tests
+      try {
+        storage.deleteTelegramConfig();
+      } catch {
+        // Ignore if not exists
+      }
+      storage.lock();
+    });
+
+    it('should create and retrieve Telegram config', () => {
+      const config = storage.createTelegramConfig({
+        chat_id: '123456789',
+        bot_token: 'test-bot-token',
+      });
+
+      expect(config.id).toBeTruthy();
+      expect(config.chat_id).toBe('123456789');
+      expect(config.enabled).toBe(true);
+      expect(config.notify_consent).toBe(true);
+      expect(config.rate_limit_per_hour).toBe(30);
+
+      const retrieved = storage.getTelegramConfig();
+      expect(retrieved).not.toBeNull();
+      expect(retrieved!.chat_id).toBe('123456789');
+    });
+
+    it('should retrieve encrypted bot token', () => {
+      storage.createTelegramConfig({
+        chat_id: '123456789',
+        bot_token: 'my-secret-bot-token',
+      });
+
+      const token = storage.getTelegramBotToken();
+      expect(token).toBe('my-secret-bot-token');
+    });
+
+    it('should update Telegram config', () => {
+      storage.createTelegramConfig({
+        chat_id: '123456789',
+        bot_token: 'test-token',
+      });
+
+      const updated = storage.updateTelegramConfig({
+        enabled: false,
+        rate_limit_per_hour: 60,
+      });
+
+      expect(updated).toBe(true);
+
+      const config = storage.getTelegramConfig();
+      expect(config!.enabled).toBe(false);
+      expect(config!.rate_limit_per_hour).toBe(60);
+    });
+
+    it('should delete Telegram config', () => {
+      storage.createTelegramConfig({
+        chat_id: '123456789',
+        bot_token: 'test-token',
+      });
+
+      expect(storage.getTelegramConfig()).not.toBeNull();
+
+      const deleted = storage.deleteTelegramConfig();
+      expect(deleted).toBe(true);
+
+      expect(storage.getTelegramConfig()).toBeNull();
+    });
+
+    it('should not create duplicate chat_id configs', () => {
+      storage.createTelegramConfig({
+        chat_id: '123456789',
+        bot_token: 'test-token',
+      });
+
+      // Same chat_id should fail due to UNIQUE constraint
+      expect(() => {
+        storage.createTelegramConfig({
+          chat_id: '123456789',
+          bot_token: 'another-token',
+        });
+      }).toThrow();
+    });
+
+    it('should handle muted_until timestamp', () => {
+      storage.createTelegramConfig({
+        chat_id: '123456789',
+        bot_token: 'test-token',
+      });
+
+      const mutedUntil = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      storage.updateTelegramConfig({ muted_until: mutedUntil });
+
+      const config = storage.getTelegramConfig();
+      expect(config!.muted_until).toBe(mutedUntil);
+    });
+  });
+
+  describe('Telegram Pairing Codes', () => {
+    it('should create and validate pairing code', () => {
+      const code = storage.createTelegramPairingCode('test-vault-id');
+
+      expect(code.code).toMatch(/^\d{6}$/);
+      expect(code.expires_at).toBeTruthy();
+
+      const validation = storage.validateTelegramPairingCode(code.code);
+      expect(validation.valid).toBe(true);
+      expect(validation.vault_id).toBe('test-vault-id');
+    });
+
+    it('should reject invalid pairing code', () => {
+      const validation = storage.validateTelegramPairingCode('000000');
+      expect(validation.valid).toBe(false);
+      expect(validation.vault_id).toBeUndefined();
+    });
+
+    it('should reject used pairing code', () => {
+      const code = storage.createTelegramPairingCode('test-vault-id');
+
+      // First validation should succeed
+      const first = storage.validateTelegramPairingCode(code.code);
+      expect(first.valid).toBe(true);
+
+      // Mark as used
+      storage.markTelegramPairingCodeUsed(code.code);
+
+      // Second validation should fail (code already used)
+      const second = storage.validateTelegramPairingCode(code.code);
+      expect(second.valid).toBe(false);
+    });
+
+    it('should reject expired pairing code', () => {
+      // Create a code with expired timestamp (we'll need to mock this)
+      const code = storage.createTelegramPairingCode('test-vault-id');
+
+      // Manually expire the code by updating the database
+      const db = (storage as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } } }).db;
+      db.prepare(`UPDATE telegram_pairing_codes SET expires_at = ? WHERE code = ?`).run(
+        new Date(Date.now() - 1000).toISOString(),
+        code.code
+      );
+
+      const validation = storage.validateTelegramPairingCode(code.code);
+      expect(validation.valid).toBe(false);
+    });
+  });
+
+  describe('Telegram Rate Limiting', () => {
+    const passphrase = 'rate-limit-test-passphrase';
+
+    beforeEach(async () => {
+      await storage.initializeMasterKey(passphrase);
+      storage.createTelegramConfig({
+        chat_id: '123456789',
+        bot_token: 'test-token',
+      });
+    });
+
+    afterEach(() => {
+      storage.deleteTelegramConfig();
+      storage.lock();
+    });
+
+    it('should allow notifications under rate limit', () => {
+      // Default rate limit is 30/hour
+      // checkTelegramRateLimit returns false when NOT rate limited (can send)
+      for (let i = 0; i < 5; i++) {
+        expect(storage.checkTelegramRateLimit()).toBe(false);
+        storage.recordTelegramNotification();
+      }
+    });
+
+    it('should block notifications over rate limit', () => {
+      // Set a low rate limit
+      storage.updateTelegramConfig({ rate_limit_per_hour: 3 });
+
+      // First 3 should pass (not rate limited = false)
+      for (let i = 0; i < 3; i++) {
+        expect(storage.checkTelegramRateLimit()).toBe(false);
+        storage.recordTelegramNotification();
+      }
+
+      // 4th should be blocked (rate limited = true)
+      expect(storage.checkTelegramRateLimit()).toBe(true);
+    });
+
+    it('should record and retrieve notification logs', () => {
+      storage.logTelegramNotification({
+        chat_id: '123456789',
+        notification_type: 'consent_request',
+        consent_id: 'consent_123',
+      });
+      storage.logTelegramNotification({
+        chat_id: '123456789',
+        notification_type: 'consent_request',
+        consent_id: 'consent_456',
+        error: 'Rate limited',
+      });
+
+      const logs = storage.getTelegramNotificationLogs(10);
+      expect(logs.length).toBe(2);
+
+      const failedLog = logs.find(l => l.error);
+      expect(failedLog).toBeTruthy();
+      expect(failedLog!.error).toBe('Rate limited');
+    });
+
+    it('should log notification via logTelegramNotification', () => {
+      storage.logTelegramNotification({
+        chat_id: '123456789',
+        notification_type: 'test',
+        consent_id: 'consent_test',
+      });
+
+      const logs = storage.getTelegramNotificationLogs(10);
+      expect(logs.length).toBe(1);
+      expect(logs[0].notification_type).toBe('test');
     });
   });
 });

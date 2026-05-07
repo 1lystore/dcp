@@ -838,6 +838,7 @@ export class RelayTransport implements Transport {
 
     const postData = await postResponse.json() as {
       queued?: boolean;
+      accepted?: boolean;
       encrypted_payload?: string;
       error?: { code?: string; message?: string };
     };
@@ -848,7 +849,7 @@ export class RelayTransport implements Transport {
     }
 
     // Otherwise, poll for response
-    if (!postData.queued) {
+    if (!postData.queued && !postData.accepted) {
       throw relayUnavailable('Relay did not queue request');
     }
 

@@ -1,171 +1,26 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { open } from '@tauri-apps/plugin-shell';
-import {
-  api,
-  type Agent,
-  type TrustedService,
-  type KnownService,
-  type BudgetConfig,
-} from '../api';
-
-function normalizeServiceId(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 48);
-}
-
-function formatPublicKey(key: string): string {
-  const value = key.startsWith('ed25519:') ? key.slice('ed25519:'.length) : key;
-  if (value.length <= 20) return key;
-  return `${key.slice(0, 20)}...${key.slice(-10)}`;
-}
+import { api, type Agent, type BudgetConfig, type AuditEvent } from '../api';
 
 export default function Settings() {
   const navigate = useNavigate();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [revoking, setRevoking] = useState<string | null>(null);
-  const [services, setServices] = useState<TrustedService[]>([]);
-  const [serviceLoading, setServiceLoading] = useState(true);
-  const [serviceError, setServiceError] = useState<string | null>(null);
-  const [serviceSaving, setServiceSaving] = useState(false);
-  const [editingService, setEditingService] = useState<string | null>(null);
-  const [knownServices, setKnownServices] = useState<KnownService[]>([]);
-  const [selectedKnownService, setSelectedKnownService] = useState<string>('custom');
   const [budgetConfig, setBudgetConfig] = useState<BudgetConfig | null>(null);
   const [budgetLoading, setBudgetLoading] = useState(true);
   const [budgetSaving, setBudgetSaving] = useState(false);
   const [budgetError, setBudgetError] = useState<string | null>(null);
-  const [serviceForm, setServiceForm] = useState({
-    service_id: '',
-    name: '',
-    public_key: '',
-    scopes: 'sign:solana',
-    budget_daily: '10',
-    budget_currency: 'USDC',
-    auto_approve_under: '0',
-    enabled: true,
-    verified: false,
-  });
+  const [activity, setActivity] = useState<AuditEvent[]>([]);
+  const [activityLoading, setActivityLoading] = useState(true);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
-  const currencyOptions = useMemo(() => ['SOL', 'ETH', 'USDC', 'USDT', 'BASE_ETH'], []);
-  const scopePresets = useMemo(() => ([
-    {
-      id: 'sign-solana',
-      label: 'Sign Solana transactions',
-      scope: 'sign:solana',
-      category: 'Signing',
-      description: 'Allows signing Solana messages and transactions.',
-    },
-    {
-      id: 'sign-base',
-      label: 'Sign Base transactions',
-      scope: 'sign:base',
-      category: 'Signing',
-      description: 'Allows signing Base (EVM) messages and transactions.',
-    },
-    {
-      id: 'sign-ethereum',
-      label: 'Sign Ethereum transactions',
-      scope: 'sign:ethereum',
-      category: 'Signing',
-      description: 'Allows signing Ethereum (EVM) messages and transactions.',
-    },
-    {
-      id: 'read-keys',
-      label: 'Read API keys',
-      scope: 'read:credentials.api.*',
-      category: 'Read Data',
-      description: 'Allows access to saved API keys.',
-    },
-    {
-      id: 'read-profile',
-      label: 'Read identity',
-      scope: 'read:identity.*',
-      category: 'Read Data',
-      description: 'Name, email, phone, birthday.',
-    },
-    {
-      id: 'read-address',
-      label: 'Read addresses',
-      scope: 'read:address.*',
-      category: 'Read Data',
-      description: 'Home and work addresses.',
-    },
-    {
-      id: 'read-preferences',
-      label: 'Read preferences',
-      scope: 'read:preferences.*',
-      category: 'Read Data',
-      description: 'Sizes, diet, brands.',
-    },
-    {
-      id: 'write-keys',
-      label: 'Write API keys',
-      scope: 'write:credentials.api.*',
-      category: 'Write Data',
-      description: 'Allows saving or updating API keys.',
-    },
-    {
-      id: 'write-profile',
-      label: 'Write identity',
-      scope: 'write:identity.*',
-      category: 'Write Data',
-      description: 'Allows updating name/email/phone/birthday.',
-    },
-    {
-      id: 'write-address',
-      label: 'Write addresses',
-      scope: 'write:address.*',
-      category: 'Write Data',
-      description: 'Allows updating addresses.',
-    },
-    {
-      id: 'write-preferences',
-      label: 'Write preferences',
-      scope: 'write:preferences.*',
-      category: 'Write Data',
-      description: 'Allows updating preferences.',
-    },
-    {
-      id: 'budget-check',
-      label: 'Budget checks',
-      scope: 'budget:check',
-      category: 'Other',
-      description: 'Allows checking remaining budget without signing.',
-    },
-  ]), []);
-  const scopesList = useMemo(() => (
-    serviceForm.scopes
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0)
-  ), [serviceForm.scopes]);
-  const scopeGroups = useMemo(() => {
-    const groups: Record<string, typeof scopePresets> = {};
-    scopePresets.forEach((preset) => {
-      if (!groups[preset.category]) {
-        groups[preset.category] = [];
-      }
-      groups[preset.category].push(preset);
-    });
-    return Object.entries(groups);
-  }, [scopePresets]);
-  const knownServiceMap = useMemo(() => {
-    const map = new Map<string, KnownService>();
-    knownServices.forEach((service) => map.set(service.service_id, service));
-    return map;
-  }, [knownServices]);
+  const currencyOptions = ['SOL', 'ETH', 'USDC', 'USDT', 'BASE_ETH'];
 
   useEffect(() => {
     loadAgents();
-    loadServices();
-    loadKnownServices();
     loadBudgets();
+    loadActivity();
   }, []);
 
   const loadAgents = async () => {
@@ -179,29 +34,6 @@ export default function Settings() {
     }
   };
 
-  const loadServices = async () => {
-    try {
-      const res = await api.getTrustedServices();
-      setServices(res.services || []);
-      setServiceError(null);
-    } catch (err) {
-      console.error('Failed to load trusted services:', err);
-      const message = err instanceof Error ? err.message : 'Failed to load trusted services';
-      setServiceError(message);
-    } finally {
-      setServiceLoading(false);
-    }
-  };
-
-  const loadKnownServices = async () => {
-    try {
-      const res = await api.getKnownServices();
-      setKnownServices(res.services || []);
-    } catch (err) {
-      console.error('Failed to load known services:', err);
-    }
-  };
-
   const loadBudgets = async () => {
     try {
       const res = await api.getBudgetConfig();
@@ -209,191 +41,21 @@ export default function Settings() {
       setBudgetError(null);
     } catch (err) {
       console.error('Failed to load budget config:', err);
-      const message = err instanceof Error ? err.message : 'Failed to load budget configuration';
-      setBudgetError(message);
+      setBudgetError(err instanceof Error ? err.message : 'Failed to load');
     } finally {
       setBudgetLoading(false);
     }
   };
 
-  const handleOwnerAuth = async () => {
-    setServiceError(null);
-    setBudgetError(null);
-    const ok = await api.authenticateOwner();
-    if (ok) {
-      await Promise.all([loadServices(), loadBudgets()]);
-    } else {
-      setServiceError('Owner authentication failed. Restart the app and try again.');
-      setBudgetError('Owner authentication failed. Restart the app and try again.');
-    }
-  };
-
-  const resetServiceForm = () => {
-    setEditingService(null);
-    setSelectedKnownService('custom');
-    setServiceForm({
-      service_id: '',
-      name: '',
-      public_key: '',
-      scopes: 'sign:solana',
-      budget_daily: '10',
-      budget_currency: 'USDC',
-      auto_approve_under: '0',
-      enabled: true,
-      verified: false,
-    });
-  };
-
-  const applyKnownService = (serviceId: string) => {
-    setSelectedKnownService(serviceId);
-    const known = knownServiceMap.get(serviceId);
-    if (!known) {
-      resetServiceForm();
-      return;
-    }
-    setEditingService(null);
-    setServiceForm({
-      service_id: known.service_id,
-      name: known.name,
-      public_key: known.public_key,
-      scopes: known.default_scopes.join(', '),
-      budget_daily: '10',
-      budget_currency: 'USDC',
-      auto_approve_under: '0',
-      enabled: true,
-      verified: known.verified,
-    });
-  };
-
-  const startEditService = (service: TrustedService) => {
-    setEditingService(service.service_id);
-    setSelectedKnownService('custom');
-    setServiceForm({
-      service_id: service.service_id,
-      name: service.name,
-      public_key: service.public_key,
-      scopes: service.scopes.join(', '),
-      budget_daily: String(service.budget.daily),
-      budget_currency: service.budget.currency,
-      auto_approve_under: String(service.budget.auto_approve_under ?? 0),
-      enabled: service.enabled,
-      verified: service.verified,
-    });
-  };
-
-  const toggleScope = (scope: string) => {
-    setServiceForm((prev) => {
-      const existing = prev.scopes
-        .split(',')
-        .map((item) => item.trim())
-        .filter((item) => item.length > 0);
-      const hasScope = existing.includes(scope);
-      const updated = hasScope
-        ? existing.filter((item) => item !== scope)
-        : [...existing, scope];
-      return {
-        ...prev,
-        scopes: updated.join(', '),
-      };
-    });
-  };
-
-  const handleSaveService = async () => {
-    setServiceSaving(true);
+  const loadActivity = async () => {
     try {
-      const scopes = serviceForm.scopes
-        .split(',')
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0);
-
-      const budgetDaily = Number(serviceForm.budget_daily);
-      const autoApprove = Number(serviceForm.auto_approve_under);
-
-      if (!serviceForm.service_id.trim()) {
-        throw new Error('Service ID is required');
-      }
-      if (!editingService && !serviceForm.public_key.trim()) {
-        throw new Error('Public key is required');
-      }
-      if (scopes.length === 0) {
-        throw new Error('At least one scope is required');
-      }
-
-      const isVerifiedService = editingService ? serviceForm.verified : selectedKnownService !== 'custom';
-
-      const payload = {
-        service_id: serviceForm.service_id.trim(),
-        name: serviceForm.name.trim() || serviceForm.service_id.trim(),
-        public_key: serviceForm.public_key.trim(),
-        scopes,
-        budget: {
-          daily: Number.isNaN(budgetDaily) ? 10 : budgetDaily,
-          currency: serviceForm.budget_currency,
-          auto_approve_under: Number.isNaN(autoApprove) ? 0 : autoApprove,
-        },
-        enabled: serviceForm.enabled,
-        verified: isVerifiedService,
-      };
-
-      if (editingService) {
-        const updates: {
-          name?: string;
-          public_key?: string;
-          scopes?: string[];
-          budget?: { daily: number; currency: string; auto_approve_under: number };
-          enabled?: boolean;
-          verified?: boolean;
-        } = {
-          name: payload.name,
-          scopes: payload.scopes,
-          budget: payload.budget,
-          enabled: payload.enabled,
-          verified: payload.verified,
-        };
-        if (payload.public_key) {
-          updates.public_key = payload.public_key;
-        }
-        await api.updateTrustedService(editingService, updates);
-      } else {
-        await api.addTrustedService(payload);
-      }
-
-      await loadServices();
-      resetServiceForm();
+      const res = await api.getActivity(20);
+      setActivity(res.events);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to save service';
-      setServiceError(message);
+      console.error('Failed to load activity:', err);
     } finally {
-      setServiceSaving(false);
+      setActivityLoading(false);
     }
-  };
-
-  const handleRevokeService = async (serviceId: string) => {
-    setServiceSaving(true);
-    try {
-      await api.revokeTrustedService(serviceId);
-      await loadServices();
-      if (editingService === serviceId) {
-        resetServiceForm();
-      }
-    } catch (err) {
-      console.error('Failed to revoke service:', err);
-      setServiceError('Failed to revoke service');
-    } finally {
-      setServiceSaving(false);
-    }
-  };
-
-  const handleOpenConnect = async (serviceId: string) => {
-    const known = knownServiceMap.get(serviceId);
-    if (known?.connect_url) {
-      try {
-        await open(known.connect_url);
-      } catch (err) {
-        console.error('Failed to open connect URL:', err);
-      }
-    }
-    navigate(`/connect?service=${encodeURIComponent(serviceId)}`);
   };
 
   const handleBudgetChange = (
@@ -403,14 +65,13 @@ export default function Settings() {
   ) => {
     if (!budgetConfig) return;
     const parsed = Number(value);
-    const updated = {
+    setBudgetConfig({
       ...budgetConfig,
       [type]: {
         ...budgetConfig[type],
         [currency]: Number.isNaN(parsed) ? 0 : parsed,
       },
-    };
-    setBudgetConfig(updated);
+    });
   };
 
   const handleSaveBudgets = async () => {
@@ -422,7 +83,7 @@ export default function Settings() {
       setBudgetError(null);
     } catch (err) {
       console.error('Failed to save budgets:', err);
-      setBudgetError('Failed to save budget configuration');
+      setBudgetError('Failed to save');
     } finally {
       setBudgetSaving(false);
     }
@@ -466,355 +127,64 @@ export default function Settings() {
     return acc;
   }, {} as Record<string, Agent[]>);
 
+  const eventIcons: Record<string, string> = {
+    GRANT: '+',
+    DENY: '-',
+    EXECUTE: '*',
+    READ: '.',
+    REVOKE: 'x',
+    CONFIG: '#',
+    EXPIRE: '~',
+  };
+
   return (
     <div>
+      {/* Vault Info */}
       <div className="card">
         <div className="card-header">
           <div>
             <h2 className="card-title">Settings</h2>
-            <p className="card-subtitle">Manage your vault settings and sessions</p>
+            <p className="card-subtitle">Manage your vault configuration</p>
           </div>
         </div>
 
-        <div style={{ marginBottom: '24px' }}>
-          <h3 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px' }}>
-            Vault Information
-          </h3>
-          <div style={{
-            padding: '12px 16px',
-            background: 'var(--bg-tertiary)',
-            borderRadius: '8px',
-            fontSize: '13px'
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-              <span style={{ color: 'var(--text-secondary)' }}>Vault Location</span>
-              <code>~/.dcp</code>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={{ color: 'var(--text-secondary)' }}>Server URL</span>
-              <code>http://127.0.0.1:8421</code>
-            </div>
+        <div style={{
+          padding: '12px 16px',
+          background: 'var(--bg-tertiary)',
+          borderRadius: '8px',
+          fontSize: '13px'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+            <span style={{ color: 'var(--text-secondary)' }}>Vault Location</span>
+            <code>~/.dcp</code>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: 'var(--text-secondary)' }}>Server URL</span>
+            <code>http://127.0.0.1:8421</code>
           </div>
         </div>
       </div>
 
+      {/* Budgets - Simplified */}
       <div className="card">
         <div className="card-header">
           <div>
-            <h2 className="card-title">Trusted Services</h2>
-            <p className="card-subtitle">Choose which apps and agents are allowed to use your vault</p>
+            <h2 className="card-title">Spending Limits</h2>
+            <p className="card-subtitle">Daily budgets and auto-approve thresholds</p>
           </div>
-          <button className="btn btn-secondary" onClick={loadServices}>
-            Refresh
-          </button>
-        </div>
-
-        {serviceError && (
-          <div className="alert error" style={{ marginBottom: '12px', display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center' }}>
-            <span>{serviceError}</span>
-            <button className="btn btn-secondary" onClick={handleOwnerAuth} style={{ padding: '4px 10px', fontSize: '12px' }}>
-              Authenticate Owner
-            </button>
-          </div>
-        )}
-
-        <div style={{ marginBottom: '20px' }}>
-          <h3 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px' }}>
-            {editingService ? `Edit ${editingService}` : 'Add App or Agent'}
-          </h3>
-
-          {knownServices.length > 0 && !editingService && (
-            <div className="form-group">
-              <label className="form-label">Choose a verified service</label>
-              <select
-                className="input"
-                value={selectedKnownService}
-                onChange={(e) => applyKnownService(e.target.value)}
-              >
-                <option value="custom">Custom service</option>
-                {knownServices.map((service) => (
-                  <option key={service.service_id} value={service.service_id}>
-                    {service.name}
-                  </option>
-                ))}
-              </select>
-              {selectedKnownService !== 'custom' && (
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                  Verified services use official public keys.
-                </div>
-              )}
-            </div>
-          )}
-
-          <div className="form-group">
-            <label className="form-label">Service ID</label>
-            <input
-              className="input"
-              placeholder="1ly"
-              value={serviceForm.service_id}
-              disabled={!!editingService || selectedKnownService !== 'custom'}
-              onChange={(e) => setServiceForm({ ...serviceForm, service_id: normalizeServiceId(e.target.value) })}
-            />
-            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
-              Use lowercase letters, numbers, and hyphens only.
-            </div>
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Name (optional)</label>
-            <input
-              className="input"
-              placeholder="1ly MCP"
-              value={serviceForm.name}
-              onChange={(e) => setServiceForm({ ...serviceForm, name: e.target.value })}
-            />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Public Key</label>
-            <input
-              className="input"
-              placeholder="ed25519:..."
-              value={serviceForm.public_key}
-              disabled={selectedKnownService !== 'custom' || (!!editingService && serviceForm.verified)}
-              onChange={(e) => setServiceForm({ ...serviceForm, public_key: e.target.value })}
-            />
-            {serviceForm.public_key && (
-              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                Current key: <code>{formatPublicKey(serviceForm.public_key)}</code>
-              </div>
-            )}
-            {selectedKnownService !== 'custom' && (
-              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                Verified services use the official public key from DCP.
-              </div>
-            )}
-            {!!editingService && serviceForm.verified && (
-              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                Verified service keys are locked here. Use a custom service if you need a manual override.
-              </div>
-            )}
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Permissions</label>
-            <div
-              style={{
-                padding: '12px',
-                border: '1px solid var(--border)',
-                borderRadius: '10px',
-                background: 'var(--bg-tertiary)',
-                display: 'grid',
-                gap: '12px',
-              }}
-            >
-              {scopeGroups.map(([category, presets]) => (
-                <div key={category} style={{ display: 'grid', gap: '8px' }}>
-                  <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>
-                    {category}
-                  </div>
-                  {presets.map((preset) => (
-                    <label
-                      key={preset.id}
-                      style={{
-                        display: 'flex',
-                        gap: '10px',
-                        alignItems: 'flex-start',
-                        padding: '8px 10px',
-                        borderRadius: '8px',
-                        background: 'var(--bg-secondary)',
-                        border: '1px solid var(--border)',
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={scopesList.includes(preset.scope)}
-                        onChange={() => toggleScope(preset.scope)}
-                      />
-                      <div>
-                        <div style={{ fontSize: '13px', fontWeight: 600 }}>{preset.label}</div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                          {preset.description}
-                        </div>
-                      </div>
-                    </label>
-                  ))}
-                </div>
-              ))}
-            </div>
-            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '8px' }}>
-              Advanced scopes (only if you know the exact scope names)
-            </div>
-            <input
-              className="input"
-              placeholder="sign:solana, read:credentials.*"
-              value={serviceForm.scopes}
-              onChange={(e) => setServiceForm({ ...serviceForm, scopes: e.target.value })}
-            />
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-            <div className="form-group">
-              <label className="form-label">Daily Budget</label>
-              <input
-                className="input"
-                type="number"
-                min="0"
-                value={serviceForm.budget_daily}
-                onChange={(e) => setServiceForm({ ...serviceForm, budget_daily: e.target.value })}
-              />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Currency</label>
-              <select
-                className="input"
-                value={serviceForm.budget_currency}
-                onChange={(e) => setServiceForm({ ...serviceForm, budget_currency: e.target.value })}
-              >
-                {currencyOptions.map((currency) => (
-                  <option key={currency} value={currency}>{currency}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Auto-approve under</label>
-            <input
-              className="input"
-              type="number"
-              min="0"
-              value={serviceForm.auto_approve_under}
-              onChange={(e) => setServiceForm({ ...serviceForm, auto_approve_under: e.target.value })}
-            />
-          </div>
-
-          <div style={{ display: 'flex', gap: '12px', alignItems: 'center', marginBottom: '16px' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
-              <input
-                type="checkbox"
-                checked={serviceForm.enabled}
-                onChange={(e) => setServiceForm({ ...serviceForm, enabled: e.target.checked })}
-              />
-              Enabled
-            </label>
-            <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-              {serviceForm.verified ? 'Verified service' : 'Custom service'}
-            </span>
-          </div>
-
-          <div style={{ display: 'flex', gap: '10px' }}>
-            <button
-              className="btn btn-primary"
-              onClick={handleSaveService}
-              disabled={serviceSaving}
-            >
-              {serviceSaving ? 'Saving...' : editingService ? 'Update Service' : 'Allow Service'}
-            </button>
-            {editingService && (
-              <button
-                className="btn btn-secondary"
-                onClick={resetServiceForm}
-                disabled={serviceSaving}
-              >
-                Cancel
-              </button>
-            )}
-          </div>
-        </div>
-
-        {serviceLoading ? (
-          <div className="loading">
-            <div className="spinner" />
-          </div>
-        ) : services.length === 0 ? (
-          <div className="empty-state">
-            <p>No trusted services yet</p>
-          </div>
-        ) : (
-          services.map((service) => (
-            <div
-              key={service.service_id}
-              style={{
-                padding: '12px 16px',
-                background: 'var(--bg-tertiary)',
-                border: '1px solid var(--border)',
-                borderRadius: '8px',
-                marginBottom: '12px',
-              }}
-            >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                  <div>
-                    <div style={{ fontSize: '14px', fontWeight: 600 }}>
-                      {service.name} <span style={{ color: 'var(--text-muted)' }}>({service.service_id})</span>
-                    </div>
-                    <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                      Scopes: {service.scopes.join(', ')}
-                    </div>
-                    <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                      Budget: {service.budget.daily} {service.budget.currency}/day
-                      {service.budget.auto_approve_under > 0
-                        ? ` • Auto < ${service.budget.auto_approve_under} ${service.budget.currency}`
-                        : ''}
-                    </div>
-                    <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                      Status: {service.enabled ? 'Enabled' : 'Disabled'} • {service.verified ? 'Verified' : 'Custom'}
-                    </div>
-                    {service.connected_at && (
-                      <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                        Connected: {new Date(service.connected_at).toLocaleString()}
-                      </div>
-                    )}
-                  </div>
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    <button
-                      className="btn btn-secondary"
-                      onClick={() => handleOpenConnect(service.service_id)}
-                      disabled={serviceSaving}
-                      style={{ padding: '4px 10px', fontSize: '12px' }}
-                    >
-                      Connect
-                    </button>
-                    <button
-                      className="btn btn-secondary"
-                      onClick={() => startEditService(service)}
-                      disabled={serviceSaving}
-                    style={{ padding: '4px 10px', fontSize: '12px' }}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    className="btn btn-danger"
-                    onClick={() => handleRevokeService(service.service_id)}
-                    disabled={serviceSaving}
-                    style={{ padding: '4px 10px', fontSize: '12px' }}
-                  >
-                    Revoke
-                  </button>
-                </div>
-              </div>
-            </div>
-          ))
-        )}
-      </div>
-
-      <div className="card">
-        <div className="card-header">
-          <div>
-            <h2 className="card-title">Budgets & Limits</h2>
-            <p className="card-subtitle">Set daily budgets and approval thresholds</p>
-          </div>
-          <button className="btn btn-secondary" onClick={loadBudgets}>
-            Refresh
-          </button>
         </div>
 
         {budgetError && (
-          <div className="alert error" style={{ marginBottom: '12px', display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center' }}>
-            <span>{budgetError}</span>
-            <button className="btn btn-secondary" onClick={handleOwnerAuth} style={{ padding: '4px 10px', fontSize: '12px' }}>
-              Authenticate Owner
-            </button>
+          <div style={{
+            padding: '12px',
+            background: 'rgba(239, 68, 68, 0.1)',
+            border: '1px solid rgba(239, 68, 68, 0.3)',
+            borderRadius: '8px',
+            color: '#fca5a5',
+            fontSize: '13px',
+            marginBottom: '16px'
+          }}>
+            {budgetError}
           </div>
         )}
 
@@ -837,33 +207,36 @@ export default function Settings() {
                 <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>{currency}</div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
                   <div>
-                    <label className="form-label">Daily</label>
+                    <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Daily Limit</label>
                     <input
                       className="input"
                       type="number"
                       min="0"
                       value={budgetConfig.daily_budget[currency] ?? 0}
                       onChange={(e) => handleBudgetChange('daily_budget', currency, e.target.value)}
+                      style={{ marginTop: '4px' }}
                     />
                   </div>
                   <div>
-                    <label className="form-label">Per Tx</label>
+                    <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Per Transaction</label>
                     <input
                       className="input"
                       type="number"
                       min="0"
                       value={budgetConfig.tx_limit[currency] ?? 0}
                       onChange={(e) => handleBudgetChange('tx_limit', currency, e.target.value)}
+                      style={{ marginTop: '4px' }}
                     />
                   </div>
                   <div>
-                    <label className="form-label">Approve Under</label>
+                    <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Auto-approve under</label>
                     <input
                       className="input"
                       type="number"
                       min="0"
                       value={budgetConfig.approval_threshold[currency] ?? 0}
                       onChange={(e) => handleBudgetChange('approval_threshold', currency, e.target.value)}
+                      style={{ marginTop: '4px' }}
                     />
                   </div>
                 </div>
@@ -875,44 +248,41 @@ export default function Settings() {
               disabled={budgetSaving}
               style={{ alignSelf: 'flex-start' }}
             >
-              {budgetSaving ? 'Saving...' : 'Save Budgets'}
+              {budgetSaving ? 'Saving...' : 'Save Limits'}
             </button>
           </div>
         )}
       </div>
 
-      <div className="card">
-        <div className="card-header">
-          <div>
-            <h2 className="card-title">Active Agent Sessions</h2>
-            <p className="card-subtitle">Manage authorized agent sessions</p>
+      {/* Active Sessions */}
+      {agents.length > 0 && (
+        <div className="card">
+          <div className="card-header">
+            <div>
+              <h2 className="card-title">Active Sessions</h2>
+              <p className="card-subtitle">Authorized agent sessions</p>
+            </div>
+            <button className="btn btn-secondary" onClick={loadAgents}>
+              Refresh
+            </button>
           </div>
-          <button className="btn btn-secondary" onClick={loadAgents}>
-            Refresh
-          </button>
-        </div>
 
-        {agents.length === 0 ? (
-          <div className="empty-state">
-            <p>No active agent sessions</p>
-          </div>
-        ) : (
-          Object.entries(agentGroups).map(([agentName, sessions]) => (
-            <div key={agentName} style={{ marginBottom: '20px' }}>
+          {Object.entries(agentGroups).map(([agentName, sessions]) => (
+            <div key={agentName} style={{ marginBottom: '16px' }}>
               <div style={{
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
                 marginBottom: '8px'
               }}>
-                <h3 style={{ fontSize: '14px', fontWeight: 600 }}>{agentName}</h3>
+                <span style={{ fontSize: '14px', fontWeight: 600 }}>{agentName}</span>
                 <button
                   className="btn btn-danger"
                   onClick={() => handleRevokeAgent(agentName)}
                   disabled={revoking === agentName}
                   style={{ padding: '4px 10px', fontSize: '12px' }}
                 >
-                  {revoking === agentName ? 'Revoking...' : 'Revoke All'}
+                  {revoking === agentName ? '...' : 'Revoke All'}
                 </button>
               </div>
 
@@ -920,38 +290,180 @@ export default function Settings() {
                 <div
                   key={session.id}
                   style={{
-                    padding: '12px 16px',
+                    padding: '10px 14px',
                     background: 'var(--bg-tertiary)',
                     border: '1px solid var(--border)',
                     borderRadius: '8px',
-                    marginBottom: '8px',
+                    marginBottom: '6px',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
                   }}
                 >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <div>
-                      <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                        Session: {session.id.slice(0, 8)}...
-                      </div>
-                      <div style={{ fontSize: '13px', marginTop: '4px' }}>
-                        Scopes: {session.granted_scopes.join(', ')}
-                      </div>
-                      <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                        Mode: {session.consent_mode} • Expires: {new Date(session.expires_at).toLocaleString()}
-                      </div>
+                  <div>
+                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                      {session.granted_scopes.join(', ')}
                     </div>
-                    <button
-                      className="btn btn-secondary"
-                      onClick={() => handleRevokeSession(session.id)}
-                      disabled={revoking === session.id}
-                      style={{ padding: '4px 10px', fontSize: '12px' }}
-                    >
-                      Revoke
-                    </button>
+                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                      Expires: {new Date(session.expires_at).toLocaleString()}
+                    </div>
                   </div>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => handleRevokeSession(session.id)}
+                    disabled={revoking === session.id}
+                    style={{ padding: '4px 10px', fontSize: '11px' }}
+                  >
+                    Revoke
+                  </button>
                 </div>
               ))}
             </div>
-          ))
+          ))}
+        </div>
+      )}
+
+      {/* Recent Activity */}
+      <div className="card">
+        <div className="card-header">
+          <div>
+            <h2 className="card-title">Recent Activity</h2>
+            <p className="card-subtitle">Last 20 events</p>
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button className="btn btn-secondary" onClick={loadActivity}>
+              Refresh
+            </button>
+            <button className="btn btn-secondary" onClick={() => navigate('/activity')}>
+              View All
+            </button>
+          </div>
+        </div>
+
+        {activityLoading ? (
+          <div className="loading">
+            <div className="spinner" />
+          </div>
+        ) : activity.length === 0 ? (
+          <div className="empty-state">
+            <p>No activity yet</p>
+          </div>
+        ) : (
+          <div style={{ maxHeight: '300px', overflow: 'auto' }}>
+            {activity.map((event) => (
+              <div
+                key={event.id}
+                style={{
+                  padding: '8px 12px',
+                  borderBottom: '1px solid var(--border)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  fontSize: '12px',
+                }}
+              >
+                <span style={{
+                  width: '20px',
+                  height: '20px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: 'var(--bg-tertiary)',
+                  borderRadius: '4px',
+                  fontFamily: 'monospace',
+                  fontWeight: 600,
+                }}>
+                  {eventIcons[event.event_type] || '?'}
+                </span>
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontWeight: 500 }}>{event.event_type}</span>
+                  {event.agent_name && (
+                    <span style={{ color: 'var(--text-muted)', marginLeft: '8px' }}>
+                      {event.agent_name}
+                    </span>
+                  )}
+                  {event.scope && (
+                    <span style={{ color: 'var(--text-muted)', marginLeft: '8px' }}>
+                      {event.scope}
+                    </span>
+                  )}
+                </div>
+                <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
+                  {new Date(event.created_at).toLocaleTimeString()}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Advanced Settings - Collapsed */}
+      <div className="card">
+        <button
+          onClick={() => setShowAdvanced(!showAdvanced)}
+          style={{
+            width: '100%',
+            padding: '16px',
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            color: 'inherit',
+          }}
+        >
+          <span style={{ fontWeight: 600 }}>Advanced Settings</span>
+          <span style={{ color: 'var(--text-muted)' }}>
+            {showAdvanced ? '-' : '+'}
+          </span>
+        </button>
+
+        {showAdvanced && (
+          <div style={{ padding: '0 16px 16px' }}>
+            <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+              For power users: trusted services, relay configuration, and manual overrides.
+            </div>
+            <div style={{ display: 'grid', gap: '8px' }}>
+              <div style={{
+                padding: '12px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+                fontSize: '13px',
+              }}>
+                <strong>Trusted Services:</strong> Manage which apps can access your vault without per-request consent.
+                <div style={{ marginTop: '8px' }}>
+                  <button className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '12px' }}>
+                    Manage Services
+                  </button>
+                </div>
+              </div>
+              <div style={{
+                padding: '12px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+                fontSize: '13px',
+              }}>
+                <strong>Relay Configuration:</strong> Custom relay server for remote agent connections.
+                <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
+                  Default: wss://relay.dcp.1ly.store
+                </div>
+              </div>
+              <div style={{
+                padding: '12px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+                fontSize: '13px',
+              }}>
+                <strong>Recovery Phrase:</strong> View your 12-word recovery phrase.
+                <div style={{ marginTop: '8px' }}>
+                  <button className="btn btn-danger" style={{ padding: '6px 12px', fontSize: '12px' }}>
+                    Show Recovery Phrase
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>

@@ -1,0 +1,617 @@
+/**
+ * DCP Agent MCP Server
+ *
+ * MCP (Model Context Protocol) server for AI agents to interact with DCP Vault
+ * through the relay connection. Unlike dcp-mcp which uses local VaultStorage,
+ * this uses AgentConnection to proxy requests through the relay.
+ *
+ * MCP Tools (subset that works via relay):
+ * - vault_get_address(chain) - Get public address (no consent)
+ * - vault_budget_check(amount, currency) - Check budget (no consent)
+ * - vault_read(scope, fields?) - Read data (consent may be required)
+ * - vault_sign_tx(chain, unsigned_tx, description?) - Sign transaction (consent required)
+ * - vault_sign_message(chain, message, encoding?) - Sign message (consent required)
+ * - vault_sign_typed_data(chain, typed_data) - Sign typed data (consent required)
+ * - vault_write(scope, data) - Write data (consent required)
+ */
+
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  ErrorCode,
+  McpError,
+} from '@modelcontextprotocol/sdk/types.js';
+
+import { DcpError } from '@dcprotocol/client';
+import { AgentConnection } from './connection.js';
+import { AgentConfig, AgentError } from './types.js';
+
+// ============================================================================
+// Consent Polling
+// ============================================================================
+
+const CONSENT_POLL_INTERVAL_MS = 2000; // Poll every 2 seconds
+const CONSENT_TIMEOUT_MS = 120000; // 2 minute timeout
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Poll consent status until resolved
+ */
+async function pollConsentStatus(
+  consentId: string,
+  expiresAt?: string
+): Promise<{ status: string; session_id?: string }> {
+  const startTime = Date.now();
+  const expiryTime = expiresAt ? new Date(expiresAt).getTime() : startTime + CONSENT_TIMEOUT_MS;
+  const timeout = Math.min(CONSENT_TIMEOUT_MS, expiryTime - startTime);
+
+  process.stderr.write(`[DCP] Waiting for consent approval...\n`);
+
+  while (Date.now() - startTime < timeout) {
+    await sleep(CONSENT_POLL_INTERVAL_MS);
+
+    try {
+      // Poll the consent status endpoint (doesn't create new consents)
+      const response = await fetch(`http://127.0.0.1:8421/consent/${consentId}/status`);
+      if (!response.ok) {
+        continue; // Server error, keep trying
+      }
+
+      const data = await response.json() as { status: string; session_id?: string };
+
+      if (data.status === 'approved') {
+        process.stderr.write(`[DCP] Consent approved!\n`);
+        return data;
+      } else if (data.status === 'denied') {
+        process.stderr.write(`[DCP] Consent denied.\n`);
+        return data;
+      } else if (data.status === 'expired' || data.status === 'not_found') {
+        process.stderr.write(`[DCP] Consent expired or not found.\n`);
+        return data;
+      }
+      // Still pending, continue polling
+    } catch {
+      // Network error, keep trying
+    }
+  }
+
+  process.stderr.write(`[DCP] Consent timeout.\n`);
+  return { status: 'timeout' };
+}
+
+// ============================================================================
+// MCP Server Class
+// ============================================================================
+
+export class AgentMcpServer {
+  private config: AgentConfig;
+  private connection: AgentConnection;
+  private server: Server;
+  private forceRelay: boolean;
+
+  constructor(config: AgentConfig, options?: { forceRelay?: boolean }) {
+    this.config = config;
+    this.forceRelay = options?.forceRelay ?? process.env.DCP_FORCE_RELAY === '1';
+    this.connection = new AgentConnection(config, { forceRelay: this.forceRelay });
+
+    // Create MCP server
+    this.server = new Server(
+      {
+        name: 'dcp-agent',
+        version: '0.2.0',
+      },
+      {
+        capabilities: {
+          tools: {},
+        },
+      }
+    );
+
+    // Set up handlers
+    this.setupToolsHandler();
+    this.setupCallToolHandler();
+  }
+
+  /**
+   * Start the MCP server with stdio transport
+   */
+  async start(): Promise<void> {
+    // Connect to vault via relay/local
+    await this.connection.connect();
+
+    // Start the server with stdio transport
+    const transport = new StdioServerTransport();
+    await this.server.connect(transport);
+
+    // Log startup to stderr (stdout is for MCP protocol)
+    process.stderr.write(`DCP Agent MCP Server started\n`);
+    process.stderr.write(`  Agent: ${this.config.agent_name}\n`);
+    process.stderr.write(`  Vault: ${this.config.vault_id}\n`);
+    process.stderr.write(`  Relay: ${this.forceRelay ? 'forced' : 'auto'}\n`);
+  }
+
+  /**
+   * Set up the tools list handler
+   */
+  private setupToolsHandler(): void {
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+      return {
+        tools: [
+          {
+            name: 'vault_get_address',
+            description: 'Get the public wallet address for a blockchain. No consent required.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                chain: {
+                  type: 'string',
+                  enum: ['solana', 'base', 'ethereum'],
+                  description: 'The blockchain to get the address for',
+                },
+              },
+              required: ['chain'],
+            },
+          },
+          {
+            name: 'vault_budget_check',
+            description: 'Check if a proposed transaction amount is within budget limits. Returns allowed status, limits, remaining budget, and whether approval is required. No consent required.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                amount: {
+                  type: 'number',
+                  description: 'The transaction amount to check',
+                },
+                currency: {
+                  type: 'string',
+                  description: 'The currency code (SOL, ETH, USDC, BASE_ETH)',
+                },
+                chain: {
+                  type: 'string',
+                  enum: ['solana', 'base', 'ethereum'],
+                  description: 'Optional: The blockchain for chain-specific budget limits',
+                },
+              },
+              required: ['amount', 'currency'],
+            },
+          },
+          {
+            name: 'vault_read',
+            description: `Read data from the user's vault. Only use when the user explicitly asks you to read their info. Requires user consent.
+
+Available scope patterns:
+- identity.* — User identity (identity.name, identity.email, identity.phone, identity.home_address, etc.)
+- credentials.api.* — API keys (credentials.api.openai, credentials.api.stripe, credentials.api.github, etc.)
+- address.* — Saved addresses (address.home, address.work, address.shipping, etc.)
+
+Example scopes: "identity.email", "credentials.api.openai", "address.home"`,
+            inputSchema: {
+              type: 'object',
+              properties: {
+                scope: {
+                  type: 'string',
+                  description: 'The scope to read. Patterns: identity.*, credentials.api.*, address.*',
+                },
+                fields: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Optional: specific fields to return',
+                },
+              },
+              required: ['scope'],
+            },
+          },
+          {
+            name: 'vault_sign_tx',
+            description: 'Sign a transaction using the vault wallet. Requires user consent. The private key never leaves the vault.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                chain: {
+                  type: 'string',
+                  enum: ['solana', 'base', 'ethereum'],
+                  description: 'The blockchain for the transaction',
+                },
+                unsigned_tx: {
+                  type: 'string',
+                  description: 'The unsigned transaction (base64 for Solana, JSON for EVM)',
+                },
+                description: {
+                  type: 'string',
+                  description: 'Human-readable description of what the transaction does',
+                },
+                amount: {
+                  type: 'number',
+                  description: 'Transaction amount for budget tracking',
+                },
+                currency: {
+                  type: 'string',
+                  description: 'Currency code for budget tracking',
+                },
+                destination: {
+                  type: 'string',
+                  description: 'Destination address for the transaction',
+                },
+                idempotency_key: {
+                  type: 'string',
+                  description: 'Unique key to prevent duplicate transactions',
+                },
+              },
+              required: ['chain', 'unsigned_tx'],
+            },
+          },
+          {
+            name: 'vault_sign_message',
+            description: 'Sign an arbitrary message using the vault wallet. Requires user consent.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                chain: {
+                  type: 'string',
+                  enum: ['solana', 'base', 'ethereum'],
+                  description: 'The blockchain for the message signing',
+                },
+                message: {
+                  type: 'string',
+                  description: 'The message to sign (utf8 or base64)',
+                },
+                encoding: {
+                  type: 'string',
+                  enum: ['utf8', 'base64'],
+                  description: 'Message encoding (default: utf8)',
+                },
+                description: {
+                  type: 'string',
+                  description: 'Human-readable description of what the message represents',
+                },
+              },
+              required: ['chain', 'message'],
+            },
+          },
+          {
+            name: 'vault_sign_typed_data',
+            description: 'Sign EIP-712 typed data using the vault wallet. Requires user consent.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                chain: {
+                  type: 'string',
+                  enum: ['base', 'ethereum'],
+                  description: 'The EVM chain for typed data signing',
+                },
+                typed_data: {
+                  type: 'object',
+                  description: 'EIP-712 typed data object',
+                },
+                description: {
+                  type: 'string',
+                  description: 'Human-readable description of what the typed data represents',
+                },
+              },
+              required: ['chain', 'typed_data'],
+            },
+          },
+          {
+            name: 'vault_write',
+            description: `Store data in the user's vault. Only use when the user explicitly asks you to save/store something. Requires user consent.
+
+Available scope patterns:
+- identity.* — User identity (identity.name, identity.email, identity.phone, identity.home_address, etc.)
+- credentials.api.* — API keys (credentials.api.openai, credentials.api.stripe, credentials.api.github, etc.)
+- address.* — Saved addresses (address.home, address.work, address.shipping, etc.)
+
+Example: scope="credentials.api.openai", data={"key": "sk-xxx", "name": "My OpenAI Key"}`,
+            inputSchema: {
+              type: 'object',
+              properties: {
+                scope: {
+                  type: 'string',
+                  description: 'The scope to write. Patterns: identity.*, credentials.api.*, address.*',
+                },
+                data: {
+                  type: 'object',
+                  description: 'The data to store (object with key-value pairs)',
+                },
+              },
+              required: ['scope', 'data'],
+            },
+          },
+        ],
+      };
+    });
+  }
+
+  /**
+   * Execute a tool call (extracted for retry logic)
+   */
+  private async executeToolCall(name: string, args: Record<string, unknown> | undefined): Promise<{ content: Array<{ type: string; text: string }> }> {
+    switch (name) {
+      case 'vault_get_address': {
+        const input = args as { chain: 'solana' | 'base' | 'ethereum' };
+        if (!input.chain) {
+          throw new McpError(ErrorCode.InvalidParams, 'chain is required');
+        }
+        const result = await this.connection.getAddress(input.chain);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'vault_budget_check': {
+        const input = args as { amount: number; currency: string; chain?: 'solana' | 'base' | 'ethereum' };
+        if (input.amount === undefined || !input.currency) {
+          throw new McpError(ErrorCode.InvalidParams, 'amount and currency are required');
+        }
+        const result = await this.connection.budgetCheck({
+          amount: input.amount,
+          currency: input.currency,
+          chain: input.chain,
+        });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'vault_read': {
+        const input = args as { scope: string; fields?: string[] };
+        if (!input.scope) {
+          throw new McpError(ErrorCode.InvalidParams, 'scope is required');
+        }
+        const result = await this.connection.readCredential(input.scope, input.fields);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'vault_sign_tx': {
+        const input = args as {
+          chain: 'solana' | 'base' | 'ethereum';
+          unsigned_tx: string;
+          description?: string;
+          amount?: number;
+          currency?: string;
+          destination?: string;
+          idempotency_key?: string;
+        };
+        if (!input.chain || !input.unsigned_tx) {
+          throw new McpError(ErrorCode.InvalidParams, 'chain and unsigned_tx are required');
+        }
+        const result = await this.connection.signTx({
+          chain: input.chain,
+          unsignedTx: input.unsigned_tx,
+          description: input.description,
+          amount: input.amount,
+          currency: input.currency,
+          destination: input.destination,
+          idempotencyKey: input.idempotency_key,
+        });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'vault_sign_message': {
+        const input = args as {
+          chain: 'solana' | 'base' | 'ethereum';
+          message: string;
+          encoding?: 'utf8' | 'base64';
+          description?: string;
+        };
+        if (!input.chain || !input.message) {
+          throw new McpError(ErrorCode.InvalidParams, 'chain and message are required');
+        }
+        const result = await this.connection.signMessage({
+          chain: input.chain,
+          message: input.message,
+          encoding: input.encoding,
+          description: input.description,
+        });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'vault_sign_typed_data': {
+        const input = args as {
+          chain: 'base' | 'ethereum';
+          typed_data: Record<string, unknown>;
+          description?: string;
+        };
+        if (!input.chain || !input.typed_data) {
+          throw new McpError(ErrorCode.InvalidParams, 'chain and typed_data are required');
+        }
+        const result = await this.connection.signTypedData({
+          chain: input.chain,
+          typedData: input.typed_data,
+          description: input.description,
+        });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'vault_write': {
+        const input = args as { scope: string; data: Record<string, unknown> };
+        if (!input.scope || !input.data) {
+          throw new McpError(ErrorCode.InvalidParams, 'scope and data are required');
+        }
+        const result = await this.connection.writeCredential(input.scope, input.data);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      default:
+        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+    }
+  }
+
+  /**
+   * Set up the call tool handler
+   */
+  private setupCallToolHandler(): void {
+    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const { name, arguments: args } = request.params;
+
+      try {
+        // Execute the tool call
+        return await this.executeToolCall(name, args);
+      } catch (error) {
+        // Handle DcpError from client (especially CONSENT_REQUIRED)
+        if (error instanceof DcpError) {
+          if (error.code === 'CONSENT_REQUIRED') {
+            const consentId = error.details.consent_id as string | undefined;
+            const expiresAt = error.details.expires_at as string | undefined;
+
+            if (!consentId) {
+              throw new Error('CONSENT_REQUIRED error missing consent_id');
+            }
+
+            process.stderr.write(`\n[DCP] Consent required (${consentId})\n`);
+            process.stderr.write(`[DCP] Please approve in DCP Vault app or Telegram...\n`);
+
+            // Poll consent STATUS (not retry request) until resolved
+            const result = await pollConsentStatus(consentId, expiresAt);
+
+            if (result.status === 'approved') {
+              // Consent approved - retry the original request (session exists now)
+              try {
+                const retryResult = await this.executeToolCall(name, args);
+                return retryResult;
+              } catch (retryError) {
+                // If retry fails, return that error
+                if (retryError instanceof DcpError) {
+                  return {
+                    content: [
+                      {
+                        type: 'text',
+                        text: JSON.stringify({
+                          error: retryError.code,
+                          message: retryError.message,
+                        }, null, 2),
+                      },
+                    ],
+                    isError: true,
+                  };
+                }
+                throw retryError;
+              }
+            } else if (result.status === 'denied') {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      status: 'denied',
+                      message: 'User denied the consent request.',
+                    }, null, 2),
+                  },
+                ],
+                isError: true,
+              };
+            } else {
+              // Timeout, expired, or not found
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      status: result.status,
+                      message: `Consent ${result.status}. Please try again.`,
+                      consent_id: consentId,
+                    }, null, 2),
+                  },
+                ],
+                isError: true,
+              };
+            }
+          }
+          if (error.code === 'CONSENT_DENIED') {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    status: 'denied',
+                    message: 'User denied the consent request.',
+                  }, null, 2),
+                },
+              ],
+              isError: true,
+            };
+          }
+          // Other DcpErrors - return as error
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: error.code,
+                  message: error.message,
+                  details: error.details,
+                }, null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+        if (error instanceof AgentError) {
+          // Convert AgentError to MCP error format
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(error.toJSON(), null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+        if (error instanceof McpError) {
+          throw error;
+        }
+        // Unknown error
+        const message = error instanceof Error ? error.message : String(error);
+        throw new McpError(ErrorCode.InternalError, message);
+      }
+    });
+  }
+
+  /**
+   * Stop the server and close connection
+   */
+  async stop(): Promise<void> {
+    await this.connection.close();
+    process.stderr.write('DCP Agent MCP Server stopped\n');
+  }
+}
+
+// ============================================================================
+// Standalone runner (if called directly)
+// ============================================================================
+
+export async function runMcpServer(
+  config: AgentConfig,
+  options?: { forceRelay?: boolean }
+): Promise<void> {
+  const server = new AgentMcpServer(config, options);
+
+  // Handle shutdown
+  process.on('SIGINT', async () => {
+    process.stderr.write('Shutting down...\n');
+    await server.stop();
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', async () => {
+    await server.stop();
+    process.exit(0);
+  });
+
+  await server.start();
+}

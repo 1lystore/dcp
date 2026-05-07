@@ -366,8 +366,8 @@ fn find_node_root() -> Option<std::path::PathBuf> {
 fn find_monorepo_root() -> Option<std::path::PathBuf> {
     let mut dir = std::env::current_dir().ok()?;
     loop {
-        // Check for packages/dcp-server directory (monorepo structure)
-        let server_path = dir.join("packages").join("dcp-server");
+        // Check for packages/dcp-vault directory (monorepo structure)
+        let server_path = dir.join("packages").join("dcp-vault");
         if server_path.exists() {
             return Some(dir);
         }
@@ -585,44 +585,65 @@ async fn start_server(state: State<'_, ServerState>, app: AppHandle) -> Result<(
     // Find the server binary
     let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
     let bin_path = resource_dir.join("bin").join(if cfg!(windows) {
-        "dcp-server.exe"
+        "dcp-vault.exe"
     } else {
-        "dcp-server"
+        "dcp-vault"
     });
 
     let runtime_server = resource_dir
         .join("resources")
-        .join("dcp-server-runtime")
+        .join("dcp-vault-runtime")
         .join("node_modules")
         .join("@dcprotocol")
-        .join("server")
+        .join("vault")
         .join("dist")
+        .join("server")
         .join("index.js");
-    let bundled_server = resource_dir.join("resources").join("dcp-server-bundle.cjs");
-    let res_js_path = resource_dir.join("dcp-server").join("dist").join("index.js");
-    let res_js_alt = resource_dir.join("dcp-server").join("index.js");
+    let bundled_server = resource_dir.join("resources").join("dcp-vault-bundle.cjs");
+    let res_js_path = resource_dir.join("dcp-vault").join("dist").join("server").join("index.js");
+    let res_js_alt = resource_dir.join("dcp-vault").join("index.js");
     // Tauri bundles ../../path as _up_/_up_/path
-    let res_js_up = resource_dir.join("_up_").join("_up_").join("dcp-server").join("dist").join("index.js");
+    let res_js_up = resource_dir.join("_up_").join("_up_").join("dcp-vault").join("dist").join("server").join("index.js");
 
     // Local dev paths - try multiple approaches for monorepo
     let cwd = std::env::current_dir().unwrap_or_default();
 
     // Candidates for dev mode
     let dev_candidates: Vec<std::path::PathBuf> = vec![
-        // From src-tauri: ../../dcp-server/dist/index.js
-        cwd.join("../../dcp-server/dist/index.js"),
-        // From dcp-desktop: ../dcp-server/dist/index.js
-        cwd.join("../dcp-server/dist/index.js"),
+        // From src-tauri: ../../dcp-vault/dist/server/index.js
+        cwd.join("../../dcp-vault/dist/server/index.js"),
+        // From dcp-desktop: ../dcp-vault/dist/server/index.js
+        cwd.join("../dcp-vault/dist/server/index.js"),
         // From monorepo root
-        cwd.join("packages/dcp-server/dist/index.js"),
+        cwd.join("packages/dcp-vault/dist/server/index.js"),
         // Walk up to find monorepo root
-        find_monorepo_root().map(|r| r.join("packages/dcp-server/dist/index.js")).unwrap_or_default(),
+        find_monorepo_root().map(|r| r.join("packages/dcp-vault/dist/server/index.js")).unwrap_or_default(),
     ];
 
     let dev_js_root_path = find_node_root()
-        .map(|root| root.join("packages").join("dcp-server").join("dist").join("index.js"));
+        .map(|root| root.join("packages").join("dcp-vault").join("dist").join("server").join("index.js"));
 
-    let server_path = if bin_path.exists() {
+    // Debug: print all candidate paths
+    eprintln!("[DCP] Looking for server binary...");
+    eprintln!("[DCP] cwd: {:?}", std::env::current_dir());
+    eprintln!("[DCP] bin_path: {:?} exists={}", bin_path, bin_path.exists());
+    eprintln!("[DCP] runtime_server: {:?} exists={}", runtime_server, runtime_server.exists());
+    eprintln!("[DCP] res_js_path: {:?} exists={}", res_js_path, res_js_path.exists());
+    for (i, p) in dev_candidates.iter().enumerate() {
+        eprintln!("[DCP] dev_candidates[{}]: {:?} exists={}", i, p, p.exists());
+    }
+    if let Some(ref p) = dev_js_root_path {
+        eprintln!("[DCP] dev_js_root_path: {:?} exists={}", p, p.exists());
+    }
+
+    // In dev mode, prefer dev_candidates first (direct paths work better with node_modules)
+    let server_path = if let Some(dev_path) = dev_candidates.iter().find(|p| p.exists()) {
+        eprintln!("[DCP] Using dev_candidates path");
+        dev_path.clone()
+    } else if dev_js_root_path.as_ref().is_some_and(|p| p.exists()) {
+        eprintln!("[DCP] Using dev_js_root_path");
+        dev_js_root_path.unwrap()
+    } else if bin_path.exists() {
         bin_path
     } else if runtime_server.exists() {
         runtime_server
@@ -634,13 +655,11 @@ async fn start_server(state: State<'_, ServerState>, app: AppHandle) -> Result<(
         res_js_alt
     } else if res_js_up.exists() {
         res_js_up
-    } else if let Some(dev_path) = dev_candidates.iter().find(|p| p.exists()) {
-        dev_path.clone()
-    } else if dev_js_root_path.as_ref().is_some_and(|p| p.exists()) {
-        dev_js_root_path.unwrap()
     } else {
+        eprintln!("[DCP] ERROR: No server binary found!");
         return Err("DCP server binary not found".to_string());
     };
+    eprintln!("[DCP] Using server_path: {:?}", server_path);
 
     // Start the server
     let child = if matches!(
@@ -656,10 +675,10 @@ async fn start_server(state: State<'_, ServerState>, app: AppHandle) -> Result<(
         let helper_node_modules = resource_dir.join("resources").join("node_modules");
         let runtime_node_modules = resource_dir
             .join("resources")
-            .join("dcp-server-runtime")
+            .join("dcp-vault-runtime")
             .join("node_modules");
-        let res_node_modules = resource_dir.join("dcp-server").join("node_modules");
-        let res_node_modules_up = resource_dir.join("_up_").join("_up_").join("dcp-server").join("node_modules");
+        let res_node_modules = resource_dir.join("dcp-vault").join("node_modules");
+        let res_node_modules_up = resource_dir.join("_up_").join("_up_").join("dcp-vault").join("node_modules");
         if helper_node_modules.exists() {
             node_paths.push(helper_node_modules);
         }
@@ -675,7 +694,7 @@ async fn start_server(state: State<'_, ServerState>, app: AppHandle) -> Result<(
 
         let dev_node_modules = std::env::current_dir()
             .unwrap_or_default()
-            .join("../dcp-server/node_modules");
+            .join("../dcp-vault/node_modules");
         if dev_node_modules.exists() {
             node_paths.push(dev_node_modules);
         }

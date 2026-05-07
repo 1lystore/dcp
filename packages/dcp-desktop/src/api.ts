@@ -123,6 +123,71 @@ export interface PairingTokenResponse {
   budget: { daily: number; currency: string; auto_approve_under: number };
 }
 
+// Agent connection types for remote agents
+export type AgentConnectionMode = 'mcp' | 'proxy' | 'sdk';
+export type AgentTier = 'free' | 'pro' | 'enterprise';
+
+export interface AgentConnection {
+  agent_id: string;
+  agent_name: string;
+  name?: string; // Alias for agent_name
+  vault_id: string;
+  mode: AgentConnectionMode;
+  tier: AgentTier;
+  permission_scopes: string[];
+  relay_url: string;
+  status: 'active' | 'revoked';
+  paired_at: string;
+  last_seen_at?: string;
+  revoked_at?: string;
+  request_count?: number;
+}
+
+export interface SignedPairingGrantResponse {
+  token: string;
+  agent_name: string; // Top level for convenience
+  grant: {
+    agent_name: string;
+    vault_id: string;
+    mode: AgentConnectionMode;
+    tier: AgentTier;
+    permission_scopes: string[];
+    relay_url: string;
+    expires_at: string;
+  };
+  signature: string;
+}
+
+export interface VpsPairingInviteResponse {
+  token: string;
+  agent_name: string;
+  vault_id: string;
+  relay_url: string;
+  expires_at: string;
+}
+
+// VPS Pairing Claim types
+export interface PairingClaimData {
+  invite_id: string;
+  agent_public_key: string;
+  agent_hostname: string;
+  agent_version: string;
+  timestamp: number;
+  nonce: string;
+  signature: string;
+}
+
+export interface StoredPairingClaim {
+  claim_id: string;
+  claim: PairingClaimData;
+  verification_phrase: string;
+  received_at: number;
+  status: 'pending' | 'approved' | 'denied' | 'expired';
+  agent_id?: string;
+  vault_id?: string;
+  resolved_at?: number;
+}
+
 class ApiClient {
   private ownerToken: string | null = null;
   private ownerAuthInFlight: Promise<boolean> | null = null;
@@ -151,7 +216,7 @@ class ApiClient {
 
   private async request<T>(path: string, options?: RequestInit, retry = false): Promise<T> {
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
+      ...(options?.body ? { 'Content-Type': 'application/json' } : {}),
       ...(options?.headers as Record<string, string>),
     };
 
@@ -273,10 +338,10 @@ class ApiClient {
     return this.request('/consent');
   }
 
-  async approveConsent(id: string, session: boolean = false): Promise<{ approved: boolean; session_id?: string }> {
+  async approveConsent(id: string, options: { session?: boolean; always?: boolean } = {}): Promise<{ approved: boolean; session_id?: string; policy_created?: boolean }> {
     return this.request(`/consent/${id}/approve`, {
       method: 'POST',
-      body: JSON.stringify({ session }),
+      body: JSON.stringify(options),
     });
   }
 
@@ -414,6 +479,154 @@ class ApiClient {
     return this.request('/v1/vault/delete', {
       method: 'POST',
       body: JSON.stringify({ scope, agent_name: agentName }),
+    });
+  }
+
+  // Agent connection methods for remote agents
+  async getAgentConnections(): Promise<{ agents: AgentConnection[] }> {
+    return this.request('/v1/agent-connections');
+  }
+
+  async createSignedPairingGrant(payload: {
+    agent_name: string;
+    mode: AgentConnectionMode;
+    permission_scopes: string[];
+    tier?: AgentTier;
+    budget?: { daily: number; currency: string; auto_approve_under: number };
+    ttl_ms?: number;
+  }): Promise<SignedPairingGrantResponse> {
+    return this.request('/v1/pairing-grants', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async createVpsPairingInvite(payload: {
+    agent_name: string;
+    ttl_ms?: number;
+  }): Promise<VpsPairingInviteResponse> {
+    return this.request('/v1/pairing-invites', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async revokeAgentConnection(agentId: string): Promise<{ revoked: boolean }> {
+    return this.request(`/v1/agent-connections/${encodeURIComponent(agentId)}/revoke`, {
+      method: 'POST',
+    });
+  }
+
+  async deleteAgentConnection(agentId: string): Promise<{ deleted: boolean }> {
+    return this.request(`/v1/agent-connections/${encodeURIComponent(agentId)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  // Telegram integration methods
+  async startTelegramPairing(): Promise<{ code: string; expires_at: string }> {
+    return this.request('/v1/telegram/pair/start', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  }
+
+  async getTelegramPairingStatus(): Promise<{ paired: boolean; chat_id?: string }> {
+    return this.request('/v1/telegram/pair/status');
+  }
+
+  async getTelegramConfig(): Promise<{
+    configured: boolean;
+    enabled?: boolean;
+    chat_id?: string;
+    paired_at?: string;
+    notify_consent?: boolean;
+  } | null> {
+    try {
+      return await this.request('/v1/telegram/config');
+    } catch {
+      return null;
+    }
+  }
+
+  async updateTelegramConfig(config: { enabled?: boolean; notify_consent?: boolean }): Promise<{ updated: boolean }> {
+    return this.request('/v1/telegram/config', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    });
+  }
+
+  async sendTelegramTest(): Promise<{ sent: boolean }> {
+    return this.request('/v1/telegram/test', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  }
+
+  async unlinkTelegram(): Promise<{ deleted: boolean }> {
+    return this.request('/v1/telegram/config', {
+      method: 'DELETE',
+    });
+  }
+
+  // MCP status methods
+  async getMcpStatus(): Promise<{ running: boolean; unlocked: boolean }> {
+    return this.request('/v1/vault/mcp-status');
+  }
+
+  async unlockMcp(passphrase: string): Promise<{ queued: boolean }> {
+    return this.request('/v1/vault/unlock-mcp', {
+      method: 'POST',
+      body: JSON.stringify({ passphrase }),
+    });
+  }
+
+  // Local MCP agent setup methods
+  async setupLocalMcp(agentType: 'claude-desktop' | 'cursor' | 'vscode' | 'openclaw' | 'other' = 'claude-desktop', customName?: string): Promise<{
+    success: boolean;
+    agent_id: string;
+    agent_name: string;
+    already_configured: boolean;
+    message: string;
+  }> {
+    return this.request('/v1/vault/setup-local-mcp', {
+      method: 'POST',
+      body: JSON.stringify({ agent_type: agentType, custom_name: customName }),
+    });
+  }
+
+  async getLocalMcpStatus(): Promise<{
+    configured: boolean;
+    config_exists: boolean;
+    connection_status: string;
+    agent_id: string;
+  }> {
+    return this.request('/v1/vault/local-mcp-status');
+  }
+
+  // VPS Pairing Claims methods
+  async getPairingClaims(): Promise<{ claims: StoredPairingClaim[] }> {
+    return this.request('/v1/pairing-claims');
+  }
+
+  async getPairingClaim(claimId: string): Promise<{ claim: StoredPairingClaim }> {
+    return this.request(`/v1/pairing-claims/${encodeURIComponent(claimId)}`);
+  }
+
+  async approvePairingClaim(
+    claimId: string,
+    options: { agent_name?: string; permission_scopes?: string[] } = {}
+  ): Promise<{ approved: boolean; agent_id: string; agent_name: string }> {
+    return this.request(`/v1/pairing-claims/${encodeURIComponent(claimId)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify(options),
+    });
+  }
+
+  async denyPairingClaim(claimId: string): Promise<{ denied: boolean }> {
+    return this.request(`/v1/pairing-claims/${encodeURIComponent(claimId)}/deny`, {
+      method: 'POST',
+      body: JSON.stringify({}),
     });
   }
 }

@@ -101,7 +101,7 @@ Build artifacts are created under:
 Production builds bundle:
 - a Node runtime
 - the DCP helper bundle
-- a packaged DCP server runtime at `src-tauri/resources/dcp-server-runtime`
+- a packaged DCP vault runtime at `src-tauri/resources/dcp-vault-runtime`
 
 End users do **not** need Node installed to run the packaged app.
 

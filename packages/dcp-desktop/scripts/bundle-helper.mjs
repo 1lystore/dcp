@@ -16,15 +16,30 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const outDir = join(__dirname, '..', 'src-tauri', 'resources');
 const helperOutFile = join(outDir, 'dcp-helper-bundle.cjs');
-const serverOutFile = join(outDir, 'dcp-server-bundle.cjs');
+const serverOutFile = join(outDir, 'dcp-vault-bundle.cjs');
 const nodeModulesOut = join(outDir, 'node_modules');
-const serverRuntimeDir = join(outDir, 'dcp-server-runtime');
+const serverRuntimeDir = join(outDir, 'dcp-vault-runtime');
 const serverRuntimeAppDir = join(serverRuntimeDir, 'app');
 const serverRuntimeNodeModulesDir = join(serverRuntimeDir, 'node_modules');
 const monorepoRoot = join(__dirname, '..', '..', '..');
 const monorepoNodeModules = join(monorepoRoot, 'node_modules');
-const serverEntry = join(monorepoRoot, 'packages', 'dcp-server', 'dist', 'index.js');
-const serverPackageDir = join(monorepoRoot, 'packages', 'dcp-server');
+const serverEntry = join(monorepoRoot, 'packages', 'dcp-vault', 'dist', 'index.js');
+const serverPackageDir = join(monorepoRoot, 'packages', 'dcp-vault');
+const workspacePackages = {
+  '@dcprotocol/core': join(monorepoRoot, 'packages', 'dcp-core', 'dist', 'index.js'),
+  '@dcprotocol/client': join(monorepoRoot, 'packages', 'dcp-client', 'dist', 'index.js'),
+  '@dcprotocol/relay': join(monorepoRoot, 'packages', 'dcp-relay', 'dist', 'index.js'),
+  '@dcprotocol/relay-client': join(monorepoRoot, 'packages', 'dcp-relay-client', 'dist', 'index.js'),
+};
+
+const workspacePackagePlugin = {
+  name: 'dcp-workspace-packages',
+  setup(build) {
+    build.onResolve({ filter: /^@dcprotocol\/(core|client|relay|relay-client)$/ }, (args) => ({
+      path: workspacePackages[args.path],
+    }));
+  },
+};
 
 // Native modules that can't be bundled - need their .node binaries
 const NATIVE_MODULES = [
@@ -179,7 +194,7 @@ function listServerRuntimePaths() {
   try {
     stdout = execFileSync(
       'npm',
-      ['ls', '--omit=dev', '--all', '--parseable', '-w', '@dcprotocol/server'],
+      ['ls', '--omit=dev', '--all', '--parseable', '-w', '@dcprotocol/vault'],
       { cwd: monorepoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
     );
   } catch (err) {
@@ -238,7 +253,21 @@ function stageServerRuntime() {
 }
 
 function resolvePackageDir(name) {
-  const entry = require.resolve(name, { paths: [monorepoRoot] });
+  let entry;
+  try {
+    entry = require.resolve(name, {
+      paths: [
+        monorepoRoot,
+        serverPackageDir,
+        join(monorepoRoot, 'packages', 'dcp-core'),
+        join(monorepoRoot, 'packages', 'dcp-client'),
+        join(monorepoRoot, 'packages', 'dcp-relay'),
+        join(monorepoRoot, 'packages', 'dcp-relay-client'),
+      ],
+    });
+  } catch {
+    return null;
+  }
   let cursor = dirname(entry);
 
   while (cursor !== dirname(cursor)) {
@@ -307,12 +336,13 @@ try {
     external: EXTERNAL_MODULES,
     mainFields: ['module', 'main'],
     nodePaths: [monorepoNodeModules],
+    plugins: [workspacePackagePlugin],
   });
 
   console.log(`[bundle-helper] Helper bundle created: ${helperOutFile}`);
 
   if (!existsSync(serverEntry)) {
-    throw new Error(`Server bundle input not found: ${serverEntry}. Run npm -w @dcprotocol/server run build first.`);
+    throw new Error(`Server bundle input not found: ${serverEntry}. Run npm -w @dcprotocol/vault run build first.`);
   }
 
   await build({
@@ -326,6 +356,7 @@ try {
     external: EXTERNAL_MODULES,
     mainFields: ['module', 'main'],
     nodePaths: [monorepoNodeModules],
+    plugins: [workspacePackagePlugin],
   });
 
   console.log(`[bundle-helper] Server bundle created: ${serverOutFile}`);

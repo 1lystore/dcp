@@ -18,8 +18,11 @@ import type {
   StoredMessage,
   VaultConnection,
   RelayConfig,
+  PairingClaim,
+  StoredPairingClaim,
 } from './types.js';
 import { RelayError, MESSAGE_TTL_MS } from './types.js';
+import { createHash, randomUUID } from 'node:crypto';
 
 // ============================================================================
 // Message Store
@@ -510,6 +513,255 @@ export class RateLimiter {
       trackedVaults: this.limits.size,
       maxRequests: this.maxRequests,
       windowMs: this.windowMs,
+    };
+  }
+
+  /**
+   * Stop cleanup interval
+   */
+  close(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+  }
+}
+
+// ============================================================================
+// Pairing Claim Store (VPS → Relay → Vault flow)
+// ============================================================================
+
+/** Word list for verification phrase generation (matches agent/pairing.ts) */
+const WORD_LIST = [
+  'apple', 'banana', 'cherry', 'dragon', 'eagle', 'falcon',
+  'grape', 'harbor', 'island', 'jungle', 'kettle', 'lemon',
+  'mango', 'nectar', 'orange', 'pepper', 'quartz', 'river',
+  'sunset', 'tiger', 'umbrella', 'violet', 'walnut', 'xylophone',
+  'yellow', 'zebra', 'anchor', 'bridge', 'castle', 'delta',
+  'ember', 'forest',
+];
+
+/** Pairing claim TTL: 10 minutes */
+const PAIRING_CLAIM_TTL_MS = 10 * 60 * 1000;
+
+export class PairingClaimStore {
+  /** claim_id -> stored claim */
+  private claims: Map<string, StoredPairingClaim> = new Map();
+  /** invite_id -> claim_id (for routing claims to vaults) */
+  private inviteIndex: Map<string, string> = new Map();
+  /** vault_id -> Set<claim_id> (for pushing claims to connected vaults) */
+  private vaultClaims: Map<string, Set<string>> = new Map();
+  private cleanupInterval: ReturnType<typeof setInterval> | null = null;
+
+  constructor() {
+    // Cleanup expired claims every minute
+    this.cleanupInterval = setInterval(() => {
+      this.cleanup();
+    }, 60_000);
+  }
+
+  /**
+   * Store a new pairing claim
+   *
+   * @param claim - The pairing claim from the agent
+   * @param vaultId - The vault ID this claim routes to (from invite lookup)
+   * @returns claim_id and verification_phrase
+   */
+  storeClaim(
+    claim: PairingClaim,
+    vaultId?: string
+  ): { claim_id: string; verification_phrase: string } {
+    const claimId = `claim_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+
+    // Generate verification phrase (deterministic from public key + invite)
+    const verificationPhrase = this.generateVerificationPhrase(
+      claim.agent_public_key,
+      claim.invite_id
+    );
+
+    const stored: StoredPairingClaim = {
+      claim_id: claimId,
+      claim,
+      verification_phrase: verificationPhrase,
+      received_at: Date.now(),
+      status: 'pending',
+      vault_id: vaultId,
+    };
+
+    this.claims.set(claimId, stored);
+    this.inviteIndex.set(claim.invite_id, claimId);
+
+    // Track by vault if known
+    if (vaultId) {
+      if (!this.vaultClaims.has(vaultId)) {
+        this.vaultClaims.set(vaultId, new Set());
+      }
+      this.vaultClaims.get(vaultId)!.add(claimId);
+    }
+
+    return { claim_id: claimId, verification_phrase: verificationPhrase };
+  }
+
+  /**
+   * Get a stored claim by claim_id
+   */
+  getClaim(claimId: string): StoredPairingClaim | undefined {
+    return this.claims.get(claimId);
+  }
+
+  /**
+   * Get claim by invite_id
+   */
+  getClaimByInvite(inviteId: string): StoredPairingClaim | undefined {
+    const claimId = this.inviteIndex.get(inviteId);
+    if (!claimId) return undefined;
+    return this.claims.get(claimId);
+  }
+
+  /**
+   * Get pending claims for a vault
+   */
+  getPendingClaimsForVault(vaultId: string): StoredPairingClaim[] {
+    const claimIds = this.vaultClaims.get(vaultId);
+    if (!claimIds) return [];
+
+    const pending: StoredPairingClaim[] = [];
+    for (const claimId of claimIds) {
+      const claim = this.claims.get(claimId);
+      if (claim && claim.status === 'pending') {
+        pending.push(claim);
+      }
+    }
+    return pending;
+  }
+
+  /**
+   * Update claim status (vault approves/denies)
+   */
+  updateClaimStatus(
+    claimId: string,
+    status: 'approved' | 'denied',
+    agentId?: string
+  ): boolean {
+    const claim = this.claims.get(claimId);
+    if (!claim) return false;
+
+    claim.status = status;
+    claim.resolved_at = Date.now();
+    if (agentId) {
+      claim.agent_id = agentId;
+    }
+
+    return true;
+  }
+
+  /**
+   * Associate a claim with a vault_id (when invite_id is resolved)
+   */
+  associateWithVault(claimId: string, vaultId: string): boolean {
+    const claim = this.claims.get(claimId);
+    if (!claim) return false;
+
+    claim.vault_id = vaultId;
+
+    if (!this.vaultClaims.has(vaultId)) {
+      this.vaultClaims.set(vaultId, new Set());
+    }
+    this.vaultClaims.get(vaultId)!.add(claimId);
+
+    return true;
+  }
+
+  /**
+   * Generate verification phrase (must match agent implementation)
+   *
+   * Same algorithm as dcp-agent/src/pairing.ts:generateVerificationPhrase
+   */
+  private generateVerificationPhrase(
+    agentPublicKey: string,
+    inviteId: string
+  ): string {
+    // Decode base64 public key
+    const publicKeyBytes = Buffer.from(agentPublicKey, 'base64');
+
+    // For relay, we use invite_id instead of full pairing invite
+    // This is a simplified version - the agent uses the full invite
+    const combined = Buffer.concat([
+      publicKeyBytes,
+      Buffer.from(inviteId),
+    ]);
+
+    const hash = createHash('sha256').update(combined).digest();
+
+    const word1 = WORD_LIST[hash[0] % WORD_LIST.length];
+    const word2 = WORD_LIST[hash[1] % WORD_LIST.length];
+    const word3 = WORD_LIST[hash[2] % WORD_LIST.length];
+
+    return `${word1}-${word2}-${word3}`;
+  }
+
+  /**
+   * Cleanup expired claims
+   */
+  cleanup(): number {
+    const now = Date.now();
+    let removed = 0;
+
+    for (const [claimId, claim] of this.claims) {
+      // Expire pending claims after TTL
+      if (claim.status === 'pending' && now - claim.received_at > PAIRING_CLAIM_TTL_MS) {
+        claim.status = 'expired';
+        claim.resolved_at = now;
+      }
+
+      // Remove resolved claims after 1 hour (for polling)
+      if (claim.status !== 'pending' && claim.resolved_at) {
+        if (now - claim.resolved_at > 60 * 60 * 1000) {
+          this.claims.delete(claimId);
+          this.inviteIndex.delete(claim.claim.invite_id);
+          if (claim.vault_id) {
+            this.vaultClaims.get(claim.vault_id)?.delete(claimId);
+          }
+          removed++;
+        }
+      }
+    }
+
+    return removed;
+  }
+
+  /**
+   * Get stats
+   */
+  getStats(): {
+    totalClaims: number;
+    pendingClaims: number;
+    approvedClaims: number;
+    deniedClaims: number;
+  } {
+    let pending = 0;
+    let approved = 0;
+    let denied = 0;
+
+    for (const claim of this.claims.values()) {
+      switch (claim.status) {
+        case 'pending':
+          pending++;
+          break;
+        case 'approved':
+          approved++;
+          break;
+        case 'denied':
+          denied++;
+          break;
+      }
+    }
+
+    return {
+      totalClaims: this.claims.size,
+      pendingClaims: pending,
+      approvedClaims: approved,
+      deniedClaims: denied,
     };
   }
 

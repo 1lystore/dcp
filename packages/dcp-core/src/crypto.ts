@@ -396,3 +396,116 @@ export function verifyCryptoReady(): boolean {
     return false;
   }
 }
+
+// ============================================================================
+// Ed25519 Signing (for pairing grants and authentication)
+// ============================================================================
+
+/** Ed25519 public key size: 32 bytes */
+export const ED25519_PUBLIC_KEY_SIZE = 32;
+
+/** Ed25519 private key size: 64 bytes (includes public key) */
+export const ED25519_PRIVATE_KEY_SIZE = 64;
+
+/** Ed25519 signature size: 64 bytes */
+export const ED25519_SIGNATURE_SIZE = 64;
+
+/**
+ * Generate an Ed25519 signing keypair
+ *
+ * Used for:
+ * - Signing pairing grants
+ * - Relay authentication
+ *
+ * @returns Object with publicKey (32 bytes) and privateKey (64 bytes)
+ */
+export function generateSigningKeyPair(): { publicKey: Buffer; privateKey: Buffer } {
+  const publicKey = sodium.sodium_malloc(ED25519_PUBLIC_KEY_SIZE);
+  const privateKey = sodium.sodium_malloc(ED25519_PRIVATE_KEY_SIZE);
+
+  sodium.crypto_sign_keypair(publicKey, privateKey);
+
+  return {
+    publicKey: Buffer.from(publicKey),
+    privateKey: Buffer.from(privateKey),
+  };
+}
+
+/**
+ * Sign a message with Ed25519
+ *
+ * @param message - Message to sign
+ * @param privateKey - 64-byte Ed25519 private key
+ * @returns 64-byte detached signature
+ */
+export function signMessage(message: Buffer, privateKey: Buffer): Buffer {
+  if (privateKey.length !== ED25519_PRIVATE_KEY_SIZE) {
+    throw new VaultError(
+      'INTERNAL_ERROR',
+      `Ed25519 private key must be ${ED25519_PRIVATE_KEY_SIZE} bytes`
+    );
+  }
+
+  const signature = sodium.sodium_malloc(ED25519_SIGNATURE_SIZE);
+  sodium.crypto_sign_detached(signature, message, privateKey);
+
+  return Buffer.from(signature);
+}
+
+/**
+ * Verify an Ed25519 signature
+ *
+ * @param message - Original message that was signed
+ * @param signature - 64-byte signature to verify
+ * @param publicKey - 32-byte Ed25519 public key
+ * @returns true if signature is valid, false otherwise
+ */
+export function verifySignature(
+  message: Buffer,
+  signature: Buffer,
+  publicKey: Buffer
+): boolean {
+  if (publicKey.length !== ED25519_PUBLIC_KEY_SIZE) {
+    return false;
+  }
+  if (signature.length !== ED25519_SIGNATURE_SIZE) {
+    return false;
+  }
+
+  try {
+    return sodium.crypto_sign_verify_detached(signature, message, publicKey);
+  } catch {
+    return false;
+  }
+}
+
+// ============================================================================
+// Canonical JSON Serialization (for deterministic signing)
+// ============================================================================
+
+/**
+ * Create canonical JSON string for deterministic signing
+ *
+ * CRITICAL: Recursively sorts ALL keys at ALL levels
+ * This is required for consistent signature verification
+ *
+ * @param value - Any JSON-serializable value
+ * @returns Canonical JSON string with sorted keys at all levels
+ */
+export function canonicalJson(value: unknown): string {
+  const normalize = (input: unknown): unknown => {
+    if (input === null || input === undefined) return input;
+    if (typeof input === 'bigint') return input.toString();
+    if (Array.isArray(input)) return input.map(normalize);
+    if (typeof input === 'object') {
+      const obj = input as Record<string, unknown>;
+      const sorted: Record<string, unknown> = {};
+      for (const key of Object.keys(obj).sort()) {
+        sorted[key] = normalize(obj[key]);
+      }
+      return sorted;
+    }
+    return input;
+  };
+  return JSON.stringify(normalize(value));
+}

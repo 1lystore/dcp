@@ -20,6 +20,7 @@ import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
 import type { WebSocket } from 'ws';
+import { ed25519 } from '@noble/curves/ed25519';
 import type {
   RelayConfig,
   RelayEnvelope,
@@ -29,13 +30,17 @@ import type {
   HeartbeatPayload,
   LongPollRequest,
   LongPollResponse,
+  PairingClaim,
+  PairingClaimResponse,
+  PairingApprovalStatus,
+  StoredPairingClaim,
 } from './types.js';
 import {
   RelayError,
   DEFAULT_RELAY_CONFIG,
   RELAY_VERSION,
 } from './types.js';
-import { MessageStore, ConnectionStore, RateLimiter } from './store.js';
+import { MessageStore, ConnectionStore, RateLimiter, PairingClaimStore } from './store.js';
 import { authenticateRegistration, authenticateRequest, closeAuth, type AuthConfig } from './auth.js';
 
 // ============================================================================
@@ -47,6 +52,7 @@ export class RelayServer {
   private messageStore: MessageStore;
   private connectionStore: ConnectionStore;
   private rateLimiter: RateLimiter;
+  private pairingClaimStore: PairingClaimStore;
   private config: RelayConfig;
   private authConfig: AuthConfig;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -54,6 +60,8 @@ export class RelayServer {
   private clientSockets: Set<WebSocket> = new Set();
   private clientRequestMap: Map<string, WebSocket> = new Map();
   private clientRequestsBySocket: Map<WebSocket, Set<string>> = new Map();
+  /** invite_id -> vault_id mapping (populated when vault registers) */
+  private inviteVaultMap: Map<string, string> = new Map();
 
   constructor(config: Partial<RelayConfig> & { authConfig?: AuthConfig } = {}) {
     this.config = { ...DEFAULT_RELAY_CONFIG, ...config };
@@ -64,6 +72,7 @@ export class RelayServer {
       this.config.rateLimitPerMinute,
       this.config.rateLimitWindowMs
     );
+    this.pairingClaimStore = new PairingClaimStore();
 
     this.server = Fastify({
       logger: this.config.debug
@@ -119,6 +128,7 @@ export class RelayServer {
 
     this.messageStore.close();
     this.rateLimiter.close();
+    this.pairingClaimStore.close();
     closeAuth();
     await this.server.close();
   }
@@ -140,6 +150,7 @@ export class RelayServer {
       ...this.messageStore.getStats(),
       ...this.connectionStore.getStats(),
       rateLimit: this.rateLimiter.getStats(),
+      pairingClaims: this.pairingClaimStore.getStats(),
       timestamp: new Date().toISOString(),
     }));
 
@@ -150,6 +161,7 @@ export class RelayServer {
         const messageStats = this.messageStore.getStats();
         const connectionStats = this.connectionStore.getStats();
         const rateLimitStats = this.rateLimiter.getStats();
+        const pairingStats = this.pairingClaimStore.getStats();
 
         const format = request.query.format;
 
@@ -176,6 +188,12 @@ export class RelayServer {
             '# HELP dcp_relay_ws_clients Connected WebSocket clients',
             '# TYPE dcp_relay_ws_clients gauge',
             `dcp_relay_ws_clients ${this.clientSockets.size}`,
+            '# HELP dcp_relay_pairing_claims_total Total pairing claims',
+            '# TYPE dcp_relay_pairing_claims_total gauge',
+            `dcp_relay_pairing_claims_total ${pairingStats.totalClaims}`,
+            '# HELP dcp_relay_pairing_claims_pending Pending pairing claims',
+            '# TYPE dcp_relay_pairing_claims_pending gauge',
+            `dcp_relay_pairing_claims_pending ${pairingStats.pendingClaims}`,
             '',
           ];
           reply.header('Content-Type', 'text/plain; charset=utf-8');
@@ -187,6 +205,7 @@ export class RelayServer {
           messages: messageStats,
           connections: connectionStats,
           rateLimit: rateLimitStats,
+          pairingClaims: pairingStats,
           websockets: {
             vaultConnections: this.wsConnections.size,
             clientConnections: this.clientSockets.size,
@@ -237,6 +256,54 @@ export class RelayServer {
         }
       );
     }
+
+    // ========================================================================
+    // Pairing Claim Routes (VPS → Relay → Vault flow)
+    // ========================================================================
+
+    // Submit a pairing claim (VPS agent → relay)
+    this.server.post<{ Body: PairingClaim }>(
+      '/v1/pairing-claims',
+      async (request, reply) => {
+        return this.handlePairingClaim(request.body, reply);
+      }
+    );
+
+    // Poll for pairing approval status
+    this.server.get<{ Params: { claimId: string } }>(
+      '/v1/pairing-claims/:claimId/status',
+      async (request, reply) => {
+        return this.handlePairingStatus(request.params.claimId, reply);
+      }
+    );
+
+    // Vault resolves a pairing claim (approve/deny)
+    this.server.post<{
+      Params: { claimId: string };
+      Body: { action: 'approve' | 'deny'; agent_id?: string; vault_id: string };
+    }>(
+      '/v1/pairing-claims/:claimId/resolve',
+      async (request, reply) => {
+        return this.handlePairingResolve(
+          request.params.claimId,
+          request.body,
+          reply
+        );
+      }
+    );
+
+    // Register an invite_id → vault_id mapping (called by vault on invite creation)
+    this.server.post<{ Body: { invite_id: string; vault_id: string } }>(
+      '/v1/invites/register',
+      async (request, reply) => {
+        const { invite_id, vault_id } = request.body;
+        if (!invite_id || !vault_id) {
+          return reply.status(400).send({ error: 'Missing invite_id or vault_id' });
+        }
+        this.inviteVaultMap.set(invite_id, vault_id);
+        return reply.send({ success: true });
+      }
+    );
   }
 
   private async handleRequest(
@@ -327,6 +394,7 @@ export class RelayServer {
     }
 
     return reply.status(202).send({
+      queued: true,
       accepted: true,
       request_id: envelope.request_id,
       message: 'Request queued for delivery',
@@ -425,6 +493,176 @@ export class RelayServer {
     this.notifyClientResponse(response);
 
     return reply.send({ success: true, request_id: response.request_id });
+  }
+
+  // --------------------------------------------------------------------------
+  // Pairing Claim Handlers
+  // --------------------------------------------------------------------------
+
+  /**
+   * Handle pairing claim submission from VPS agent
+   *
+   * Flow:
+   * 1. Receive claim from agent
+   * 2. Look up vault_id from invite_id
+   * 3. Store claim with verification phrase
+   * 4. Push claim to connected vault via WebSocket (if connected)
+   * 5. Return claim_id for polling
+   */
+  private async handlePairingClaim(
+    claim: PairingClaim,
+    reply: FastifyReply
+  ): Promise<unknown> {
+    // Validate required fields
+    if (!claim.invite_id || !claim.agent_public_key || !claim.signature) {
+      return reply.status(400).send({
+        success: false,
+        error: 'Missing required fields (invite_id, agent_public_key, signature)',
+      } satisfies PairingClaimResponse);
+    }
+
+    // Check timestamp freshness (within 5 minutes)
+    const now = Date.now();
+    if (Math.abs(now - claim.timestamp) > 5 * 60 * 1000) {
+      return reply.status(400).send({
+        success: false,
+        error: 'Claim timestamp too old or in the future',
+      } satisfies PairingClaimResponse);
+    }
+
+    // Verify Ed25519 signature
+    // The claim is signed over the canonical JSON of the payload (excluding signature)
+    try {
+      const payload = {
+        invite_id: claim.invite_id,
+        agent_public_key: claim.agent_public_key,
+        agent_hostname: claim.agent_hostname,
+        agent_version: claim.agent_version,
+        timestamp: claim.timestamp,
+        nonce: claim.nonce,
+      };
+      const canonical = JSON.stringify(payload, Object.keys(payload).sort());
+      const message = Buffer.from(canonical, 'utf8');
+      const signature = Buffer.from(claim.signature, 'base64');
+      const publicKey = Buffer.from(claim.agent_public_key, 'base64');
+
+      const isValid = ed25519.verify(signature, message, publicKey);
+      if (!isValid) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Invalid signature - claim not signed by the provided public key',
+        } satisfies PairingClaimResponse);
+      }
+    } catch (err) {
+      return reply.status(400).send({
+        success: false,
+        error: 'Failed to verify signature: ' + (err instanceof Error ? err.message : 'unknown error'),
+      } satisfies PairingClaimResponse);
+    }
+
+    // Look up vault_id from invite_id
+    const vaultId = this.inviteVaultMap.get(claim.invite_id);
+
+    // Store the claim
+    const { claim_id, verification_phrase } = this.pairingClaimStore.storeClaim(
+      claim,
+      vaultId
+    );
+
+    // Push to connected vault via WebSocket
+    if (vaultId) {
+      const ws = this.wsConnections.get(vaultId);
+      if (ws && ws.readyState === 1) {
+        const storedClaim = this.pairingClaimStore.getClaim(claim_id);
+        if (storedClaim) {
+          const wsMsg: WsMessage = {
+            type: 'pairing_claim',
+            payload: storedClaim,
+            timestamp: new Date().toISOString(),
+          };
+          ws.send(JSON.stringify(wsMsg));
+
+          if (this.config.debug) {
+            console.log(`Pushed pairing claim ${claim_id} to vault ${vaultId}`);
+          }
+        }
+      }
+    }
+
+    if (this.config.debug) {
+      console.log(
+        `Pairing claim received: ${claim_id} (invite: ${claim.invite_id}, vault: ${vaultId ?? 'unknown'})`
+      );
+    }
+
+    return reply.status(201).send({
+      success: true,
+      claim_id,
+      verification_phrase,
+    } satisfies PairingClaimResponse);
+  }
+
+  /**
+   * Handle pairing status polling from agent
+   */
+  private async handlePairingStatus(
+    claimId: string,
+    reply: FastifyReply
+  ): Promise<unknown> {
+    const claim = this.pairingClaimStore.getClaim(claimId);
+
+    if (!claim) {
+      return reply.status(404).send({
+        status: 'not_found',
+        error: 'Claim not found or expired',
+      } satisfies PairingApprovalStatus);
+    }
+
+    return reply.send({
+      status: claim.status,
+      agent_id: claim.agent_id,
+      vault_id: claim.vault_id,
+    } satisfies PairingApprovalStatus);
+  }
+
+  /**
+   * Handle pairing resolution from vault (approve/deny)
+   */
+  private async handlePairingResolve(
+    claimId: string,
+    body: { action: 'approve' | 'deny'; agent_id?: string; vault_id: string },
+    reply: FastifyReply
+  ): Promise<unknown> {
+    const { action, agent_id, vault_id } = body;
+
+    const claim = this.pairingClaimStore.getClaim(claimId);
+    if (!claim) {
+      return reply.status(404).send({ error: 'Claim not found' });
+    }
+
+    // Verify vault_id matches
+    if (claim.vault_id && claim.vault_id !== vault_id) {
+      return reply.status(403).send({ error: 'Vault ID mismatch' });
+    }
+
+    // Update claim status
+    const status = action === 'approve' ? 'approved' : 'denied';
+    const updated = this.pairingClaimStore.updateClaimStatus(claimId, status, agent_id);
+
+    if (!updated) {
+      return reply.status(500).send({ error: 'Failed to update claim status' });
+    }
+
+    if (this.config.debug) {
+      console.log(`Pairing claim ${claimId} ${status} by vault ${vault_id}`);
+    }
+
+    return reply.send({
+      success: true,
+      claim_id: claimId,
+      status,
+      agent_id,
+    });
   }
 
   // --------------------------------------------------------------------------
@@ -547,8 +785,22 @@ export class RelayServer {
           this.messageStore.markDelivered(envelope.request_id);
         }
 
+        // Send any pending pairing claims
+        const pendingClaims = this.pairingClaimStore.getPendingClaimsForVault(payload.vault_id);
+        for (const claim of pendingClaims) {
+          const claimMsg: WsMessage = {
+            type: 'pairing_claim',
+            payload: claim,
+            timestamp: new Date().toISOString(),
+          };
+          ws.send(JSON.stringify(claimMsg));
+        }
+
         if (this.config.debug) {
-          console.log(`Vault ${payload.vault_id} registered (authenticated)`);
+          console.log(
+            `Vault ${payload.vault_id} registered (authenticated) - ` +
+            `${pending.length} pending messages, ${pendingClaims.length} pending claims`
+          );
         }
         break;
       }
@@ -595,6 +847,44 @@ export class RelayServer {
           this.connectionStore.unregister(payload.vault_id);
           this.wsConnections.delete(payload.vault_id);
           setVaultId('');
+        }
+        break;
+      }
+
+      case 'pairing_result': {
+        // Vault pushing pairing approval/denial result
+        const payload = msg.payload as {
+          claim_id: string;
+          action: 'approve' | 'deny';
+          agent_id?: string;
+          vault_id: string;
+        };
+
+        if (!payload.claim_id || !payload.action || !payload.vault_id) {
+          this.sendWsError(ws, 'RELAY_INVALID_ENVELOPE', 'Invalid pairing_result payload');
+          return;
+        }
+
+        const status = payload.action === 'approve' ? 'approved' : 'denied';
+        const updated = this.pairingClaimStore.updateClaimStatus(
+          payload.claim_id,
+          status,
+          payload.agent_id
+        );
+
+        // Send ack
+        const ack: WsMessage = {
+          type: 'ack',
+          payload: {
+            claim_id: payload.claim_id,
+            status: updated ? status : 'not_found',
+          },
+          timestamp: new Date().toISOString(),
+        };
+        ws.send(JSON.stringify(ack));
+
+        if (this.config.debug && updated) {
+          console.log(`Pairing claim ${payload.claim_id} ${status} via WebSocket`);
         }
         break;
       }
@@ -839,6 +1129,15 @@ export class RelayServer {
     }
     if (Date.now() > expiresAt) {
       return new RelayError('RELAY_MESSAGE_EXPIRED', 'Message has expired');
+    }
+
+    // Check TTL is reasonable (max 5 minutes as per PRD)
+    const ttl = expiresAt - Date.now();
+    if (ttl > this.config.messageTtlMs) {
+      return new RelayError('RELAY_INVALID_ENVELOPE', 'TTL too long (max 5 minutes)', {
+        ttl_ms: ttl,
+        max_ttl_ms: this.config.messageTtlMs,
+      });
     }
 
     return null;

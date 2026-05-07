@@ -18,6 +18,8 @@ export {
   type RegisterPayload,
   type HeartbeatPayload,
   type RelayErrorCode,
+  type PairingClaim,
+  type StoredPairingClaim,
   RelayError,
   RELAY_VERSION,
   HEARTBEAT_INTERVAL_MS,
@@ -126,6 +128,8 @@ export interface RelayClientEvents {
   reconnecting: (attempt: number, delayMs: number) => void;
   error: (error: Error) => void;
   request: (envelope: import('@dcprotocol/relay').RelayEnvelope) => void;
+  /** Emitted when a VPS agent submits a pairing claim via the relay */
+  pairingClaim: (claim: import('@dcprotocol/relay').StoredPairingClaim) => void;
 }
 
 // ============================================================================

@@ -4,9 +4,9 @@
   "version": "0.2.0",
   "identifier": "rg.dcp.vault",
   "build": {
-    "beforeDevCommand": "npm -w @dcprotocol/server run build && npm run dev",
+    "beforeDevCommand": "pnpm --filter @dcprotocol/vault run build && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm -w @dcprotocol/server run build && npm run build && npm run bundle",
+    "beforeBuildCommand": "pnpm --filter @dcprotocol/vault run build && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -43,8 +43,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "../../dcp-server/dist",
-      "../../dcp-server/package.json",
+      "../../dcp-vault/dist",
+      "../../dcp-vault/package.json",
       "bin",
       "resources"
     ],

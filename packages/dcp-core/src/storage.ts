@@ -19,7 +19,7 @@ import * as keytar from 'keytar';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { randomBytes, randomUUID, createHash } from 'crypto';
+import { randomBytes, randomUUID, createHash, randomInt } from 'crypto';
 import {
   VaultRecord,
   AgentSession,
@@ -37,6 +37,14 @@ import {
   SpendStatus,
   ConsentStatus,
   TrustedService,
+  AgentConnection,
+  AgentConnectionMode,
+  AgentConnectionTier,
+  TelegramConfig,
+  CreateTelegramConfigInput,
+  TelegramPairingCode,
+  TelegramNotificationLog,
+  TelegramRequestCategory,
 } from './types.js';
 import { generateKey, deriveKeyFromPassphrase, generateSalt, zeroize, encrypt, decrypt, envelopeEncrypt, envelopeDecrypt } from './crypto.js';
 
@@ -215,6 +223,28 @@ export class VaultStorage {
         verified INTEGER NOT NULL DEFAULT 0
       );
 
+      -- Agent connections (DCP v1 Agent Connectivity)
+      CREATE TABLE IF NOT EXISTS agent_connections (
+        agent_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        service_id TEXT,
+        service_public_key TEXT,
+        permission_scopes TEXT NOT NULL,
+        budget_daily REAL NOT NULL,
+        budget_currency TEXT NOT NULL DEFAULT 'USDC',
+        budget_auto_approve_under REAL NOT NULL DEFAULT 0,
+        tier TEXT NOT NULL DEFAULT 'free',
+        token_hash TEXT,
+        created_at TEXT NOT NULL,
+        paired_at TEXT,
+        last_seen_at TEXT,
+        last_request_at TEXT,
+        request_count INTEGER NOT NULL DEFAULT 0,
+        revoked_at TEXT
+      );
+
       -- Create indexes
       CREATE INDEX IF NOT EXISTS idx_vault_records_scope ON vault_records(scope);
       CREATE INDEX IF NOT EXISTS idx_vault_records_chain ON vault_records(chain);
@@ -227,6 +257,9 @@ export class VaultStorage {
       CREATE INDEX IF NOT EXISTS idx_pending_consents_status ON pending_consents(status);
       CREATE INDEX IF NOT EXISTS idx_trusted_services_enabled ON trusted_services(enabled);
       CREATE INDEX IF NOT EXISTS idx_trusted_services_connected ON trusted_services(connected_at);
+      CREATE INDEX IF NOT EXISTS idx_agent_connections_status ON agent_connections(status);
+      CREATE INDEX IF NOT EXISTS idx_agent_connections_service ON agent_connections(service_id);
+      CREATE INDEX IF NOT EXISTS idx_agent_connections_last_seen ON agent_connections(last_seen_at);
 
       -- Pairing tokens (for proxy pairing flow)
       CREATE TABLE IF NOT EXISTS pairing_tokens (
@@ -242,6 +275,53 @@ export class VaultStorage {
       );
 
       CREATE INDEX IF NOT EXISTS idx_pairing_tokens_expires ON pairing_tokens(expires_at);
+
+      -- Telegram configuration (PRD Section 15)
+      CREATE TABLE IF NOT EXISTS telegram_configs (
+        id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL UNIQUE,
+        bot_token_ciphertext BLOB NOT NULL,
+        bot_token_nonce BLOB NOT NULL,
+        bot_token_dek_wrapped BLOB NOT NULL,
+        bot_token_dek_nonce BLOB NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        notify_consent INTEGER NOT NULL DEFAULT 1,
+        rate_limit_per_hour INTEGER NOT NULL DEFAULT 30,
+        last_notification_at TEXT,
+        notifications_this_hour INTEGER NOT NULL DEFAULT 0,
+        hour_window_start TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        paired_at TEXT,
+        muted_until TEXT
+      );
+
+      -- Telegram pairing codes (6-digit codes for linking)
+      CREATE TABLE IF NOT EXISTS telegram_pairing_codes (
+        code TEXT PRIMARY KEY,
+        vault_id TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_telegram_pairing_expires ON telegram_pairing_codes(expires_at);
+
+      -- Telegram notification log (audit trail)
+      CREATE TABLE IF NOT EXISTS telegram_notification_log (
+        id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        consent_id TEXT,
+        notification_type TEXT NOT NULL,
+        category TEXT,
+        agent_name TEXT,
+        sent_at TEXT NOT NULL,
+        delivered_at TEXT,
+        error TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_telegram_log_chat ON telegram_notification_log(chat_id);
+      CREATE INDEX IF NOT EXISTS idx_telegram_log_sent ON telegram_notification_log(sent_at);
     `);
 
     // Migration: Add last_used_at column if it doesn't exist (for existing DBs)
@@ -288,6 +368,100 @@ export class VaultStorage {
         );
 
         CREATE INDEX IF NOT EXISTS idx_pairing_tokens_expires ON pairing_tokens(expires_at);
+      `);
+    }
+
+    // Ensure agent_connections table exists (for existing vaults)
+    const agentConnectionsTable = this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_connections'"
+    ).get() as { name?: string } | undefined;
+
+    if (!agentConnectionsTable) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS agent_connections (
+          agent_id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          mode TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          service_id TEXT,
+          service_public_key TEXT,
+          permission_scopes TEXT NOT NULL,
+          budget_daily REAL NOT NULL,
+          budget_currency TEXT NOT NULL DEFAULT 'USDC',
+          budget_auto_approve_under REAL NOT NULL DEFAULT 0,
+          tier TEXT NOT NULL DEFAULT 'free',
+          token_hash TEXT,
+          created_at TEXT NOT NULL,
+          paired_at TEXT,
+          last_seen_at TEXT,
+          last_request_at TEXT,
+          request_count INTEGER NOT NULL DEFAULT 0,
+          revoked_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_connections_status ON agent_connections(status);
+        CREATE INDEX IF NOT EXISTS idx_agent_connections_service ON agent_connections(service_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_connections_last_seen ON agent_connections(last_seen_at);
+      `);
+    } else {
+      // Add service_public_key column if it doesn't exist (for existing vaults)
+      const columns = this.db.prepare("PRAGMA table_info(agent_connections)").all() as Array<{ name: string }>;
+      const hasServicePublicKey = columns.some((col) => col.name === 'service_public_key');
+      if (!hasServicePublicKey) {
+        this.db.exec(`ALTER TABLE agent_connections ADD COLUMN service_public_key TEXT`);
+      }
+    }
+
+    // Ensure Telegram tables exist (for existing vaults)
+    const telegramConfigsTable = this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='telegram_configs'"
+    ).get() as { name?: string } | undefined;
+
+    if (!telegramConfigsTable) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS telegram_configs (
+          id TEXT PRIMARY KEY,
+          chat_id TEXT NOT NULL UNIQUE,
+          bot_token_ciphertext BLOB NOT NULL,
+          bot_token_nonce BLOB NOT NULL,
+          bot_token_dek_wrapped BLOB NOT NULL,
+          bot_token_dek_nonce BLOB NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          notify_consent INTEGER NOT NULL DEFAULT 1,
+          rate_limit_per_hour INTEGER NOT NULL DEFAULT 30,
+          last_notification_at TEXT,
+          notifications_this_hour INTEGER NOT NULL DEFAULT 0,
+          hour_window_start TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          paired_at TEXT,
+          muted_until TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS telegram_pairing_codes (
+          code TEXT PRIMARY KEY,
+          vault_id TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          used INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_telegram_pairing_expires ON telegram_pairing_codes(expires_at);
+
+        CREATE TABLE IF NOT EXISTS telegram_notification_log (
+          id TEXT PRIMARY KEY,
+          chat_id TEXT NOT NULL,
+          consent_id TEXT,
+          notification_type TEXT NOT NULL,
+          category TEXT,
+          agent_name TEXT,
+          sent_at TEXT NOT NULL,
+          delivered_at TEXT,
+          error TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_telegram_log_chat ON telegram_notification_log(chat_id);
+        CREATE INDEX IF NOT EXISTS idx_telegram_log_sent ON telegram_notification_log(sent_at);
       `);
     }
   }
@@ -1592,6 +1766,250 @@ export class VaultStorage {
   }
 
   // ==========================================================================
+  // Agent Connections CRUD (DCP v1 Agent Connectivity)
+  // ==========================================================================
+
+  private rowToAgentConnection(row: {
+    agent_id: string;
+    name: string;
+    mode: AgentConnectionMode;
+    status: AgentConnection['status'];
+    service_id: string | null;
+    service_public_key: string | null;
+    permission_scopes: string;
+    budget_daily: number;
+    budget_currency: string;
+    budget_auto_approve_under: number;
+    tier: AgentConnectionTier;
+    token_hash: string | null;
+    created_at: string;
+    paired_at: string | null;
+    last_seen_at: string | null;
+    last_request_at: string | null;
+    request_count: number;
+    revoked_at: string | null;
+  }): AgentConnection {
+    return {
+      agent_id: row.agent_id,
+      name: row.name,
+      mode: row.mode,
+      status: row.status,
+      service_id: row.service_id || undefined,
+      service_public_key: row.service_public_key || undefined,
+      permission_scopes: JSON.parse(row.permission_scopes),
+      budget: {
+        daily: row.budget_daily,
+        currency: row.budget_currency,
+        auto_approve_under: row.budget_auto_approve_under,
+      },
+      tier: row.tier,
+      token_hash: row.token_hash || undefined,
+      created_at: row.created_at,
+      paired_at: row.paired_at || undefined,
+      last_seen_at: row.last_seen_at || undefined,
+      last_request_at: row.last_request_at || undefined,
+      request_count: row.request_count,
+      revoked_at: row.revoked_at || undefined,
+    };
+  }
+
+  /**
+   * Create an agent connection record.
+   */
+  createAgentConnection(input: {
+    agent_id?: string;
+    name: string;
+    mode: AgentConnectionMode;
+    service_id?: string;
+    permission_scopes: string[];
+    budget: { daily: number; currency: string; auto_approve_under: number };
+    tier?: AgentConnectionTier;
+    token_hash?: string;
+  }): AgentConnection {
+    const now = new Date().toISOString();
+    const agentId = input.agent_id || `agent_${generateId()}`;
+    const tier = input.tier || 'free';
+
+    const stmt = this.db.prepare(`
+      INSERT INTO agent_connections (
+        agent_id, name, mode, status, service_id, permission_scopes,
+        budget_daily, budget_currency, budget_auto_approve_under,
+        tier, token_hash, created_at
+      ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      agentId,
+      input.name,
+      input.mode,
+      input.service_id || null,
+      JSON.stringify(input.permission_scopes),
+      input.budget.daily,
+      input.budget.currency,
+      input.budget.auto_approve_under,
+      tier,
+      input.token_hash || null,
+      now
+    );
+
+    this.logAudit('CONFIG', 'success', {
+      operation: 'create_agent_connection',
+      details: JSON.stringify({
+        agent_id: agentId,
+        name: input.name,
+        mode: input.mode,
+        service_id: input.service_id,
+      }),
+    });
+
+    return {
+      agent_id: agentId,
+      name: input.name,
+      mode: input.mode,
+      status: 'pending',
+      service_id: input.service_id,
+      permission_scopes: input.permission_scopes,
+      budget: input.budget,
+      tier,
+      token_hash: input.token_hash,
+      created_at: now,
+      request_count: 0,
+    };
+  }
+
+  /**
+   * Get an agent connection by ID.
+   */
+  getAgentConnection(agentId: string): AgentConnection | null {
+    const stmt = this.db.prepare('SELECT * FROM agent_connections WHERE agent_id = ?');
+    const row = stmt.get(agentId) as Parameters<typeof this.rowToAgentConnection>[0] | undefined;
+    return row ? this.rowToAgentConnection(row) : null;
+  }
+
+  /**
+   * Get an agent connection by name (for local request permission checking).
+   * Returns the most recently active agent with this name.
+   */
+  getAgentConnectionByName(name: string): AgentConnection | null {
+    const stmt = this.db.prepare(`
+      SELECT * FROM agent_connections
+      WHERE name = ? AND status = 'active' AND revoked_at IS NULL
+      ORDER BY last_seen_at DESC, paired_at DESC
+      LIMIT 1
+    `);
+    const row = stmt.get(name) as Parameters<typeof this.rowToAgentConnection>[0] | undefined;
+    return row ? this.rowToAgentConnection(row) : null;
+  }
+
+  /**
+   * List agent connections ordered by most recent activity.
+   */
+  listAgentConnections(): AgentConnection[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM agent_connections
+      ORDER BY
+        CASE WHEN last_seen_at IS NULL THEN 1 ELSE 0 END,
+        last_seen_at DESC,
+        created_at DESC
+    `);
+    const rows = stmt.all() as Array<Parameters<typeof this.rowToAgentConnection>[0]>;
+    return rows.map((row) => this.rowToAgentConnection(row));
+  }
+
+  /**
+   * Mark an agent as paired and active.
+   * Per PRD Section 7.3, stores the agent's service public key for relay authentication.
+   */
+  markAgentPaired(agentId: string, tokenHash?: string, servicePublicKey?: string): boolean {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      UPDATE agent_connections
+      SET status = 'active',
+          paired_at = COALESCE(paired_at, ?),
+          last_seen_at = ?,
+          token_hash = COALESCE(?, token_hash),
+          service_public_key = COALESCE(?, service_public_key)
+      WHERE agent_id = ? AND revoked_at IS NULL
+    `);
+    const result = stmt.run(now, now, tokenHash || null, servicePublicKey || null, agentId);
+    return result.changes > 0;
+  }
+
+  /**
+   * Record agent heartbeat.
+   */
+  recordAgentHeartbeat(agentId: string): boolean {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      UPDATE agent_connections
+      SET status = 'active', last_seen_at = ?
+      WHERE agent_id = ? AND revoked_at IS NULL
+    `);
+    const result = stmt.run(now, agentId);
+    return result.changes > 0;
+  }
+
+  /**
+   * Record an agent request for dashboard counters.
+   */
+  recordAgentRequest(agentId: string): boolean {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      UPDATE agent_connections
+      SET last_request_at = ?, request_count = request_count + 1
+      WHERE agent_id = ? AND revoked_at IS NULL
+    `);
+    const result = stmt.run(now, agentId);
+    return result.changes > 0;
+  }
+
+  /**
+   * Revoke an agent connection without deleting history.
+   */
+  revokeAgentConnection(agentId: string): boolean {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      UPDATE agent_connections
+      SET status = 'revoked', revoked_at = ?, token_hash = NULL
+      WHERE agent_id = ? AND revoked_at IS NULL
+    `);
+    const result = stmt.run(now, agentId);
+
+    if (result.changes > 0) {
+      this.logAudit('REVOKE', 'success', {
+        operation: 'revoke_agent_connection',
+        details: JSON.stringify({ agent_id: agentId }),
+      });
+    }
+
+    return result.changes > 0;
+  }
+
+  /**
+   * Delete an agent connection completely (revokes and removes from DB).
+   */
+  deleteAgentConnection(agentId: string): boolean {
+    // First revoke to clear the token
+    this.revokeAgentConnection(agentId);
+
+    // Then delete from database
+    const stmt = this.db.prepare(`
+      DELETE FROM agent_connections
+      WHERE agent_id = ?
+    `);
+    const result = stmt.run(agentId);
+
+    if (result.changes > 0) {
+      this.logAudit('REVOKE', 'success', {
+        operation: 'delete_agent_connection',
+        details: JSON.stringify({ agent_id: agentId }),
+      });
+    }
+
+    return result.changes > 0;
+  }
+
+  // ==========================================================================
   // Pairing Tokens (Proxy Pairing Flow)
   // ==========================================================================
 
@@ -1743,6 +2161,387 @@ export class VaultStorage {
     }
 
     return { authorized: true, service };
+  }
+
+  // ==========================================================================
+  // Telegram Notification Methods (PRD Section 15)
+  // ==========================================================================
+
+  /**
+   * Create Telegram configuration.
+   * Bot token is stored encrypted using envelope encryption.
+   */
+  createTelegramConfig(input: CreateTelegramConfigInput): TelegramConfig {
+    if (!this.masterKey) {
+      throw new VaultError('VAULT_LOCKED', 'Vault must be unlocked to store Telegram config');
+    }
+
+    const now = new Date().toISOString();
+    const id = `tg_${generateId()}`;
+
+    // Encrypt bot token using envelope encryption
+    const botTokenBuffer = Buffer.from(input.bot_token, 'utf8');
+    const encrypted = envelopeEncrypt(botTokenBuffer, this.masterKey);
+
+    const stmt = this.db.prepare(`
+      INSERT INTO telegram_configs (
+        id, chat_id, bot_token_ciphertext, bot_token_nonce,
+        bot_token_dek_wrapped, bot_token_dek_nonce,
+        enabled, notify_consent, rate_limit_per_hour,
+        notifications_this_hour, created_at, updated_at, paired_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+    `);
+
+    stmt.run(
+      id,
+      input.chat_id,
+      encrypted.ciphertext,
+      encrypted.nonce,
+      encrypted.dek_wrapped,
+      encrypted.dek_nonce,
+      input.enabled !== false ? 1 : 0,
+      input.notify_consent !== false ? 1 : 0,
+      input.rate_limit_per_hour ?? 30,
+      now,
+      now,
+      now
+    );
+
+    this.logAudit('CONFIG', 'success', {
+      operation: 'telegram_config_create',
+      details: JSON.stringify({ chat_id: input.chat_id }),
+    });
+
+    return {
+      id,
+      chat_id: input.chat_id,
+      enabled: input.enabled !== false,
+      notify_consent: input.notify_consent !== false,
+      rate_limit_per_hour: input.rate_limit_per_hour ?? 30,
+      notifications_this_hour: 0,
+      created_at: now,
+      updated_at: now,
+      paired_at: now,
+    };
+  }
+
+  /**
+   * Get Telegram configuration (without decrypted bot token).
+   * Returns null if not configured.
+   */
+  getTelegramConfig(): TelegramConfig | null {
+    const stmt = this.db.prepare('SELECT * FROM telegram_configs LIMIT 1');
+    const row = stmt.get() as {
+      id: string;
+      chat_id: string;
+      enabled: number;
+      notify_consent: number;
+      rate_limit_per_hour: number;
+      last_notification_at: string | null;
+      notifications_this_hour: number;
+      hour_window_start: string | null;
+      created_at: string;
+      updated_at: string;
+      paired_at: string | null;
+      muted_until: string | null;
+    } | undefined;
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      chat_id: row.chat_id,
+      enabled: row.enabled === 1,
+      notify_consent: row.notify_consent === 1,
+      rate_limit_per_hour: row.rate_limit_per_hour,
+      last_notification_at: row.last_notification_at ?? undefined,
+      notifications_this_hour: row.notifications_this_hour,
+      hour_window_start: row.hour_window_start ?? undefined,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      paired_at: row.paired_at ?? undefined,
+      muted_until: row.muted_until ?? undefined,
+    };
+  }
+
+  /**
+   * Get decrypted bot token.
+   * Requires vault to be unlocked.
+   */
+  getTelegramBotToken(): string | null {
+    if (!this.masterKey) {
+      throw new VaultError('VAULT_LOCKED', 'Vault must be unlocked to retrieve bot token');
+    }
+
+    const stmt = this.db.prepare(`
+      SELECT bot_token_ciphertext, bot_token_nonce, bot_token_dek_wrapped, bot_token_dek_nonce
+      FROM telegram_configs LIMIT 1
+    `);
+    const row = stmt.get() as {
+      bot_token_ciphertext: Buffer;
+      bot_token_nonce: Buffer;
+      bot_token_dek_wrapped: Buffer;
+      bot_token_dek_nonce: Buffer;
+    } | undefined;
+
+    if (!row) return null;
+
+    const encrypted: EncryptedPayload = {
+      ciphertext: row.bot_token_ciphertext,
+      nonce: row.bot_token_nonce,
+      dek_wrapped: row.bot_token_dek_wrapped,
+      dek_nonce: row.bot_token_dek_nonce,
+    };
+
+    const decrypted = envelopeDecrypt(encrypted, this.masterKey);
+    return decrypted.toString('utf8');
+  }
+
+  /**
+   * Update Telegram configuration.
+   */
+  updateTelegramConfig(updates: Partial<Omit<TelegramConfig, 'id' | 'chat_id' | 'created_at'>>): boolean {
+    const now = new Date().toISOString();
+    const config = this.getTelegramConfig();
+    if (!config) return false;
+
+    const fields: string[] = ['updated_at = ?'];
+    const values: (string | number)[] = [now];
+
+    if (updates.enabled !== undefined) {
+      fields.push('enabled = ?');
+      values.push(updates.enabled ? 1 : 0);
+    }
+    if (updates.notify_consent !== undefined) {
+      fields.push('notify_consent = ?');
+      values.push(updates.notify_consent ? 1 : 0);
+    }
+    if (updates.rate_limit_per_hour !== undefined) {
+      fields.push('rate_limit_per_hour = ?');
+      values.push(updates.rate_limit_per_hour);
+    }
+    if (updates.muted_until !== undefined) {
+      fields.push('muted_until = ?');
+      values.push(updates.muted_until ?? '');
+    }
+    if (updates.paired_at !== undefined) {
+      fields.push('paired_at = ?');
+      values.push(updates.paired_at ?? '');
+    }
+
+    values.push(config.id);
+
+    const stmt = this.db.prepare(`
+      UPDATE telegram_configs SET ${fields.join(', ')} WHERE id = ?
+    `);
+    const result = stmt.run(...values);
+
+    if (result.changes > 0) {
+      this.logAudit('CONFIG', 'success', {
+        operation: 'telegram_config_update',
+        details: JSON.stringify(updates),
+      });
+    }
+
+    return result.changes > 0;
+  }
+
+  /**
+   * Delete Telegram configuration (unlink).
+   */
+  deleteTelegramConfig(): boolean {
+    const config = this.getTelegramConfig();
+    if (!config) return false;
+
+    this.db.exec('DELETE FROM telegram_configs');
+    this.db.exec('DELETE FROM telegram_pairing_codes');
+
+    this.logAudit('CONFIG', 'success', {
+      operation: 'telegram_config_delete',
+      details: JSON.stringify({ chat_id: config.chat_id }),
+    });
+
+    return true;
+  }
+
+  /**
+   * Create a 6-digit pairing code for Telegram linking.
+   * Code expires in 10 minutes.
+   */
+  createTelegramPairingCode(vaultId: string): TelegramPairingCode {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 10 * 60 * 1000); // 10 minutes
+
+    // Generate 6-digit code (cryptographically secure)
+    const code = randomInt(100000, 1000000).toString();
+
+    // Delete any existing unused codes for this vault
+    this.db.prepare('DELETE FROM telegram_pairing_codes WHERE vault_id = ? AND used = 0').run(vaultId);
+
+    const stmt = this.db.prepare(`
+      INSERT INTO telegram_pairing_codes (code, vault_id, expires_at, used, created_at)
+      VALUES (?, ?, ?, 0, ?)
+    `);
+    stmt.run(code, vaultId, expiresAt.toISOString(), now.toISOString());
+
+    return {
+      code,
+      vault_id: vaultId,
+      expires_at: expiresAt.toISOString(),
+      used: false,
+      created_at: now.toISOString(),
+    };
+  }
+
+  /**
+   * Validate a pairing code and return the vault ID if valid.
+   */
+  validateTelegramPairingCode(code: string): { valid: boolean; vault_id?: string } {
+    const stmt = this.db.prepare(`
+      SELECT * FROM telegram_pairing_codes WHERE code = ? AND used = 0
+    `);
+    const row = stmt.get(code) as {
+      code: string;
+      vault_id: string;
+      expires_at: string;
+      used: number;
+    } | undefined;
+
+    if (!row) {
+      return { valid: false };
+    }
+
+    const now = new Date();
+    const expires = new Date(row.expires_at);
+    if (expires < now) {
+      return { valid: false };
+    }
+
+    return { valid: true, vault_id: row.vault_id };
+  }
+
+  /**
+   * Mark a pairing code as used.
+   */
+  markTelegramPairingCodeUsed(code: string): boolean {
+    const stmt = this.db.prepare('UPDATE telegram_pairing_codes SET used = 1 WHERE code = ?');
+    const result = stmt.run(code);
+    return result.changes > 0;
+  }
+
+  /**
+   * Check if Telegram notifications are rate limited.
+   * Returns true if rate limited (should NOT send), false if OK to send.
+   */
+  checkTelegramRateLimit(): boolean {
+    const config = this.getTelegramConfig();
+    if (!config) return true; // No config = rate limited
+
+    // Check if muted
+    if (config.muted_until) {
+      const mutedUntil = new Date(config.muted_until);
+      if (mutedUntil > new Date()) {
+        return true; // Muted = rate limited
+      }
+    }
+
+    const now = new Date();
+    const hourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+
+    // Check if we need to reset the hour window
+    if (!config.hour_window_start || new Date(config.hour_window_start) < hourAgo) {
+      // Reset the window
+      this.db.prepare(`
+        UPDATE telegram_configs
+        SET hour_window_start = ?, notifications_this_hour = 0
+        WHERE id = ?
+      `).run(now.toISOString(), config.id);
+      return false; // Fresh window, not rate limited
+    }
+
+    // Check if we've hit the limit
+    return config.notifications_this_hour >= config.rate_limit_per_hour;
+  }
+
+  /**
+   * Increment notification counter and record last notification time.
+   */
+  recordTelegramNotification(): void {
+    const config = this.getTelegramConfig();
+    if (!config) return;
+
+    const now = new Date().toISOString();
+
+    this.db.prepare(`
+      UPDATE telegram_configs
+      SET notifications_this_hour = notifications_this_hour + 1,
+          last_notification_at = ?
+      WHERE id = ?
+    `).run(now, config.id);
+  }
+
+  /**
+   * Log a Telegram notification for audit trail.
+   */
+  logTelegramNotification(log: Omit<TelegramNotificationLog, 'id' | 'sent_at'>): TelegramNotificationLog {
+    const id = `tglog_${generateId()}`;
+    const sentAt = new Date().toISOString();
+
+    const stmt = this.db.prepare(`
+      INSERT INTO telegram_notification_log (
+        id, chat_id, consent_id, notification_type, category, agent_name, sent_at, delivered_at, error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      id,
+      log.chat_id,
+      log.consent_id ?? null,
+      log.notification_type,
+      log.category ?? null,
+      log.agent_name ?? null,
+      sentAt,
+      log.delivered_at ?? null,
+      log.error ?? null
+    );
+
+    return {
+      id,
+      ...log,
+      sent_at: sentAt,
+    };
+  }
+
+  /**
+   * Get recent Telegram notification logs.
+   */
+  getTelegramNotificationLogs(limit: number = 50): TelegramNotificationLog[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM telegram_notification_log ORDER BY sent_at DESC LIMIT ?
+    `);
+    const rows = stmt.all(limit) as Array<{
+      id: string;
+      chat_id: string;
+      consent_id: string | null;
+      notification_type: string;
+      category: string | null;
+      agent_name: string | null;
+      sent_at: string;
+      delivered_at: string | null;
+      error: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      chat_id: row.chat_id,
+      consent_id: row.consent_id ?? undefined,
+      notification_type: row.notification_type as TelegramNotificationLog['notification_type'],
+      category: row.category as TelegramRequestCategory | undefined,
+      agent_name: row.agent_name ?? undefined,
+      sent_at: row.sent_at,
+      delivered_at: row.delivered_at ?? undefined,
+      error: row.error ?? undefined,
+    }));
   }
 
   // ==========================================================================

@@ -196,6 +196,25 @@ export class RelayClient extends SimpleEmitter {
   }
 
   /**
+   * Send pairing result back to relay after user approves/denies a claim
+   * @param claimId - The claim ID to respond to
+   * @param approved - Whether the pairing was approved
+   * @param agentId - The assigned agent ID (only if approved)
+   */
+  sendPairingResult(claimId: string, approved: boolean, agentId?: string): boolean {
+    return this.sendWsMessage({
+      type: 'pairing_result',
+      payload: {
+        claim_id: claimId,
+        action: approved ? 'approve' : 'deny',
+        agent_id: agentId,
+        vault_id: this.config.vaultId,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /**
    * Cleanup resources
    */
   destroy(): void {
@@ -418,6 +437,11 @@ export class RelayClient extends SimpleEmitter {
             errPayload.code as import('./types.js').ClientErrorCode,
             errPayload.message
           ));
+          break;
+
+        case 'pairing_claim':
+          // Relay forwarding a VPS agent's pairing claim to the vault
+          this.emit('pairingClaim', msg.payload as import('@dcprotocol/relay').StoredPairingClaim);
           break;
 
         default:

@@ -3,6 +3,10 @@
  *
  * REST transport to DCP server at localhost:8420.
  * See PRD Section A4.1 for endpoint mapping.
+ *
+ * Security: When serviceId and servicePrivateKey are provided,
+ * all requests are signed with Ed25519 for cryptographic verification.
+ * This enables the server to verify agent identity and check permissions.
  */
 
 import type {
@@ -25,7 +29,9 @@ import type {
   HealthCheckResult,
   SessionInfo,
 } from './types.js';
-import { DcpError, parseErrorResponse, vaultOffline, vaultLocked } from './errors.js';
+import { DcpError, parseErrorResponse, vaultOffline, vaultLocked, invalidConfig } from './errors.js';
+import { sign, zeroize, generateRequestId } from './crypto.js';
+import { canonicalJson } from '@dcprotocol/core';
 
 // ============================================================================
 // Local Transport Implementation
@@ -34,9 +40,27 @@ import { DcpError, parseErrorResponse, vaultOffline, vaultLocked } from './error
 export class LocalTransport implements Transport {
   private config: ResolvedConfig;
   private sessionByScope: Map<string, SessionInfo> = new Map();
+  private servicePrivateKey: Buffer | null = null;
 
   constructor(config: ResolvedConfig) {
     this.config = config;
+
+    // Parse service private key for request signing (Ed25519)
+    if (config.servicePrivateKey) {
+      try {
+        this.servicePrivateKey = Buffer.from(config.servicePrivateKey, 'base64');
+        if (this.servicePrivateKey.length !== 64) {
+          // Try hex encoding
+          this.servicePrivateKey = Buffer.from(config.servicePrivateKey, 'hex');
+        }
+        if (this.servicePrivateKey.length !== 64) {
+          throw invalidConfig('servicePrivateKey must be a 64-byte Ed25519 private key');
+        }
+      } catch (err) {
+        if (err instanceof DcpError) throw err;
+        throw invalidConfig('Invalid servicePrivateKey format');
+      }
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -94,7 +118,7 @@ export class LocalTransport implements Transport {
     const walletScope = `crypto.wallet.${input.chain}`;
     const sessionId = this.getSessionId(walletScope);
 
-    const body = {
+    const body = this.signRequestBody({
       chain: input.chain,
       unsigned_tx: input.unsignedTx,
       amount: input.amount,
@@ -104,7 +128,7 @@ export class LocalTransport implements Transport {
       description: input.description,
       idempotency_key: input.idempotencyKey,
       destination: input.destination,
-    };
+    });
 
     const response = await this.fetch('/v1/vault/sign', {
       method: 'POST',
@@ -153,14 +177,14 @@ export class LocalTransport implements Transport {
     const walletScope = `crypto.wallet.${input.chain}`;
     const sessionId = this.getSessionId(walletScope);
 
-    const body = {
+    const body = this.signRequestBody({
       chain: input.chain,
       message: input.message,
       encoding: input.encoding || 'utf8',
       agent_name: this.config.agentName,
       session_id: sessionId,
       description: input.description,
-    };
+    });
 
     const response = await this.fetch('/v1/vault/sign_message', {
       method: 'POST',
@@ -207,13 +231,13 @@ export class LocalTransport implements Transport {
     const walletScope = `crypto.wallet.${input.chain}`;
     const sessionId = this.getSessionId(walletScope);
 
-    const body = {
+    const body = this.signRequestBody({
       chain: input.chain,
       typed_data: input.typedData,
       agent_name: this.config.agentName,
       session_id: sessionId,
       description: input.description,
-    };
+    });
 
     const response = await this.fetch('/v1/vault/sign_typed_data', {
       method: 'POST',
@@ -261,7 +285,7 @@ export class LocalTransport implements Transport {
     const walletScope = `crypto.wallet.${chain}`;
     const sessionId = this.getSessionId(walletScope);
 
-    const body = {
+    const body = this.signRequestBody({
       network: input.network,
       payload: input.payload,
       amount: input.amount,
@@ -271,7 +295,7 @@ export class LocalTransport implements Transport {
       typed_data: input.typedData,
       agent_name: this.config.agentName,
       session_id: sessionId,
-    };
+    });
 
     const response = await this.fetch('/v1/vault/sign_x402', {
       method: 'POST',
@@ -317,12 +341,12 @@ export class LocalTransport implements Transport {
   async readCredential(scope: string, fields?: string[]): Promise<ReadCredentialResult> {
     const sessionId = this.getSessionId(scope);
 
-    const body = {
+    const body = this.signRequestBody({
       scope,
       fields,
       agent_name: this.config.agentName,
       session_id: sessionId,
-    };
+    });
 
     const response = await this.fetch('/v1/vault/read', {
       method: 'POST',
@@ -374,12 +398,12 @@ export class LocalTransport implements Transport {
   ): Promise<WriteCredentialResult> {
     const sessionId = this.getSessionId(scope);
 
-    const body = {
+    const body = this.signRequestBody({
       scope,
       data,
       agent_name: this.config.agentName,
       session_id: sessionId,
-    };
+    });
 
     const response = await this.fetch('/v1/vault/write', {
       method: 'POST',
@@ -509,6 +533,41 @@ export class LocalTransport implements Transport {
 
   async close(): Promise<void> {
     this.clearSession();
+    // Securely zeroize private key
+    if (this.servicePrivateKey) {
+      zeroize(this.servicePrivateKey);
+      this.servicePrivateKey = null;
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Request Signing (Ed25519)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Sign a request body with Ed25519 when service credentials are available.
+   * Adds service_id, service_signature, timestamp, and nonce to the body.
+   * This enables server-side verification of agent identity.
+   */
+  private signRequestBody(body: Record<string, unknown>): Record<string, unknown> {
+    if (!this.config.serviceId || !this.servicePrivateKey) {
+      return body;
+    }
+
+    // Add required signing fields
+    const signedBody: Record<string, unknown> = {
+      ...body,
+      service_id: this.config.serviceId,
+      timestamp: new Date().toISOString(),
+      nonce: generateRequestId(),
+    };
+
+    // Sign the canonical JSON representation (using core's recursive serializer)
+    const signatureData = Buffer.from(canonicalJson(signedBody));
+    const signature = sign(signatureData, this.servicePrivateKey);
+    signedBody.service_signature = signature.toString('base64');
+
+    return signedBody;
   }
 
   // --------------------------------------------------------------------------

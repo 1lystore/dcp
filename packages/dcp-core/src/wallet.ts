@@ -18,6 +18,7 @@
 
 import { Keypair, Transaction, VersionedTransaction } from '@solana/web3.js';
 import { Wallet, Transaction as EthTransaction, TypedDataField, TypedDataDomain } from 'ethers';
+import bs58 from 'bs58';
 import {
   Chain,
   KeyType,
@@ -189,8 +190,7 @@ export function signSolanaTransaction(
   const privateKey = envelopeDecrypt(encryptedKey, masterKey);
 
   // bs58 for base58 encoding (Solana standard)
-  const bs58 = require('bs58');
-  const encode = bs58.default?.encode || bs58.encode;
+  const encode = bs58.encode;
 
   try {
     // Derive keypair from seed (32 bytes)
@@ -348,8 +348,7 @@ export function signSolanaMessage(
   const privateKey = envelopeDecrypt(encryptedKey, masterKey);
 
   // bs58 for base58 encoding (Solana standard)
-  const bs58 = require('bs58');
-  const encode = bs58.default?.encode || bs58.encode;
+  const encode = bs58.encode;
 
   try {
     const keypair = Keypair.fromSeed(privateKey);
@@ -483,10 +482,8 @@ export function importWallet(
  */
 function importSolanaWallet(chain: Chain, privateKeyBase58: string): WalletKeyData {
   try {
-    // Decode base58 private key (handle bs58 v5 and v6 API)
-    const bs58 = require('bs58');
-    const decode = bs58.default?.decode || bs58.decode;
-    const secretKey = decode(privateKeyBase58);
+    // Decode base58 private key
+    const secretKey = bs58.decode(privateKeyBase58);
 
     // Solana secret keys can be 64 bytes (full) or 32 bytes (seed only)
     let seed: Buffer;

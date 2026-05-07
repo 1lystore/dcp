@@ -69,13 +69,15 @@ export interface RelayResponseEnvelope {
 // ============================================================================
 
 export type WsMessageType =
-  | 'register'     // Vault registers with relay
-  | 'unregister'   // Vault disconnects
-  | 'request'      // Client sends request to vault
-  | 'response'     // Vault sends response to client
-  | 'heartbeat'    // Keep-alive ping
-  | 'ack'          // Acknowledgement
-  | 'error';       // Error response
+  | 'register'        // Vault registers with relay
+  | 'unregister'      // Vault disconnects
+  | 'request'         // Client sends request to vault
+  | 'response'        // Vault sends response to client
+  | 'heartbeat'       // Keep-alive ping
+  | 'ack'             // Acknowledgement
+  | 'error'           // Error response
+  | 'pairing_claim'   // New pairing claim from agent (relay → vault)
+  | 'pairing_result'; // Pairing approval result from vault (vault → relay)
 
 export interface WsMessage {
   type: WsMessageType;
@@ -230,3 +232,73 @@ export const DEFAULT_RELAY_CONFIG: RelayConfig = {
   rateLimitPerMinute: 60,
   rateLimitWindowMs: 60_000,
 };
+
+// ============================================================================
+// Pairing Claim Types (VPS → Relay → Vault flow)
+// ============================================================================
+
+/**
+ * Pairing claim submitted by VPS agent during install-service
+ *
+ * Flow (per PRD):
+ * 1. VPS parses pairing invite (request-only, no authority)
+ * 2. VPS generates Ed25519 keypair
+ * 3. VPS signs claim with private key
+ * 4. Relay routes claim to vault via invite_id
+ * 5. Desktop shows pending pairing with verification phrase
+ * 6. User approves and assigns permissions in vault policy DB
+ */
+export interface PairingClaim {
+  /** Invite ID from the pairing invite (routes to vault) */
+  invite_id: string;
+  /** Agent's Ed25519 public key (base64) */
+  agent_public_key: string;
+  /** Agent's hostname for display */
+  agent_hostname: string;
+  /** Agent version */
+  agent_version: string;
+  /** Timestamp for freshness check */
+  timestamp: number;
+  /** Nonce for uniqueness */
+  nonce: string;
+  /** Ed25519 signature of canonical JSON payload (base64) */
+  signature: string;
+}
+
+/**
+ * Stored pairing claim with metadata
+ */
+export interface StoredPairingClaim {
+  claim_id: string;
+  claim: PairingClaim;
+  verification_phrase: string;
+  received_at: number;
+  /** Pending = waiting for user approval, approved/denied/expired are terminal */
+  status: 'pending' | 'approved' | 'denied' | 'expired';
+  /** Assigned agent_id after approval */
+  agent_id?: string;
+  /** Vault ID that will process this claim */
+  vault_id?: string;
+  /** When status changed to terminal */
+  resolved_at?: number;
+}
+
+/**
+ * Response to pairing claim submission
+ */
+export interface PairingClaimResponse {
+  success: boolean;
+  claim_id?: string;
+  verification_phrase?: string;
+  error?: string;
+}
+
+/**
+ * Pairing claim approval status (for polling)
+ */
+export interface PairingApprovalStatus {
+  status: 'pending' | 'approved' | 'denied' | 'expired' | 'not_found';
+  agent_id?: string;
+  vault_id?: string;
+  error?: string;
+}

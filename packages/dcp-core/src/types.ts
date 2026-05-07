@@ -302,6 +302,113 @@ export interface TrustedService {
   verified: boolean;
 }
 
+// ============================================================================
+// Agent Connection Types (DCP v1 Agent Connectivity)
+// ============================================================================
+
+export type AgentConnectionMode = 'proxy' | 'mcp' | 'sdk';
+export type AgentConnectionStatus = 'pending' | 'active' | 'stale' | 'revoked';
+export type AgentConnectionTier = 'free' | 'pro';
+
+export interface AgentConnection {
+  agent_id: string;
+  name: string;
+  mode: AgentConnectionMode;
+  status: AgentConnectionStatus;
+  service_id?: string;
+  /** Agent's Ed25519 public key for relay authentication (PRD Section 7.3) */
+  service_public_key?: string;
+  permission_scopes: string[];
+  budget: {
+    daily: number;
+    currency: string;
+    auto_approve_under: number;
+  };
+  tier: AgentConnectionTier;
+  token_hash?: string;
+  created_at: string;
+  paired_at?: string;
+  last_seen_at?: string;
+  last_request_at?: string;
+  request_count: number;
+  revoked_at?: string;
+}
+
+/**
+ * Signed Pairing Grant (PRD Section 7.1)
+ *
+ * Self-describing, signed token for agent pairing.
+ * Encoded as: dcp_pair_v1_<base64url(JSON)>
+ *
+ * IMPORTANT: This is a REQUEST-ONLY invite for connection bootstrap.
+ * The vault policy DB is the ONLY enforcement source for permissions.
+ *
+ * The optional permission_scopes, budget, and tier fields are DEPRECATED
+ * and kept only for backward compatibility with existing grants.
+ * New grants MUST NOT include these fields. The vault MUST NOT trust
+ * these fields as authority - always look up permissions in the vault DB.
+ */
+export interface SignedPairingGrant {
+  version: 1;
+  grant_id: string;
+  vault_id: string;
+  agent_id: string;
+  agent_name: string;
+  mode: AgentConnectionMode;
+  vault_hpke_public_key: string;
+  vault_signing_public_key: string;
+  relay_url: string;
+  created_at: string;
+  expires_at: string;
+
+  /**
+   * @deprecated Permission scopes are stored ONLY in vault policy DB.
+   * These fields are ignored and kept only for backward compatibility.
+   */
+  permission_scopes?: string[];
+  /** @deprecated See permission_scopes */
+  budget?: {
+    daily: number;
+    currency: string;
+    auto_approve_under: number;
+  };
+  /** @deprecated See permission_scopes */
+  tier?: AgentConnectionTier;
+}
+
+/**
+ * Encoded pairing grant with signature
+ */
+export interface EncodedPairingGrant {
+  payload: SignedPairingGrant;
+  signature: string;
+}
+
+/**
+ * Session Token Payload (for relay authentication)
+ *
+ * Encoded as: dcp_session_v1_<base64url(JSON)>
+ */
+export interface SessionTokenPayload {
+  version: 1;
+  token_id: string;
+  vault_id: string;
+  agent_id: string;
+  agent_name: string;
+  tier: AgentConnectionTier;
+  scopes: string[];
+  issued_at: string;
+  expires_at: string;
+}
+
+/**
+ * Encoded session token with signature
+ */
+export interface EncodedSessionToken {
+  payload: SessionTokenPayload;
+  signature: string;
+}
+
 /**
  * Service connection info (sent to service during dcp connect)
  */
@@ -398,6 +505,7 @@ export type VaultErrorCode =
   | 'RATE_LIMITED'
   | 'RECORD_NOT_FOUND'
   | 'INTERNAL_ERROR'
+  | 'UNAUTHORIZED'
   | 'SERVICE_NOT_TRUSTED'
   | 'SERVICE_NOT_FOUND'
   | 'SERVICE_ALREADY_TRUSTED'
@@ -424,4 +532,179 @@ export class VaultError extends Error {
       },
     };
   }
+}
+
+// ============================================================================
+// Telegram Notification Types (PRD Section 15)
+// ============================================================================
+
+/**
+ * Privacy-safe request category for notifications.
+ * Only high-level categories are sent to Telegram - never sensitive details.
+ */
+export type TelegramRequestCategory =
+  | 'transaction_signing'
+  | 'message_signing'
+  | 'data_read'
+  | 'data_write'
+  | 'credential_access'
+  | 'other';
+
+/**
+ * Telegram configuration stored in vault.
+ * Bot token is stored encrypted using envelope encryption.
+ */
+export interface TelegramConfig {
+  /** Unique config identifier */
+  id: string;
+
+  /** Telegram chat ID for notifications */
+  chat_id: string;
+
+  /** Whether notifications are enabled */
+  enabled: boolean;
+
+  /** Notify on consent requests */
+  notify_consent: boolean;
+
+  /** Max notifications per hour (default: 30) */
+  rate_limit_per_hour: number;
+
+  /** Last notification timestamp */
+  last_notification_at?: string;
+
+  /** Notification count in current hour window */
+  notifications_this_hour: number;
+
+  /** When the hour window started */
+  hour_window_start?: string;
+
+  /** ISO timestamp when config was created */
+  created_at: string;
+
+  /** ISO timestamp when last updated */
+  updated_at: string;
+
+  /** ISO timestamp when Telegram was paired */
+  paired_at?: string;
+
+  /** Whether user has muted notifications */
+  muted_until?: string;
+}
+
+/**
+ * Input for creating Telegram config
+ */
+export interface CreateTelegramConfigInput {
+  chat_id: string;
+  bot_token: string;
+  enabled?: boolean;
+  notify_consent?: boolean;
+  rate_limit_per_hour?: number;
+}
+
+/**
+ * Telegram pairing code for linking vault to Telegram
+ */
+export interface TelegramPairingCode {
+  /** 6-digit pairing code */
+  code: string;
+
+  /** Vault ID being paired */
+  vault_id: string;
+
+  /** When the code expires (10 minutes) */
+  expires_at: string;
+
+  /** Whether code has been used */
+  used: boolean;
+
+  /** ISO timestamp when created */
+  created_at: string;
+}
+
+/**
+ * Telegram notification log entry
+ */
+export interface TelegramNotificationLog {
+  /** Unique log entry ID */
+  id: string;
+
+  /** Telegram chat ID */
+  chat_id: string;
+
+  /** Related consent ID (if applicable) */
+  consent_id?: string;
+
+  /** Type of notification */
+  notification_type: 'consent_request' | 'test' | 'pairing_success' | 'budget_alert';
+
+  /** High-level request category (privacy-safe) */
+  category?: TelegramRequestCategory;
+
+  /** Agent name (permitted per PRD) */
+  agent_name?: string;
+
+  /** When notification was sent */
+  sent_at: string;
+
+  /** When Telegram confirmed delivery */
+  delivered_at?: string;
+
+  /** Error message if failed */
+  error?: string;
+}
+
+/**
+ * Consent notification payload for Telegram webhook.
+ * Contains ONLY privacy-safe fields per PRD Section 15.
+ *
+ * PERMITTED: agent_name, category, request_id, review_link, scope (sanitized)
+ * FORBIDDEN: secrets, transaction payloads, amounts, addresses, credentials
+ */
+export interface TelegramConsentPayload {
+  /** Consent request ID (permitted) */
+  consent_id: string;
+
+  /** Agent name making the request (permitted) */
+  agent_name: string;
+
+  /** High-level request category (permitted) */
+  category: TelegramRequestCategory;
+
+  /** Sanitized scope description for context (e.g., "identity.email", "sign:solana") */
+  scope?: string;
+
+  /** Link to review in desktop UI (permitted) */
+  review_link: string;
+
+  /** When consent was created */
+  created_at: string;
+
+  /** When consent expires */
+  expires_at: string;
+}
+
+/**
+ * Webhook payload sent from dcp-server to dcp-telegram service.
+ * Signed with Ed25519 for verification.
+ */
+export interface TelegramWebhookPayload {
+  /** Event type */
+  event: 'consent_created' | 'consent_resolved' | 'test';
+
+  /** Vault identifier */
+  vault_id: string;
+
+  /** Telegram chat ID to send notification to */
+  chat_id: string;
+
+  /** Event data (privacy-safe consent payload or test data) */
+  data: TelegramConsentPayload | { message: string };
+
+  /** Ed25519 signature of canonical JSON data */
+  signature: string;
+
+  /** ISO timestamp of event */
+  timestamp: string;
 }

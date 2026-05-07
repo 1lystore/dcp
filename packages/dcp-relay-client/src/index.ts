@@ -79,6 +79,8 @@ export {
   type RegisterPayload,
   type HeartbeatPayload,
   type RelayErrorCode,
+  type PairingClaim,
+  type StoredPairingClaim,
   RelayError,
   RELAY_VERSION,
   HEARTBEAT_INTERVAL_MS,

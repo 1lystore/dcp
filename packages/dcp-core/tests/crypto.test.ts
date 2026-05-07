@@ -22,8 +22,14 @@ import {
   envelopeDecrypt,
   zeroize,
   verifyCryptoReady,
+  generateSigningKeyPair,
+  signMessage,
+  verifySignature,
   KEY_SIZE,
   NONCE_SIZE,
+  ED25519_PUBLIC_KEY_SIZE,
+  ED25519_PRIVATE_KEY_SIZE,
+  ED25519_SIGNATURE_SIZE,
 } from '../src/crypto.js';
 import { VaultError } from '../src/types.js';
 
@@ -328,6 +334,62 @@ describe('Crypto Engine', () => {
   describe('verifyCryptoReady', () => {
     it('should return true when crypto is ready', () => {
       expect(verifyCryptoReady()).toBe(true);
+    });
+  });
+
+  describe('Ed25519 Signing', () => {
+    it('should generate keypair with correct sizes', () => {
+      const { publicKey, privateKey } = generateSigningKeyPair();
+      expect(publicKey.length).toBe(ED25519_PUBLIC_KEY_SIZE);
+      expect(privateKey.length).toBe(ED25519_PRIVATE_KEY_SIZE);
+      zeroize(privateKey);
+    });
+
+    it('should sign and verify message', () => {
+      const { publicKey, privateKey } = generateSigningKeyPair();
+      const message = Buffer.from('test message');
+
+      const signature = signMessage(message, privateKey);
+      expect(signature.length).toBe(ED25519_SIGNATURE_SIZE);
+
+      const valid = verifySignature(message, signature, publicKey);
+      expect(valid).toBe(true);
+
+      zeroize(privateKey);
+    });
+
+    it('should reject tampered message', () => {
+      const { publicKey, privateKey } = generateSigningKeyPair();
+      const message = Buffer.from('original');
+
+      const signature = signMessage(message, privateKey);
+
+      const tampered = Buffer.from('tampered');
+      const valid = verifySignature(tampered, signature, publicKey);
+      expect(valid).toBe(false);
+
+      zeroize(privateKey);
+    });
+
+    it('should reject wrong public key', () => {
+      const kp1 = generateSigningKeyPair();
+      const kp2 = generateSigningKeyPair();
+      const message = Buffer.from('test');
+
+      const signature = signMessage(message, kp1.privateKey);
+
+      const valid = verifySignature(message, signature, kp2.publicKey);
+      expect(valid).toBe(false);
+
+      zeroize(kp1.privateKey);
+      zeroize(kp2.privateKey);
+    });
+
+    it('should reject invalid key sizes', () => {
+      const badKey = Buffer.alloc(32);
+      const message = Buffer.from('test');
+
+      expect(() => signMessage(message, badKey)).toThrow();
     });
   });
 });

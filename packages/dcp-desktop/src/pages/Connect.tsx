@@ -1,226 +1,220 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-shell';
-import { api, type RelayInfo, type KnownService } from '../api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { api, type AgentConnection, type RelayInfo, type VpsPairingInviteResponse } from '../api';
 
-interface DesktopCredentials {
-  desktop_id: string;
-  public_key: string;
-  is_new: boolean;
+// MCP status interface
+interface McpStatus {
+  running: boolean;
+  unlocked: boolean;
 }
 
-function normalizeServiceId(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 48);
+// Local MCP agent status
+interface LocalMcpStatus {
+  configured: boolean;
+  config_exists: boolean;
+  connection_status: string;
+  agent_id: string;
 }
 
-function shellEscape(value: string): string {
-  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+type Tab = 'local' | 'remote' | 'telegram';
+
+interface TelegramConfig {
+  configured: boolean;
+  enabled?: boolean;
+  chat_id?: string;
+  paired_at?: string;
 }
+
+// Check if Telegram is fully paired (not just pending)
+const isTelegramPaired = (config: TelegramConfig | null): boolean => {
+  return !!(config?.configured && config?.enabled && config?.paired_at);
+};
+
+// Local AI agent types with their config file paths
+type LocalAgentType = 'claude-desktop' | 'cursor' | 'vscode' | 'openclaw' | 'other';
+const LOCAL_AGENT_TYPES: { id: LocalAgentType; label: string; configPath: string }[] = [
+  { id: 'claude-desktop', label: 'Claude Desktop', configPath: '~/Library/Application Support/Claude/claude_desktop_config.json' },
+  { id: 'cursor', label: 'Cursor', configPath: '~/.cursor/mcp.json' },
+  { id: 'vscode', label: 'VS Code', configPath: 'Settings → Extensions → MCP' },
+  { id: 'openclaw', label: 'OpenClaw', configPath: '~/.openclaw/openclaw.json' },
+  { id: 'other', label: 'Other MCP Client', configPath: 'Check your app documentation' },
+];
 
 export default function Connect() {
-  const navigate = useNavigate();
-  const [info, setInfo] = useState<RelayInfo | null>(null);
-  const [knownServices, setKnownServices] = useState<KnownService[]>([]);
-  const [relayUrl, setRelayUrl] = useState('');
-  const [vpsServiceId, setVpsServiceId] = useState('my-vps-agent');
-  const [pairScopes, setPairScopes] = useState<string[]>(['sign:solana', 'budget:check']);
-  const [pairBudgetDaily, setPairBudgetDaily] = useState('10');
-  const [pairBudgetCurrency, setPairBudgetCurrency] = useState('USDC');
-  const [pairAutoApprove, setPairAutoApprove] = useState('1');
-  const [pairTtl, setPairTtl] = useState('600');
-  const [pairResult, setPairResult] = useState<{ token: string; expires_at: string } | null>(null);
+  const [activeTab, setActiveTab] = useState<Tab>('local');
+
+  // Relay state
+  const [relayInfo, setRelayInfo] = useState<RelayInfo | null>(null);
+  const [relayLoading, setRelayLoading] = useState(true);
+
+  // Local AI / MCP state
+  const [selectedAgentType, setSelectedAgentType] = useState<LocalAgentType>('claude-desktop');
+  const [mcpConfigCopied, setMcpConfigCopied] = useState(false);
+  const [mcpStatus, setMcpStatus] = useState<McpStatus | null>(null);
+  const [localMcpStatus, setLocalMcpStatus] = useState<LocalMcpStatus | null>(null);
+  const [localMcpSetupLoading, setLocalMcpSetupLoading] = useState(false);
+
+  // Remote Agent state
+  const [agentName, setAgentName] = useState('');
+  const [pairResult, setPairResult] = useState<VpsPairingInviteResponse | null>(null);
   const [pairingLoading, setPairingLoading] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const defaultRelayUrl = 'wss://relay.dcp.1ly.store';
 
-  const ensureOwnerAuth = async (): Promise<boolean> => {
-    try {
-      const credentials = await invoke<DesktopCredentials>('get_or_create_desktop_credentials');
-      if (credentials.is_new) {
-        try {
-          await invoke<boolean>('register_desktop', {
-            desktopId: credentials.desktop_id,
-            publicKey: credentials.public_key,
-          });
-        } catch (err) {
-          console.error('Failed to register desktop:', err);
-        }
-      }
-      const token = await invoke<string>('authenticate_owner');
-      api.setOwnerToken(token);
-      return true;
-    } catch (err) {
-      console.error('Owner authentication failed:', err);
-      return false;
+  // Telegram state
+  const [telegramConfig, setTelegramConfig] = useState<TelegramConfig | null>(null);
+  const [telegramLoading, setTelegramLoading] = useState(true);
+  const [telegramCode, setTelegramCode] = useState<string | null>(null);
+  const [telegramCodeExpires, setTelegramCodeExpires] = useState<string | null>(null);
+  const [telegramPairing, setTelegramPairing] = useState(false);
+  const [telegramTesting, setTelegramTesting] = useState(false);
+  const telegramCodeRef = useRef<string | null>(null);
+
+  // Connected agents state (for summary display)
+  const [agentConnections, setAgentConnections] = useState<AgentConnection[]>([]);
+  const [connectionsLoading, setConnectionsLoading] = useState(true);
+
+  const getAgentDisplayStatus = (agent: AgentConnection): { status: string; color: string } => {
+    if (agent.status === 'revoked' || agent.revoked_at) {
+      return { status: 'revoked', color: 'var(--danger)' };
     }
+    if (!agent.last_seen_at) {
+      return { status: 'pending', color: 'var(--text-muted)' };
+    }
+    const lastSeen = new Date(agent.last_seen_at).getTime();
+    const diffSeconds = (Date.now() - lastSeen) / 1000;
+    if (diffSeconds < 60) return { status: 'active', color: 'var(--success)' };
+    if (diffSeconds < 86400) return { status: 'stale', color: 'var(--warning)' };
+    return { status: 'inactive', color: 'var(--text-muted)' };
   };
 
-  const loadInfo = useCallback(async () => {
+  const loadRelayInfo = useCallback(async () => {
     try {
       const data = await api.getRelayInfo();
-      setInfo(data);
-      setRelayUrl(data.relay_url || '');
-      setStatus(null);
+      setRelayInfo(data);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load relay info';
-      if (message.includes('Owner authentication required')) {
-        const ok = await ensureOwnerAuth();
-        if (ok) {
-          try {
-            const data = await api.getRelayInfo();
-            setInfo(data);
-            setRelayUrl(data.relay_url || '');
-            setStatus(null);
-            return;
-          } catch (retryErr) {
-            setStatus(retryErr instanceof Error ? retryErr.message : 'Failed to load relay info');
-            return;
-          }
-        }
+      console.error('Failed to load relay info:', err);
+    } finally {
+      setRelayLoading(false);
+    }
+  }, []);
+
+  const loadAgentConnections = useCallback(async () => {
+    try {
+      const res = await api.getAgentConnections();
+      setAgentConnections(res.agents || []);
+    } catch (err) {
+      console.error('Failed to load agent connections:', err);
+    } finally {
+      setConnectionsLoading(false);
+    }
+  }, []);
+
+  const loadTelegramConfig = useCallback(async () => {
+    try {
+      const config = await api.getTelegramConfig();
+      setTelegramConfig(config);
+    } catch (err) {
+      console.error('Failed to load telegram config:', err);
+    } finally {
+      setTelegramLoading(false);
+    }
+  }, []);
+
+  const loadMcpStatus = useCallback(async () => {
+    try {
+      // Check vault health - if vault is unlocked, MCP can work
+      const health = await api.health();
+      // MCP is "running" if vault is initialized, "unlocked" if vault is unlocked
+      setMcpStatus({
+        running: health.initialized,
+        unlocked: health.unlocked,
+      });
+    } catch (err) {
+      console.error('Failed to load MCP status:', err);
+      setMcpStatus(null);
+    }
+  }, []);
+
+  const loadLocalMcpStatus = useCallback(async () => {
+    try {
+      const status = await api.getLocalMcpStatus();
+      setLocalMcpStatus(status);
+    } catch (err) {
+      console.error('Failed to load local MCP status:', err);
+      setLocalMcpStatus(null);
+    }
+  }, []);
+
+  const setupLocalMcp = useCallback(async () => {
+    setLocalMcpSetupLoading(true);
+    try {
+      const result = await api.setupLocalMcp(selectedAgentType);
+      if (result.success) {
+        setStatus(`${result.agent_name} agent added successfully`);
+        await loadLocalMcpStatus();
+        await loadAgentConnections();
       }
-      setStatus(message);
+    } catch (err) {
+      console.error('Failed to setup local MCP:', err);
+      setStatus(err instanceof Error ? err.message : 'Failed to setup local MCP');
+    } finally {
+      setLocalMcpSetupLoading(false);
+    }
+  }, [loadLocalMcpStatus, loadAgentConnections, selectedAgentType]);
+
+  // Separate function to check pairing status with cloud
+  const checkTelegramPairing = useCallback(async () => {
+    try {
+      const status = await api.getTelegramPairingStatus();
+      if (status.paired) {
+        // Cloud confirmed pairing - now get updated local config
+        const config = await api.getTelegramConfig();
+        setTelegramConfig(config);
+        setTelegramCode(null);
+        setTelegramCodeExpires(null);
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error('Failed to check telegram pairing:', err);
+      return false;
     }
   }, []);
 
   useEffect(() => {
-    void loadInfo();
-    loadKnownServices();
-  }, [loadInfo]);
+    void loadRelayInfo();
+    void loadAgentConnections();
+    void loadTelegramConfig();
+    void loadMcpStatus();
+    void loadLocalMcpStatus();
+  }, [loadAgentConnections, loadRelayInfo, loadTelegramConfig, loadMcpStatus, loadLocalMcpStatus]);
 
+  // Removed auto-setup - user must explicitly click "Add Agent" button (per PRD Task 6.2)
+
+  // Keep ref in sync with state
+  useEffect(() => {
+    telegramCodeRef.current = telegramCode;
+  }, [telegramCode]);
+
+  // Separate polling effect - uses ref to avoid re-creating interval
   useEffect(() => {
     const interval = window.setInterval(() => {
       if (!api.hasOwnerToken()) return;
-      void loadInfo();
+      void loadAgentConnections();
+      void loadRelayInfo();
+      void loadMcpStatus();
+      void loadLocalMcpStatus();
+      // Check telegram pairing status if code was generated
+      if (telegramCodeRef.current) {
+        void checkTelegramPairing();
+      }
     }, 5000);
-
     return () => window.clearInterval(interval);
-  }, [loadInfo]);
+  }, [loadAgentConnections, loadRelayInfo, loadMcpStatus, loadLocalMcpStatus, checkTelegramPairing]);
 
-  const loadKnownServices = async () => {
-    try {
-      const res = await api.getKnownServices();
-      setKnownServices(res.services || []);
-    } catch (err) {
-      console.error('Failed to load known services:', err);
-    }
-  };
-
-  const serviceId = useMemo(() => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get('service') || '';
-  }, []);
-
-  const selectedService = useMemo(
-    () => knownServices.find((s) => s.service_id === serviceId),
-    [knownServices, serviceId]
-  );
-
-  const handleOpenConnect = (targetServiceId: string) => {
-    navigate(`/connect?service=${encodeURIComponent(targetServiceId)}`);
-  };
-
-  const save = async () => {
-    setLoading(true);
-    setStatus(null);
-    try {
-      await api.updateRelayConfig(relayUrl);
-      await loadInfo();
-      setStatus('Relay settings saved');
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : 'Failed to save relay settings');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const bundle = info
-    ? JSON.stringify(
-        {
-          vault_id: info.vault_id,
-          relay_url: info.relay_url,
-          hpke_public_key: info.hpke_public_key,
-        },
-        null,
-        2
-      )
-    : '';
-
-  const normalizedVpsServiceId = useMemo(
-    () => normalizeServiceId(vpsServiceId) || 'my-vps-agent',
-    [vpsServiceId]
-  );
-  const hasVpsCommand = Boolean(info && pairResult?.token);
-  const vpsCommand = info && pairResult?.token
-    ? `npx -y -p @dcprotocol/proxy dcp-proxy --pair ${shellEscape(pairResult.token)} --service-id ${shellEscape(normalizedVpsServiceId)} --vault ${shellEscape(info.vault_id)} --hpke-key ${shellEscape(info.hpke_public_key)} --relay ${shellEscape(info.relay_url || relayUrl || defaultRelayUrl)} --port 8421`
-    : '';
-
-  const pairingScopes = useMemo(() => ([
-    {
-      id: 'sign-solana',
-      label: 'Sign Solana transactions',
-      scope: 'sign:solana',
-    },
-    {
-      id: 'sign-base',
-      label: 'Sign Base transactions',
-      scope: 'sign:base',
-    },
-    {
-      id: 'sign-ethereum',
-      label: 'Sign Ethereum transactions',
-      scope: 'sign:ethereum',
-    },
-    {
-      id: 'read-keys',
-      label: 'Read API keys',
-      scope: 'read:credentials.api.*',
-    },
-    {
-      id: 'read-profile',
-      label: 'Read identity',
-      scope: 'read:identity.*',
-    },
-    {
-      id: 'read-address',
-      label: 'Read addresses',
-      scope: 'read:address.*',
-    },
-    {
-      id: 'budget-check',
-      label: 'Budget checks',
-      scope: 'budget:check',
-    },
-  ]), []);
-
-  const togglePairScope = (scope: string) => {
-    setPairScopes((prev) => (prev.includes(scope)
-      ? prev.filter((s) => s !== scope)
-      : [...prev, scope]));
-  };
-
-  const copyBundle = async () => {
-    try {
-      await navigator.clipboard.writeText(bundle);
-      setStatus('Connection bundle copied');
-    } catch {
-      setStatus('Failed to copy bundle');
-    }
-  };
-
-  const createPairingToken = async () => {
-    if (!normalizedVpsServiceId) {
-      setStatus('Give this VPS a short name first');
-      return;
-    }
-    if (pairScopes.length === 0) {
-      setStatus('Select at least one permission');
+  const createVpsInvite = async () => {
+    const name = agentName.trim();
+    if (!name) {
+      setStatus('Give your agent a name');
       return;
     }
 
@@ -228,294 +222,666 @@ export default function Connect() {
     setStatus(null);
 
     try {
-      const daily = Number(pairBudgetDaily);
-      const autoApprove = Number(pairAutoApprove);
-      const ttlSeconds = Number(pairTtl);
-
-      const res = await api.createPairingToken({
-        service_id: normalizedVpsServiceId,
-        scopes: pairScopes,
-        budget: {
-          daily: Number.isNaN(daily) ? 10 : daily,
-          currency: pairBudgetCurrency,
-          auto_approve_under: Number.isNaN(autoApprove) ? 0 : autoApprove,
-        },
-        ttl_seconds: Number.isNaN(ttlSeconds) ? 600 : ttlSeconds,
+      const res = await api.createVpsPairingInvite({
+        agent_name: name,
+        ttl_ms: 3600000, // 1 hour
       });
-
-      setVpsServiceId(normalizedVpsServiceId);
-      setPairResult({ token: res.token, expires_at: res.expires_at });
-      setStatus('Pairing token generated');
+      setPairResult(res);
+      setStatus(`VPS invite generated for "${res.agent_name}"`);
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : 'Failed to create pairing token');
+      setStatus(err instanceof Error ? err.message : 'Failed to create VPS invite');
     } finally {
       setPairingLoading(false);
     }
   };
 
-  const copyVpsCommand = async () => {
+  const copyToken = async () => {
+    if (!pairResult?.token) return;
     try {
-      await navigator.clipboard.writeText(vpsCommand);
-      setStatus('VPS setup command copied');
+      await navigator.clipboard.writeText(pairResult.token);
+      setStatus('Token copied!');
     } catch {
-      setStatus('Failed to copy VPS command');
+      setStatus('Failed to copy');
     }
   };
 
+  // Agent ID mapping
+  const agentIdMap: Record<LocalAgentType, string> = {
+    'claude-desktop': 'agent_claude_desktop',
+    'cursor': 'agent_cursor',
+    'vscode': 'agent_vscode',
+    'openclaw': 'agent_openclaw_local',
+    'other': 'agent_local_mcp',
+  };
+
+  // MCP config for the selected agent type (uses npx for zero-install)
+  const mcpConfig = useMemo(() => {
+    const serverConfig = {
+      command: 'npx',
+      args: ['-y', '@dcprotocol/agent', 'run', '--mode', 'mcp', '--agent', agentIdMap[selectedAgentType]],
+    };
+
+    if (selectedAgentType === 'openclaw') {
+      return `openclaw mcp set dcp '${JSON.stringify(serverConfig)}'`;
+    }
+
+    return JSON.stringify({
+      mcpServers: {
+        dcp: serverConfig,
+      },
+    }, null, 2);
+  }, [selectedAgentType]);
+
+  const copyMcpConfig = async () => {
+    try {
+      await navigator.clipboard.writeText(mcpConfig);
+      setMcpConfigCopied(true);
+      setTimeout(() => setMcpConfigCopied(false), 2000);
+    } catch {
+      setStatus('Failed to copy');
+    }
+  };
+
+  // Telegram handlers
+  const startTelegramPairing = async (forceNew = false) => {
+    // If we have an active code that hasn't expired, reuse it
+    if (!forceNew && telegramCode && telegramCodeExpires) {
+      const expiresAt = new Date(telegramCodeExpires).getTime();
+      if (expiresAt > Date.now()) {
+        // Code still valid, just show it again
+        return;
+      }
+    }
+
+    setTelegramPairing(true);
+    try {
+      const res = await api.startTelegramPairing();
+      setTelegramCode(res.code);
+      setTelegramCodeExpires(res.expires_at);
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : 'Failed to start pairing');
+    } finally {
+      setTelegramPairing(false);
+    }
+  };
+
+  const sendTelegramTest = async () => {
+    setTelegramTesting(true);
+    try {
+      await api.sendTelegramTest();
+      setStatus('Test notification sent!');
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : 'Failed to send test');
+    } finally {
+      setTelegramTesting(false);
+    }
+  };
+
+  const unlinkTelegram = async () => {
+    try {
+      await api.unlinkTelegram();
+      setTelegramConfig(null);
+      setTelegramCode(null);
+      setStatus('Telegram unlinked');
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : 'Failed to unlink');
+    }
+  };
+
+  const tabs = [
+    { id: 'local' as Tab, label: 'Local AI', icon: '💻' },
+    { id: 'remote' as Tab, label: 'Remote Agent', icon: '🌐' },
+    { id: 'telegram' as Tab, label: 'Telegram', icon: '📱' },
+  ];
+
   return (
     <div className="page">
-      <div className="page-header">
-        <h2>Connect</h2>
-        <p className="muted">Connect your vault to trusted apps or your own remote agents.</p>
+      <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <h2>Connect</h2>
+          <p className="muted">Connect AI assistants to your vault</p>
+        </div>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          {/* MCP Status Badge */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            padding: '8px 12px',
+            background: localMcpStatus?.configured && mcpStatus?.unlocked
+              ? 'rgba(34, 197, 94, 0.1)'
+              : localMcpStatus?.configured || mcpStatus?.running
+                ? 'rgba(234, 179, 8, 0.1)'
+                : 'rgba(100, 100, 100, 0.1)',
+            border: `1px solid ${localMcpStatus?.configured && mcpStatus?.unlocked
+              ? 'var(--success)'
+              : localMcpStatus?.configured || mcpStatus?.running
+                ? 'var(--warning)'
+                : 'var(--text-muted)'}`,
+            borderRadius: '8px',
+          }}>
+            <span style={{
+              width: '8px',
+              height: '8px',
+              borderRadius: '50%',
+              background: localMcpStatus?.configured && mcpStatus?.unlocked
+                ? 'var(--success)'
+                : localMcpStatus?.configured || mcpStatus?.running
+                  ? 'var(--warning)'
+                  : 'var(--text-muted)',
+            }} />
+            <span style={{ fontSize: '13px' }}>
+              {localMcpStatus?.configured && mcpStatus?.unlocked
+                ? 'MCP Ready'
+                : localMcpStatus?.configured
+                  ? 'MCP Locked'
+                  : mcpStatus?.running
+                    ? 'MCP Setup Needed'
+                    : 'MCP Offline'}
+            </span>
+          </div>
+          {/* Relay Status Badge */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            padding: '8px 12px',
+            background: relayInfo?.relay_connected ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+            border: `1px solid ${relayInfo?.relay_connected ? 'var(--success)' : 'var(--danger)'}`,
+            borderRadius: '8px',
+          }}>
+            <span style={{
+              width: '8px',
+              height: '8px',
+              borderRadius: '50%',
+              background: relayInfo?.relay_connected ? 'var(--success)' : 'var(--danger)',
+            }} />
+            <span style={{ fontSize: '13px' }}>
+              {relayLoading ? 'Checking...' : relayInfo?.relay_connected ? 'Relay Connected' : 'Relay Offline'}
+            </span>
+          </div>
+        </div>
       </div>
 
-      <div className="card">
-        <h3>Quick Setup</h3>
-        <p className="muted">Follow these steps once. Your vault will stay connected.</p>
+      {/* Tab Selector */}
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`btn ${activeTab === tab.id ? 'btn-primary' : 'btn-secondary'}`}
+            style={{ padding: '10px 20px', fontSize: '14px' }}
+          >
+            <span style={{ marginRight: '8px' }}>{tab.icon}</span>
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
-        <div style={{ display: 'grid', gap: 16, marginTop: 12 }}>
-          <div style={{ padding: '12px', border: '1px solid var(--border)', borderRadius: 10, background: 'var(--bg-tertiary)' }}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>1) Connect to the relay</div>
-            <div className="muted small">We recommend the hosted relay for best reliability.</div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
-              <button
-                className="btn btn-primary"
-                onClick={() => {
-                  setRelayUrl(defaultRelayUrl);
-                }}
-                disabled={loading}
-              >
-                Use relay.dcp.1ly.store
-              </button>
-              <button className="btn btn-secondary" onClick={save} disabled={loading}>
-                {loading ? 'Saving...' : 'Save Relay'}
-              </button>
-              {info && (
-                <span className={`badge ${info.relay_connected ? 'ok' : 'warn'}`}>
-                  {info.relay_connected ? 'Relay Connected' : 'Relay Disconnected'}
-                </span>
-              )}
+      {/* Local AI Tab */}
+      {activeTab === 'local' && (
+        <div className="card">
+          <div className="card-header">
+            <div>
+              <h3 className="card-title">Local AI Agent</h3>
+              <p className="card-subtitle">Connect a local AI assistant to your vault</p>
             </div>
           </div>
 
-          <div style={{ padding: '12px', border: '1px solid var(--border)', borderRadius: 10, background: 'var(--bg-tertiary)' }}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>2) Allow a service</div>
-            <div className="muted small">
-              Choose an app you trust and set its permissions once.
-            </div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
-              <button className="btn btn-secondary" onClick={() => navigate('/settings')}>
-                Manage Trusted Services
-              </button>
-            </div>
-            {knownServices.length > 0 && (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
-                {knownServices.map((service) => (
+          <div style={{ display: 'grid', gap: '16px' }}>
+            {/* Status Section */}
+            {localMcpStatus?.configured && (
+              <div style={{
+                padding: '16px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+                border: `1px solid ${mcpStatus?.unlocked ? 'var(--success)' : 'var(--warning)'}`,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <span style={{
+                    width: '10px',
+                    height: '10px',
+                    borderRadius: '50%',
+                    background: mcpStatus?.unlocked ? 'var(--success)' : 'var(--warning)',
+                  }} />
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: '14px' }}>
+                      {mcpStatus?.unlocked ? 'Local Agent Ready' : 'Vault Locked'}
+                    </div>
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                      {mcpStatus?.unlocked
+                        ? 'Your vault is unlocked and ready for AI access'
+                        : 'Unlock your vault to allow AI access'}
+                    </div>
+                  </div>
+                  {mcpStatus?.unlocked && <span style={{ marginLeft: 'auto', fontSize: '20px' }}>✓</span>}
+                </div>
+              </div>
+            )}
+
+            {/* Step 1: Choose Agent Type */}
+            <div style={{
+              padding: '16px',
+              background: 'var(--bg-tertiary)',
+              borderRadius: '8px',
+              border: '1px solid var(--border)'
+            }}>
+              <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px' }}>
+                1. Choose your AI assistant
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
+                {LOCAL_AGENT_TYPES.map((agent) => (
                   <button
-                    key={service.service_id}
-                    className="btn btn-secondary"
-                    onClick={() => handleOpenConnect(service.service_id)}
+                    key={agent.id}
+                    onClick={() => setSelectedAgentType(agent.id)}
+                    className={`btn ${selectedAgentType === agent.id ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ padding: '12px', fontSize: '13px', textAlign: 'left' }}
                   >
-                    Set up {service.name}
+                    {agent.label}
                   </button>
                 ))}
               </div>
-            )}
-          </div>
+            </div>
 
-          <div style={{ padding: '12px', border: '1px solid var(--border)', borderRadius: 10, background: 'var(--bg-tertiary)' }}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>3) Run a remote agent (VPS)</div>
-            <div className="muted small">
-              Give your VPS a simple name, choose what it can do, then copy one command. Your agent talks to localhost on the VPS.
-            </div>
-            <div style={{ marginTop: 10 }}>
-              <label className="label">Name this VPS</label>
-              <input
-                className="input"
-                value={vpsServiceId}
-                onChange={(e) => setVpsServiceId(normalizeServiceId(e.target.value))}
-                placeholder="openclaw-vps"
-              />
-              <div className="muted small" style={{ marginTop: 6 }}>
-                Use lowercase letters, numbers, and hyphens only.
+            {/* Step 2: Copy Config */}
+            <div style={{
+              padding: '16px',
+              background: 'var(--bg-tertiary)',
+              borderRadius: '8px',
+              border: '1px solid var(--border)'
+            }}>
+              <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '8px' }}>
+                2. Add to your MCP config
               </div>
-            </div>
-            <div style={{ marginTop: 12 }}>
-              <label className="label">Permissions</label>
-              <div style={{ display: 'grid', gap: 8 }}>
-                {pairingScopes.map((scopeOption) => (
-                  <label key={scopeOption.id} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <input
-                      type="checkbox"
-                      checked={pairScopes.includes(scopeOption.scope)}
-                      onChange={() => togglePairScope(scopeOption.scope)}
-                    />
-                    <span style={{ fontSize: 13 }}>{scopeOption.label}</span>
-                  </label>
-                ))}
+              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '12px' }}>
+                Config file: <code>{LOCAL_AGENT_TYPES.find(a => a.id === selectedAgentType)?.configPath}</code>
               </div>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
-              <div>
-                <label className="label">Daily Budget</label>
-                <input
-                  className="input"
-                  type="number"
-                  min="0"
-                  value={pairBudgetDaily}
-                  onChange={(e) => setPairBudgetDaily(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="label">Currency</label>
-                <select
-                  className="input"
-                  value={pairBudgetCurrency}
-                  onChange={(e) => setPairBudgetCurrency(e.target.value)}
-                >
-                  <option value="USDC">USDC</option>
-                  <option value="USDT">USDT</option>
-                  <option value="SOL">SOL</option>
-                  <option value="ETH">ETH</option>
-                  <option value="BASE_ETH">BASE_ETH</option>
-                </select>
-              </div>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
-              <div>
-                <label className="label">Auto-approve under</label>
-                <input
-                  className="input"
-                  type="number"
-                  min="0"
-                  value={pairAutoApprove}
-                  onChange={(e) => setPairAutoApprove(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="label">Token TTL (sec)</label>
-                <input
-                  className="input"
-                  type="number"
-                  min="60"
-                  value={pairTtl}
-                  onChange={(e) => setPairTtl(e.target.value)}
-                />
-              </div>
-            </div>
-            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-              <button className="btn btn-primary" onClick={createPairingToken} disabled={pairingLoading}>
-                {pairingLoading ? 'Generating...' : 'Generate Pairing Token'}
+              <pre style={{
+                background: 'var(--bg-secondary)',
+                padding: '12px',
+                borderRadius: '6px',
+                fontSize: '12px',
+                overflow: 'auto',
+                margin: '0 0 12px 0'
+              }}>
+                {mcpConfig}
+              </pre>
+              <button className="btn btn-primary" onClick={copyMcpConfig}>
+                {mcpConfigCopied ? 'Copied!' : 'Copy Config'}
               </button>
             </div>
-            {pairResult && (
-              <div className="muted small" style={{ marginTop: 8 }}>
-                Pairing token ready. It expires at {new Date(pairResult.expires_at).toLocaleString()}.
+
+            {/* Step 3: Add Agent - always show so users can add multiple agents */}
+            <div style={{
+              padding: '16px',
+              background: 'var(--bg-tertiary)',
+              borderRadius: '8px',
+              border: '1px solid var(--border)'
+            }}>
+              <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px' }}>
+                3. Register local agent
               </div>
-            )}
-            <textarea
-              className="input"
-              readOnly
-              rows={6}
-              value={hasVpsCommand ? vpsCommand : 'Generate a pairing token to get your one-line VPS setup command.'}
-              style={{ marginTop: 10 }}
-            />
-            <div className="muted small" style={{ marginTop: 6 }}>
-              Run this once on the VPS. It uses Node.js 18+ and installs the DCP proxy automatically via npx.
-            </div>
-            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-              <button className="btn btn-secondary" onClick={copyVpsCommand} disabled={!hasVpsCommand}>
-                Copy VPS Command
+              <button
+                className="btn btn-primary"
+                onClick={setupLocalMcp}
+                disabled={localMcpSetupLoading}
+                style={{ width: '100%' }}
+              >
+                {localMcpSetupLoading ? 'Adding Agent...' : `Add ${LOCAL_AGENT_TYPES.find(a => a.id === selectedAgentType)?.label} Agent`}
               </button>
             </div>
-          </div>
-        </div>
 
-        {status && <div className="muted small" style={{ marginTop: 12 }}>{status}</div>}
-      </div>
-
-      {selectedService && (
-        <div className="card" style={{ marginTop: 16 }}>
-          <h3>Set up {selectedService.name}</h3>
-          <p className="muted">
-            Use the links below to authenticate with {selectedService.name}, then paste the connection bundle if requested.
-          </p>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button
-              className="btn btn-primary"
-              onClick={async () => {
-                try {
-                  await open(selectedService.auth_url);
-                } catch (err) {
-                  console.error('Failed to open auth URL:', err);
-                  setStatus('Failed to open service login');
-                }
-              }}
-            >
-              Open {selectedService.name} Login
-            </button>
-            <button
-              className="btn btn-secondary"
-              onClick={async () => {
-                try {
-                  await open(selectedService.connect_url);
-                } catch (err) {
-                  console.error('Failed to open connect URL:', err);
-                  setStatus('Failed to open service connect page');
-                }
-              }}
-            >
-              Open Connect Page
-            </button>
-          </div>
-          <div className="muted small" style={{ marginTop: 8 }}>
-            {selectedService.description || 'Follow the service instructions to attach your vault.'}
+            <div style={{
+              padding: '12px 16px',
+              background: 'rgba(59, 130, 246, 0.1)',
+              border: '1px solid rgba(59, 130, 246, 0.3)',
+              borderRadius: '8px',
+              fontSize: '13px',
+            }}>
+              <strong>Important:</strong> Keep this DCP Vault app open and unlocked while using your AI assistant.
+            </div>
           </div>
         </div>
       )}
 
-      <details className="card" style={{ marginTop: 16 }}>
-        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Custom Relay (Advanced)</summary>
-        <div style={{ marginTop: 12 }}>
-          <div>
-            <label className="label">Relay URL</label>
-            <input
-              className="input"
-              value={relayUrl}
-              onChange={(e) => setRelayUrl(e.target.value)}
-              placeholder="wss://relay.dcprotocol.org"
-            />
-            <div className="muted small" style={{ marginTop: 6 }}>
-              Only change this if you are using your own relay.
+      {/* Remote Agent Tab */}
+      {activeTab === 'remote' && (
+        <div className="card">
+          <div className="card-header">
+            <div>
+              <h3 className="card-title">Remote Agent - VPS / OpenClaw</h3>
+              <p className="card-subtitle">Generate an invite token for remote VPS agents</p>
             </div>
           </div>
-          <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
-            <button className="btn btn-primary" onClick={save} disabled={loading}>
-              {loading ? 'Saving...' : 'Save'}
-            </button>
-            {info && (
-              <span className={`badge ${info.relay_connected ? 'ok' : 'warn'}`}>
-                {info.relay_connected ? 'Relay Connected' : 'Relay Disconnected'}
-              </span>
-            )}
-          </div>
-        </div>
-      </details>
 
-      <details className="card" style={{ marginTop: 16 }}>
-        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Connection Bundle (Advanced)</summary>
-        <div style={{ marginTop: 12 }}>
-          <p className="muted">
-            Share this with your MCP tool once. It contains your vault ID and public key.
-          </p>
-          <textarea className="input" readOnly rows={10} value={bundle} />
-          <div style={{ marginTop: 8 }}>
-            <button className="btn" onClick={copyBundle} disabled={!bundle}>
-              Copy Bundle
-            </button>
-          </div>
+          {!pairResult ? (
+            <div style={{ display: 'grid', gap: '16px' }}>
+              <div>
+                <label className="label">Agent Name</label>
+                <input
+                  className="input"
+                  value={agentName}
+                  onChange={(e) => setAgentName(e.target.value)}
+                  placeholder="e.g., my-trading-bot"
+                />
+              </div>
+
+              <div style={{
+                padding: '12px 16px',
+                background: 'rgba(59, 130, 246, 0.1)',
+                border: '1px solid rgba(59, 130, 246, 0.3)',
+                borderRadius: '8px',
+                fontSize: '13px',
+              }}>
+                <strong>How it works:</strong> Generate an invite token, run it on your VPS, then verify the pairing phrase displayed on both sides.
+                You'll set permissions when approving the connection.
+              </div>
+
+              <button
+                className="btn btn-primary"
+                onClick={createVpsInvite}
+                disabled={pairingLoading || !agentName.trim()}
+              >
+                {pairingLoading ? 'Generating...' : 'Generate VPS Invite'}
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gap: '16px' }}>
+              <div style={{
+                padding: '20px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+                border: '1px solid var(--success)',
+                textAlign: 'center'
+              }}>
+                <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--success)', marginBottom: '8px' }}>
+                  VPS Invite Generated!
+                </div>
+                <div style={{ fontSize: '13px' }}>
+                  Agent: <strong>{pairResult.agent_name}</strong>
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                  Expires: {new Date(pairResult.expires_at).toLocaleTimeString()}
+                </div>
+              </div>
+
+              <div style={{
+                padding: '16px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+              }}>
+                <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>
+                  Run on your VPS:
+                </div>
+                <pre style={{
+                  background: 'var(--bg-secondary)',
+                  padding: '12px',
+                  borderRadius: '6px',
+                  fontSize: '11px',
+                  overflow: 'auto',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                  margin: 0,
+                }}>
+{`sudo npx --yes @dcprotocol/agent install-service '${pairResult.token}'`}
+                </pre>
+              </div>
+
+              <div style={{
+                padding: '12px 16px',
+                background: 'rgba(234, 179, 8, 0.1)',
+                border: '1px solid var(--warning)',
+                borderRadius: '8px',
+                fontSize: '13px',
+                color: 'var(--warning)',
+              }}>
+                ⏳ After running, a pairing request will appear on the <strong>Agents</strong> page. Verify the phrase matches before approving!
+              </div>
+
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  className="btn btn-primary"
+                  onClick={async () => {
+                    await navigator.clipboard.writeText(`sudo npx --yes @dcprotocol/agent install-service '${pairResult.token}'`);
+                    setStatus('Command copied!');
+                  }}
+                >
+                  Copy Command
+                </button>
+                <button className="btn btn-secondary" onClick={copyToken}>
+                  Copy Token Only
+                </button>
+                <button className="btn btn-secondary" onClick={() => {
+                  setPairResult(null);
+                  setAgentName('');
+                }}>
+                  Create Another
+                </button>
+              </div>
+            </div>
+          )}
         </div>
-      </details>
+      )}
+
+      {/* Telegram Tab */}
+      {activeTab === 'telegram' && (
+        <div className="card">
+          <div className="card-header">
+            <div>
+              <h3 className="card-title">Telegram Notifications</h3>
+              <p className="card-subtitle">Get notified when agents need approval</p>
+            </div>
+          </div>
+
+          {telegramLoading ? (
+            <div style={{ padding: '20px', textAlign: 'center' }}>
+              <div className="spinner" />
+            </div>
+          ) : isTelegramPaired(telegramConfig) ? (
+            // Already paired
+            <div style={{ display: 'grid', gap: '16px' }}>
+              <div style={{
+                padding: '20px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+                border: '1px solid var(--success)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+              }}>
+                <span style={{ fontSize: '24px' }}>✓</span>
+                <div>
+                  <div style={{ fontWeight: 600, color: 'var(--success)' }}>Telegram Connected</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                    Paired {telegramConfig?.paired_at ? new Date(telegramConfig.paired_at).toLocaleDateString() : 'recently'}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  className="btn btn-secondary"
+                  onClick={sendTelegramTest}
+                  disabled={telegramTesting}
+                >
+                  {telegramTesting ? 'Sending...' : 'Send Test Notification'}
+                </button>
+                <button className="btn btn-danger" onClick={unlinkTelegram}>
+                  Unlink Telegram
+                </button>
+              </div>
+            </div>
+          ) : telegramCode ? (
+            // Pairing in progress
+            <div style={{ display: 'grid', gap: '16px' }}>
+              <div style={{
+                padding: '24px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+                textAlign: 'center',
+              }}>
+                <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                  Send this code to our Telegram bot:
+                </div>
+                <div style={{
+                  fontSize: '32px',
+                  fontWeight: 700,
+                  fontFamily: 'monospace',
+                  letterSpacing: '8px',
+                  color: 'var(--accent)',
+                  marginBottom: '8px',
+                }}>
+                  {telegramCode}
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                  Expires {telegramCodeExpires ? new Date(telegramCodeExpires).toLocaleTimeString() : 'soon'}
+                </div>
+              </div>
+
+              <a
+                href={`https://t.me/dctesttffBot?start=pair_${telegramCode}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn btn-primary"
+                style={{ textAlign: 'center', textDecoration: 'none' }}
+              >
+                Open Telegram → Send /pair {telegramCode}
+              </a>
+
+              <div style={{
+                padding: '12px 16px',
+                background: 'rgba(234, 179, 8, 0.1)',
+                border: '1px solid var(--warning)',
+                borderRadius: '8px',
+                fontSize: '13px',
+                color: 'var(--warning)',
+                textAlign: 'center',
+              }}>
+                ⏳ Waiting for you to send the code in Telegram...
+              </div>
+
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  className="btn btn-secondary"
+                  onClick={checkTelegramPairing}
+                  style={{ flex: 1 }}
+                >
+                  🔄 Refresh Status
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => startTelegramPairing(true)}
+                  disabled={telegramPairing}
+                  style={{ flex: 1 }}
+                >
+                  🔑 Get New Code
+                </button>
+              </div>
+              <button
+                className="btn btn-secondary"
+                onClick={() => {
+                  setTelegramCode(null);
+                  setTelegramCodeExpires(null);
+                }}
+                style={{ width: '100%', opacity: 0.7 }}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            // Not paired
+            <div style={{ display: 'grid', gap: '16px' }}>
+              <div style={{
+                padding: '24px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+                textAlign: 'center',
+              }}>
+                <div style={{ fontSize: '48px', marginBottom: '16px' }}>📱</div>
+                <div style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                  Connect Telegram to receive notifications when agents need approval.
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                  Perfect for approving requests on the go.
+                </div>
+              </div>
+
+              <button
+                className="btn btn-primary"
+                onClick={() => startTelegramPairing(false)}
+                disabled={telegramPairing}
+                style={{ padding: '12px 24px' }}
+              >
+                {telegramPairing ? 'Generating Code...' : 'Connect Telegram'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Status Message */}
+      {status && (
+        <div style={{
+          padding: '12px 16px',
+          background: 'var(--bg-tertiary)',
+          borderRadius: '8px',
+          fontSize: '13px',
+          color: 'var(--text-secondary)',
+          marginTop: '16px',
+        }}>
+          {status}
+        </div>
+      )}
+
+      {/* Connected Agents Summary */}
+      <div className="card" style={{ marginTop: '20px' }}>
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          padding: '16px',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <div style={{
+              width: '48px',
+              height: '48px',
+              borderRadius: '50%',
+              background: 'var(--bg-tertiary)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                <circle cx="9" cy="7" r="4"/>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+              </svg>
+            </div>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: '15px' }}>
+                {connectionsLoading ? '...' : agentConnections.length} Connected Agents
+              </div>
+              <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                {connectionsLoading
+                  ? 'Loading...'
+                  : agentConnections.filter(a => getAgentDisplayStatus(a).status === 'active').length + ' active'}
+              </div>
+            </div>
+          </div>
+          <a
+            href="/agents"
+            onClick={(e) => {
+              e.preventDefault();
+              window.location.href = '/agents';
+            }}
+            className="btn btn-primary"
+            style={{ textDecoration: 'none' }}
+          >
+            Manage Agents
+          </a>
+        </div>
+      </div>
     </div>
   );
 }

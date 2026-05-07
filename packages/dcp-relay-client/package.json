@@ -1,7 +1,8 @@
 {
   "name": "@dcprotocol/relay-client",
   "version": "0.2.0",
-  "description": "Relay client for DCP - connects local vaults to the relay with HPKE encryption",
+  "private": true,
+  "description": "Relay client for DCP (INTERNAL: shared transport code, not for public publishing)",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
@@ -15,9 +16,6 @@
   "files": [
     "dist"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/1lystore/dcp.git",
@@ -45,7 +43,7 @@
   "author": "DCP Protocol",
   "license": "Apache-2.0",
   "dependencies": {
-    "@dcprotocol/relay": "^0.2.0",
+    "@dcprotocol/relay": "workspace:*",
     "@hpke/core": "^1.6.0",
     "@hpke/chacha20poly1305": "^1.6.0",
     "@hpke/dhkem-x25519": "^1.6.0",

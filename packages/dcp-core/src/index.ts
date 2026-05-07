@@ -37,12 +37,22 @@ export {
   validateMnemonic,
   generateRecoveryPhrase, // deprecated
 
+  // Ed25519 Signing
+  generateSigningKeyPair,
+  signMessage,
+  verifySignature,
+
   // Utilities
   verifyCryptoReady,
+  canonicalJson,
+
   // Constants
   KEY_SIZE,
   NONCE_SIZE,
   TAG_SIZE,
+  ED25519_PUBLIC_KEY_SIZE,
+  ED25519_PRIVATE_KEY_SIZE,
+  ED25519_SIGNATURE_SIZE,
 } from './crypto.js';
 
 // Wallet Manager
@@ -100,3 +110,41 @@ export {
   DEFAULT_RELAY_URL,
   RELAY_URLS,
 } from './services.js';
+
+// Signed Pairing Grants (PRD Section 7.1)
+export {
+  createSignedPairingGrant,
+  decodePairingGrant,
+  verifyPairingGrant,
+  verifyPairingGrantWithKey,
+  isPairingGrant,
+  PAIRING_GRANT_PREFIX,
+  DEFAULT_PAIRING_TTL_MS,
+  type CreatePairingGrantInput,
+  // VPS Pairing Invites (for remote agent pairing via relay)
+  createVpsPairingInvite,
+  parseVpsPairingInvite,
+  isVpsInviteExpired,
+  isVpsPairingInvite,
+  VPS_INVITE_PREFIX,
+  type VpsPairingInvite,
+  // Session Tokens (for Gateway Authentication)
+  createSessionToken,
+  decodeSessionToken,
+  verifySessionToken,
+  isSessionToken,
+  SESSION_TOKEN_PREFIX,
+  DEFAULT_SESSION_TOKEN_TTL_MS,
+  type CreateSessionTokenInput,
+} from './pairing.js';
+
+// Re-export Telegram types explicitly for convenience
+export type {
+  TelegramConfig,
+  CreateTelegramConfigInput,
+  TelegramPairingCode,
+  TelegramNotificationLog,
+  TelegramConsentPayload,
+  TelegramWebhookPayload,
+  TelegramRequestCategory,
+} from './types.js';

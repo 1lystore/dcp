@@ -44,6 +44,10 @@ export {
   type StoredMessage,
   type VaultConnection,
   type RelayErrorCode,
+  type PairingClaim,
+  type StoredPairingClaim,
+  type PairingClaimResponse,
+  type PairingApprovalStatus,
 
   // Constants
   RELAY_VERSION,

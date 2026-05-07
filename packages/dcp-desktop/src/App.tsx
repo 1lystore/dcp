@@ -3,12 +3,12 @@ import { Routes, Route, NavLink, useNavigate } from 'react-router-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { api, type HealthResponse } from './api';
 
-import Dashboard from './pages/Dashboard';
-import Consent from './pages/Consent';
-import Data from './pages/Data';
-import Activity from './pages/Activity';
-import Settings from './pages/Settings';
+import Home from './pages/Home';
 import Connect from './pages/Connect';
+import Agents from './pages/Agents';
+import Data from './pages/Data';
+import Settings from './pages/Settings';
+import Activity from './pages/Activity';
 import Onboarding from './pages/Onboarding';
 import Unlock from './pages/Unlock';
 
@@ -269,12 +269,12 @@ export default function App() {
 
       <main className="main-content">
         <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/consent" element={<Consent />} />
-          <Route path="/data" element={<Data />} />
-          <Route path="/activity" element={<Activity />} />
+          <Route path="/" element={<Home />} />
           <Route path="/connect" element={<Connect />} />
+          <Route path="/agents" element={<Agents />} />
+          <Route path="/data" element={<Data />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/activity" element={<Activity />} />
         </Routes>
       </main>
 
@@ -284,14 +284,24 @@ export default function App() {
             <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
             <polyline points="9 22 9 12 15 12 15 22"/>
           </svg>
-          Dashboard
+          Home
         </NavLink>
-        <NavLink to="/consent" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+        <NavLink to="/connect" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M9 11l3 3L22 4"/>
-            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+            <polyline points="10 17 15 12 10 7"/>
+            <line x1="15" y1="12" x2="3" y2="12"/>
           </svg>
-          Consent
+          Connect
+        </NavLink>
+        <NavLink to="/agents" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+          Agents
         </NavLink>
         <NavLink to="/data" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -300,20 +310,6 @@ export default function App() {
             <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
           </svg>
           Data
-        </NavLink>
-        <NavLink to="/activity" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-          </svg>
-          Activity
-        </NavLink>
-        <NavLink to="/connect" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M7 8a4 4 0 0 1 8 0"/>
-            <rect x="3" y="12" width="18" height="9" rx="2"/>
-            <path d="M12 16v2"/>
-          </svg>
-          Connect
         </NavLink>
         <NavLink to="/settings" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">

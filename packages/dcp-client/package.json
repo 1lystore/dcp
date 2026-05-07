@@ -1,7 +1,8 @@
 {
   "name": "@dcprotocol/client",
   "version": "0.2.0",
-  "description": "Universal agent SDK for DCP - connect any agent to DCP Vault via local REST or relay",
+  "private": true,
+  "description": "Universal agent SDK for DCP (PARKED: Phase 2 as @dcprotocol/sdk)",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
@@ -15,9 +16,6 @@
   "files": [
     "dist"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/1lystore/dcp.git",
@@ -49,6 +47,7 @@
   "author": "DCP Protocol",
   "license": "Apache-2.0",
   "dependencies": {
+    "@dcprotocol/core": "workspace:*",
     "@hpke/core": "^1.6.0",
     "@hpke/chacha20poly1305": "^1.6.0",
     "@hpke/dhkem-x25519": "^1.6.0",
