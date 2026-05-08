@@ -120081,9 +120081,29 @@ var require_dist6 = __commonJS({
       // Pending Consents
       // ==========================================================================
       /**
-       * Create a pending consent request
+       * Find existing pending consent for same agent/action/scope (deduplication)
+       */
+      findPendingConsent(agentName, action, scope) {
+        const now = (/* @__PURE__ */ new Date()).toISOString();
+        const stmt = this.db.prepare(`
+      SELECT * FROM pending_consents
+      WHERE agent_name = ? AND action = ? AND scope = ?
+        AND status = 'pending' AND expires_at > ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `);
+        return stmt.get(agentName, action, scope, now);
+      }
+      /**
+       * Create a pending consent request (with deduplication)
+       * If an existing pending consent exists for the same agent/action/scope, returns that instead
+       * @returns Object with consent and isNew flag (false if deduped)
        */
       createPendingConsent(agentName, action, scope, details) {
+        const existing = this.findPendingConsent(agentName, action, scope);
+        if (existing) {
+          return { consent: existing, isNew: false };
+        }
         const now = /* @__PURE__ */ new Date();
         const expiresAt = new Date(now.getTime() + 5 * 60 * 1e3);
         const id = generateId();
@@ -120093,7 +120113,7 @@ var require_dist6 = __commonJS({
       ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
     `);
         stmt.run(id, agentName, action, scope, details || null, now.toISOString(), expiresAt.toISOString());
-        return {
+        const consent = {
           id,
           agent_name: agentName,
           action,
@@ -120103,6 +120123,7 @@ var require_dist6 = __commonJS({
           created_at: now.toISOString(),
           expires_at: expiresAt.toISOString()
         };
+        return { consent, isNew: true };
       }
       /**
        * Get pending consent by ID
@@ -120126,6 +120147,35 @@ var require_dist6 = __commonJS({
     `);
         const result = stmt.run(status, now, sessionId || null, id);
         return result.changes > 0;
+      }
+      /**
+       * Find an approved consent for this agent/action/scope and consume it (mark as 'consumed')
+       * This implements "approve once" semantics - after one use, the consent cannot be reused
+       * @returns The consumed consent if found, null otherwise
+       */
+      consumeApprovedConsent(agentName, action, scope) {
+        const now = (/* @__PURE__ */ new Date()).toISOString();
+        const findStmt = this.db.prepare(`
+      SELECT * FROM pending_consents
+      WHERE agent_name = ? AND action = ? AND scope = ?
+        AND status = 'approved'
+      ORDER BY resolved_at DESC
+      LIMIT 1
+    `);
+        const consent = findStmt.get(agentName, action, scope);
+        if (!consent) {
+          return null;
+        }
+        const updateStmt = this.db.prepare(`
+      UPDATE pending_consents
+      SET status = 'consumed', resolved_at = ?
+      WHERE id = ? AND status = 'approved'
+    `);
+        const result = updateStmt.run(now, consent.id);
+        if (result.changes === 0) {
+          return null;
+        }
+        return { ...consent, status: "consumed" };
       }
       /**
        * Get pending consents (not expired)
@@ -120469,15 +120519,16 @@ var require_dist6 = __commonJS({
       }
       /**
        * Record an agent request for dashboard counters.
+       * Also updates last_seen_at since a request means the agent is active.
        */
       recordAgentRequest(agentId) {
         const now = (/* @__PURE__ */ new Date()).toISOString();
         const stmt = this.db.prepare(`
       UPDATE agent_connections
-      SET last_request_at = ?, request_count = request_count + 1
+      SET last_request_at = ?, last_seen_at = ?, request_count = request_count + 1
       WHERE agent_id = ? AND revoked_at IS NULL
     `);
-        const result = stmt.run(now, agentId);
+        const result = stmt.run(now, now, agentId);
         return result.changes > 0;
       }
       /**
@@ -127512,7 +127563,8 @@ var require_dist7 = __commonJS({
       }
     };
     var DEFAULT_RELAY_CONFIG = {
-      port: 8421,
+      port: 8422,
+      // Note: 8421 is used by vault, relay uses 8422
       host: "0.0.0.0",
       // Relay is meant to be publicly accessible
       enableLongPoll: true,
@@ -127534,7 +127586,8 @@ var require_dist7 = __commonJS({
       cleanupInterval = null;
       constructor(config = {}) {
         this.config = {
-          port: 8421,
+          port: 8422,
+          // Note: 8421 is used by vault, relay uses 8422
           host: "0.0.0.0",
           enableLongPoll: true,
           heartbeatIntervalMs: 3e4,
@@ -129207,7 +129260,7 @@ Usage:
   dcp-relay [options]
 
 Options:
-  -p, --port <port>         Port to listen on (default: 8421)
+  -p, --port <port>         Port to listen on (default: 8422)
   -h, --host <host>         Host to bind to (default: 0.0.0.0)
   -r, --rate-limit <n>      Max requests per vault per minute (default: 60)
   -d, --debug               Enable debug logging
@@ -130000,6 +130053,23 @@ function recordUnlockFailure(key) {
 function clearUnlockRateLimit(key) {
   unlockAttempts.delete(key);
 }
+var SIGNING_CHAINS = ["solana", "ethereum", "base", "bitcoin", "polygon"];
+function normalizePermissionScope(scope) {
+  if (scope.startsWith("read:") || scope.startsWith("write:") || scope.startsWith("sign:")) {
+    return scope;
+  }
+  const lowerScope = scope.toLowerCase();
+  if (SIGNING_CHAINS.includes(lowerScope)) {
+    return `sign:${lowerScope}`;
+  }
+  return `read:${scope}`;
+}
+function normalizePermissionScopes(scopes) {
+  if (!scopes || !Array.isArray(scopes))
+    return [];
+  const normalized = scopes.map(normalizePermissionScope);
+  return [...new Set(normalized)];
+}
 function getPackageVersion() {
   try {
     const entryPath = process.argv[1] ? path.dirname(process.argv[1]) : process.cwd();
@@ -130167,7 +130237,7 @@ function normalizeAmount(amount) {
   }
   return void 0;
 }
-var TELEGRAM_CLOUD_URL = process.env.DCP_TELEGRAM_CLOUD_URL || "http://127.0.0.1:8422";
+var TELEGRAM_CLOUD_URL = process.env.DCP_TELEGRAM_CLOUD_URL || "http://127.0.0.1:8423";
 function categorizeTelegramRequest(action, scope) {
   if (action === "sign_tx" || scope.startsWith("crypto.wallet")) {
     return "transaction_signing";
@@ -130470,7 +130540,7 @@ async function buildServer() {
       }
       return cb(new Error("Not allowed by CORS"), false);
     },
-    methods: ["GET", "POST", "DELETE"]
+    methods: ["GET", "POST", "DELETE", "PATCH"]
   });
   const vaultDir = process.env.VAULT_DIR;
   storage = (0, import_core.getStorage)(vaultDir);
@@ -131437,13 +131507,21 @@ async function buildServer() {
   server.get("/scopes", async () => {
     const records = storage.listRecords();
     return {
-      scopes: records.map((r) => ({
-        scope: r.scope,
-        type: r.item_type,
-        sensitivity: r.sensitivity,
-        chain: r.chain,
-        public_address: r.public_address
-      }))
+      scopes: records.map((r) => {
+        let formattedScope;
+        if (r.item_type === "WALLET_KEY" && r.chain) {
+          formattedScope = `sign:${r.chain}`;
+        } else {
+          formattedScope = `read:${r.scope}`;
+        }
+        return {
+          scope: formattedScope,
+          type: r.item_type,
+          sensitivity: r.sensitivity,
+          chain: r.chain,
+          public_address: r.public_address
+        };
+      })
     };
   });
   function getWalletAddress(chain) {
@@ -131560,9 +131638,11 @@ async function buildServer() {
         }
       });
     }
-    return {
-      agents: storage.listAgentConnections()
-    };
+    const agents = storage.listAgentConnections().map((agent2) => ({
+      ...agent2,
+      permission_scopes: normalizePermissionScopes(agent2.permission_scopes || [])
+    }));
+    return { agents };
   });
   server.post("/v1/agent-connections/:id/revoke", async (request, reply) => {
     if (!isOwnerRequest(request)) {
@@ -131649,7 +131729,7 @@ async function buildServer() {
     }
     const updates = {};
     if (body.permission_scopes !== void 0) {
-      updates.permission_scopes = body.permission_scopes.map((s) => s.trim());
+      updates.permission_scopes = normalizePermissionScopes(body.permission_scopes.map((s) => s.trim()));
     }
     if (body.budget?.daily !== void 0) {
       updates.budget_daily = body.budget.daily;
@@ -131672,7 +131752,10 @@ async function buildServer() {
     const updatedAgent = storage.getAgentConnection(agentId);
     return {
       updated: true,
-      agent: updatedAgent
+      agent: updatedAgent ? {
+        ...updatedAgent,
+        permission_scopes: normalizePermissionScopes(updatedAgent.permission_scopes || [])
+      } : null
     };
   });
   server.post("/v1/heartbeat", async (request, reply) => {
@@ -132038,10 +132121,6 @@ async function buildServer() {
       const expiresAt = new Date(Date.now() + 4 * 60 * 60 * 1e3);
       const newSession = storage.createSession(consent.agent_name, [consent.scope], "session", expiresAt);
       sessionId = newSession.id;
-    } else {
-      const expiresAt = new Date(Date.now() + 5 * 60 * 1e3);
-      const newSession = storage.createSession(consent.agent_name, [consent.scope], "once", expiresAt);
-      sessionId = newSession.id;
     }
     storage.resolveConsent(id, "approved", sessionId);
     storage.logAudit("GRANT", "success", {
@@ -132144,11 +132223,8 @@ async function buildServer() {
       }
     }
     if (!hasSession) {
-      const consent = storage.createPendingConsent(agent_name, "read", scope, description ? JSON.stringify({ description }) : void 0);
-      console.log("[CONSENT] Created consent:", consent.id, "for agent:", agent_name);
-      dispatchTelegramNotification(consent).catch((err) => {
-        console.log("[TG] Dispatch error:", err);
-      });
+      const { consent, isNew } = storage.createPendingConsent(agent_name, "read", scope, description ? JSON.stringify({ description }) : void 0);
+      console.log("[CONSENT] Created consent:", consent.id, "for agent:", agent_name, "isNew:", isNew);
       return {
         requires_consent: true,
         consent_id: consent.id,
@@ -132225,9 +132301,7 @@ async function buildServer() {
       }
     }
     if (!hasSession) {
-      const consent = storage.createPendingConsent(agent_name, "write", scope);
-      dispatchTelegramNotification(consent).catch(() => {
-      });
+      const { consent, isNew } = storage.createPendingConsent(agent_name, "write", scope);
       return {
         requires_consent: true,
         consent_id: consent.id,
@@ -132290,9 +132364,7 @@ async function buildServer() {
       }
     }
     if (!hasSession) {
-      const consent = storage.createPendingConsent(agent_name, "delete", scope, JSON.stringify({ description }));
-      dispatchTelegramNotification(consent).catch(() => {
-      });
+      const { consent, isNew } = storage.createPendingConsent(agent_name, "delete", scope, JSON.stringify({ description }));
       return {
         requires_consent: true,
         consent_id: consent.id,
@@ -132348,16 +132420,25 @@ async function buildServer() {
         });
       }
       if (budgetResult.requires_approval) {
-        const consent = storage.createPendingConsent(agent_name, "sign_tx", `crypto.wallet.${chain}`, JSON.stringify({ description, amount, currency: txCurrency, chain }));
-        dispatchTelegramNotification(consent).catch(() => {
-        });
-        return {
-          requires_consent: true,
-          consent_id: consent.id,
-          expires_at: consent.expires_at,
-          reason: "Amount exceeds approval threshold",
-          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`
-        };
+        const walletScope2 = `crypto.wallet.${chain}`;
+        const consumedConsent = storage.consumeApprovedConsent(agent_name, "sign_tx", walletScope2);
+        if (consumedConsent) {
+          storage.logAudit("EXECUTE", "success", {
+            agentName: agent_name,
+            scope: walletScope2,
+            operation: "consume_approval",
+            details: JSON.stringify({ consent_id: consumedConsent.id, amount, currency: txCurrency })
+          });
+        } else {
+          const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_tx", walletScope2, JSON.stringify({ description, amount, currency: txCurrency, chain }));
+          return {
+            requires_consent: true,
+            consent_id: consent.id,
+            expires_at: consent.expires_at,
+            reason: "Amount exceeds approval threshold",
+            message: `Consent required. Approve with: POST /consent/${consent.id}/approve`
+          };
+        }
       }
     }
     const walletScope = `crypto.wallet.${chain}`;
@@ -132378,15 +132459,22 @@ async function buildServer() {
       }
     }
     if (!hasSession) {
-      const consent = storage.createPendingConsent(agent_name, "sign_tx", walletScope, JSON.stringify({ description, amount, currency: txCurrency, chain }));
-      dispatchTelegramNotification(consent).catch(() => {
+      const consumedConsent = storage.consumeApprovedConsent(agent_name, "sign_tx", walletScope);
+      if (!consumedConsent) {
+        const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_tx", walletScope, JSON.stringify({ description, amount, currency: txCurrency, chain }));
+        return {
+          requires_consent: true,
+          consent_id: consent.id,
+          expires_at: consent.expires_at,
+          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`
+        };
+      }
+      storage.logAudit("EXECUTE", "success", {
+        agentName: agent_name,
+        scope: walletScope,
+        operation: "consume_approval",
+        details: JSON.stringify({ consent_id: consumedConsent.id })
       });
-      return {
-        requires_consent: true,
-        consent_id: consent.id,
-        expires_at: consent.expires_at,
-        message: `Consent required. Approve with: POST /consent/${consent.id}/approve`
-      };
     }
     const masterKey = storage.getMasterKey();
     const payload = storage.getEncryptedPayload(walletScope);
@@ -132441,14 +132529,12 @@ async function buildServer() {
       }
     }
     if (!hasSession) {
-      const consent = storage.createPendingConsent(agent_name, "sign_message", walletScope, JSON.stringify({
+      const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_message", walletScope, JSON.stringify({
         description,
         chain,
         message_length: message.length,
         encoding: encoding || "utf8"
       }));
-      dispatchTelegramNotification(consent).catch(() => {
-      });
       return {
         requires_consent: true,
         consent_id: consent.id,
@@ -132523,12 +132609,10 @@ async function buildServer() {
       }
     }
     if (!hasSession) {
-      const consent = storage.createPendingConsent(agent_name, "sign_typed_data", walletScope, JSON.stringify({
+      const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_typed_data", walletScope, JSON.stringify({
         description,
         chain
       }));
-      dispatchTelegramNotification(consent).catch(() => {
-      });
       return {
         requires_consent: true,
         consent_id: consent.id,
@@ -132604,15 +132688,13 @@ async function buildServer() {
         });
       }
       if (budgetResult.requires_approval) {
-        const consent = storage.createPendingConsent(agent_name, "sign_x402", walletScope, JSON.stringify({
+        const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_x402", walletScope, JSON.stringify({
           amount: parsedAmount,
           currency,
           network,
           recipient,
           purpose
         }));
-        dispatchTelegramNotification(consent).catch(() => {
-        });
         return {
           requires_consent: true,
           consent_id: consent.id,
@@ -132623,15 +132705,13 @@ async function buildServer() {
       }
     }
     if (!hasSession) {
-      const consent = storage.createPendingConsent(agent_name, "sign_x402", walletScope, JSON.stringify({
+      const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_x402", walletScope, JSON.stringify({
         amount: parsedAmount,
         currency,
         network,
         recipient,
         purpose
       }));
-      dispatchTelegramNotification(consent).catch(() => {
-      });
       return {
         requires_consent: true,
         consent_id: consent.id,
@@ -132878,6 +132958,15 @@ async function buildServer() {
     const webhookUrl = `${TELEGRAM_CLOUD_URL}/webhook/consent`;
     const identity = await ensureRelayIdentity();
     const vaultId = identity.vaultId;
+    const publicKeyBase64 = identity.signingKeyPair.publicKey.toString("base64");
+    try {
+      await fetch(`${TELEGRAM_CLOUD_URL}/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ vault_id: vaultId, public_key: publicKeyBase64 })
+      });
+    } catch {
+    }
     const nonce = crypto5.randomBytes(16).toString("base64");
     const payloadWithoutSig = {
       vault_id: vaultId,
@@ -133133,11 +133222,12 @@ function verifyLocalAgentRequest(body, requestedScope) {
       }
     }
   }
-  if (agent2.permission_scopes.length === 0) {
+  const normalizedScopes = normalizePermissionScopes(agent2.permission_scopes || []);
+  if (normalizedScopes.length === 0) {
     storage.recordAgentRequest(serviceId);
     return { authorized: true, agent: agent2, preAuthorized: false };
   }
-  const hasScope = agent2.permission_scopes.some((s) => {
+  const hasScope = normalizedScopes.some((s) => {
     if (s === "*")
       return true;
     if (s === requestedScope)
@@ -133158,14 +133248,14 @@ function verifyLocalAgentRequest(body, requestedScope) {
       details: JSON.stringify({
         service_id: serviceId,
         scope: requestedScope,
-        permitted_scopes: agent2.permission_scopes,
+        permitted_scopes: normalizedScopes,
         reason: "scope_not_permitted"
       })
     });
     return {
       authorized: false,
       agent: agent2,
-      reason: `Scope '${requestedScope}' is not permitted for agent '${agent2.name}'. Permitted scopes: ${agent2.permission_scopes.join(", ")}`,
+      reason: `Scope '${requestedScope}' is not permitted for agent '${agent2.name}'. Permitted scopes: ${normalizedScopes.join(", ")}`,
       skipConsentFlow: true
     };
   }

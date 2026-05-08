@@ -1454,14 +1454,37 @@ export class VaultStorage {
   // ==========================================================================
 
   /**
-   * Create a pending consent request
+   * Find existing pending consent for same agent/action/scope (deduplication)
+   */
+  findPendingConsent(agentName: string, action: string, scope: string): PendingConsent | null {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      SELECT * FROM pending_consents
+      WHERE agent_name = ? AND action = ? AND scope = ?
+        AND status = 'pending' AND expires_at > ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `);
+    return stmt.get(agentName, action, scope, now) as PendingConsent | null;
+  }
+
+  /**
+   * Create a pending consent request (with deduplication)
+   * If an existing pending consent exists for the same agent/action/scope, returns that instead
+   * @returns Object with consent and isNew flag (false if deduped)
    */
   createPendingConsent(
     agentName: string,
     action: string,
     scope: string,
     details?: string
-  ): PendingConsent {
+  ): { consent: PendingConsent; isNew: boolean } {
+    // DEDUPLICATION: Check if there's already a pending consent for this agent/action/scope
+    const existing = this.findPendingConsent(agentName, action, scope);
+    if (existing) {
+      return { consent: existing, isNew: false };
+    }
+
     const now = new Date();
     const expiresAt = new Date(now.getTime() + 5 * 60 * 1000); // 5 minutes
     const id = generateId();
@@ -1474,7 +1497,7 @@ export class VaultStorage {
 
     stmt.run(id, agentName, action, scope, details || null, now.toISOString(), expiresAt.toISOString());
 
-    return {
+    const consent: PendingConsent = {
       id,
       agent_name: agentName,
       action,
@@ -1484,6 +1507,8 @@ export class VaultStorage {
       created_at: now.toISOString(),
       expires_at: expiresAt.toISOString(),
     };
+
+    return { consent, isNew: true };
   }
 
   /**
@@ -1509,6 +1534,44 @@ export class VaultStorage {
     `);
     const result = stmt.run(status, now, sessionId || null, id);
     return result.changes > 0;
+  }
+
+  /**
+   * Find an approved consent for this agent/action/scope and consume it (mark as 'consumed')
+   * This implements "approve once" semantics - after one use, the consent cannot be reused
+   * @returns The consumed consent if found, null otherwise
+   */
+  consumeApprovedConsent(agentName: string, action: string, scope: string): PendingConsent | null {
+    const now = new Date().toISOString();
+
+    // Find an approved consent for this agent/action/scope
+    const findStmt = this.db.prepare(`
+      SELECT * FROM pending_consents
+      WHERE agent_name = ? AND action = ? AND scope = ?
+        AND status = 'approved'
+      ORDER BY resolved_at DESC
+      LIMIT 1
+    `);
+    const consent = findStmt.get(agentName, action, scope) as PendingConsent | null;
+
+    if (!consent) {
+      return null;
+    }
+
+    // Mark it as consumed so it can't be reused
+    const updateStmt = this.db.prepare(`
+      UPDATE pending_consents
+      SET status = 'consumed', resolved_at = ?
+      WHERE id = ? AND status = 'approved'
+    `);
+    const result = updateStmt.run(now, consent.id);
+
+    if (result.changes === 0) {
+      // Race condition - someone else consumed it
+      return null;
+    }
+
+    return { ...consent, status: 'consumed' };
   }
 
   /**

@@ -203,7 +203,7 @@ export interface AuditEvent {
 // Pending Consent Types
 // ============================================================================
 
-export type ConsentStatus = 'pending' | 'approved' | 'denied' | 'expired';
+export type ConsentStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'consumed';
 
 export interface PendingConsent {
   id: string;

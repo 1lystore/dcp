@@ -3004,11 +3004,11 @@ async function buildServer(): Promise<FastifyInstance> {
         throw new VaultError('CONSENT_TIMEOUT', 'Consent has expired');
       }
 
-      // Create session (long-lived for "session" mode, short-lived for "once" mode)
-      // Even "once" mode needs a short session so the retry succeeds
+      // Create session only for "session" mode
+      // "once" mode: NO session - the sign endpoint will check for approved consent and consume it
       let sessionId: string | undefined;
       if (createSession) {
-        // Session mode: 4 hour session
+        // Session mode: 4 hour session (allows multiple transactions)
         const expiresAt = new Date(Date.now() + 4 * 60 * 60 * 1000);
         const newSession = storage.createSession(
           consent.agent_name,
@@ -3017,20 +3017,11 @@ async function buildServer(): Promise<FastifyInstance> {
           expiresAt
         );
         sessionId = newSession.id;
-      } else {
-        // Once mode: create a short-lived session (5 minutes) for the retry
-        // This allows the original request to succeed without repeated consent
-        const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
-        const newSession = storage.createSession(
-          consent.agent_name,
-          [consent.scope],
-          'once',
-          expiresAt
-        );
-        sessionId = newSession.id;
       }
+      // else: Once mode - NO session created
+      // The retry will find this approved consent via consumeApprovedConsent()
 
-      // Approve (with session_id if created)
+      // Approve (with session_id if created, undefined for "once" mode)
       storage.resolveConsent(id, 'approved', sessionId);
 
       // Log to audit
@@ -3203,19 +3194,15 @@ async function buildServer(): Promise<FastifyInstance> {
 
     // If no valid session and not owner/verified agent, create pending consent
     if (!hasSession) {
-      const consent = storage.createPendingConsent(
+      const { consent, isNew } = storage.createPendingConsent(
         agent_name,
         'read',
         scope,
         description ? JSON.stringify({ description }) : undefined
       );
 
-      console.log('[CONSENT] Created consent:', consent.id, 'for agent:', agent_name);
-
-      // Dispatch Telegram notification (non-blocking)
-      dispatchTelegramNotification(consent).catch((err) => {
-        console.log('[TG] Dispatch error:', err);
-      });
+      console.log('[CONSENT] Created consent:', consent.id, 'for agent:', agent_name, 'isNew:', isNew);
+      // Telegram notification handled by consent watcher (avoids duplicates)
 
       return {
         requires_consent: true,
@@ -3341,14 +3328,13 @@ async function buildServer(): Promise<FastifyInstance> {
 
     // If no valid session and not owner, create pending consent
     if (!hasSession) {
-      const consent = storage.createPendingConsent(
+      const { consent, isNew } = storage.createPendingConsent(
         agent_name,
         'write',
         scope
       );
 
-      // Dispatch Telegram notification (non-blocking)
-      dispatchTelegramNotification(consent).catch(() => {});
+      // Telegram notification handled by consent watcher (avoids duplicates)
 
       return {
         requires_consent: true,
@@ -3441,15 +3427,14 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     if (!hasSession) {
-      const consent = storage.createPendingConsent(
+      const { consent, isNew } = storage.createPendingConsent(
         agent_name,
         'delete',
         scope,
         JSON.stringify({ description })
       );
 
-      // Dispatch Telegram notification (non-blocking)
-      dispatchTelegramNotification(consent).catch(() => {});
+      // Telegram notification handled by consent watcher (avoids duplicates)
 
       return {
         requires_consent: true,
@@ -3544,25 +3529,40 @@ async function buildServer(): Promise<FastifyInstance> {
         });
       }
 
-      // If above approval threshold, always require consent
+      // If above approval threshold, check for approved consent or require new consent
       if (budgetResult.requires_approval) {
-        const consent = storage.createPendingConsent(
-          agent_name,
-          'sign_tx',
-          `crypto.wallet.${chain}`,
-          JSON.stringify({ description, amount, currency: txCurrency, chain })
-        );
+        const walletScope = `crypto.wallet.${chain}`;
 
-        // Dispatch Telegram notification (non-blocking)
-        dispatchTelegramNotification(consent).catch(() => {});
+        // Check if there's an approved consent that can be consumed (approve-once semantics)
+        const consumedConsent = storage.consumeApprovedConsent(agent_name, 'sign_tx', walletScope);
+        if (consumedConsent) {
+          // Approved consent found and consumed - proceed to signing below
+          // Log the consumption
+          storage.logAudit('EXECUTE', 'success', {
+            agentName: agent_name,
+            scope: walletScope,
+            operation: 'consume_approval',
+            details: JSON.stringify({ consent_id: consumedConsent.id, amount, currency: txCurrency }),
+          });
+        } else {
+          // No approved consent - create pending consent
+          const { consent, isNew } = storage.createPendingConsent(
+            agent_name,
+            'sign_tx',
+            walletScope,
+            JSON.stringify({ description, amount, currency: txCurrency, chain })
+          );
 
-        return {
-          requires_consent: true,
-          consent_id: consent.id,
-          expires_at: consent.expires_at,
-          reason: 'Amount exceeds approval threshold',
-          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
-        };
+          // Telegram notification handled by consent watcher (avoids duplicates)
+
+          return {
+            requires_consent: true,
+            consent_id: consent.id,
+            expires_at: consent.expires_at,
+            reason: 'Amount exceeds approval threshold',
+            message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
+          };
+        }
       }
     }
 
@@ -3589,24 +3589,36 @@ async function buildServer(): Promise<FastifyInstance> {
       }
     }
 
-    // If no valid session, create pending consent
+    // If no valid session, check for approved consent or create pending consent
     if (!hasSession) {
-      const consent = storage.createPendingConsent(
-        agent_name,
-        'sign_tx',
-        walletScope,
-        JSON.stringify({ description, amount, currency: txCurrency, chain })
-      );
+      // Check if there's an approved consent that can be consumed (approve-once semantics)
+      const consumedConsent = storage.consumeApprovedConsent(agent_name, 'sign_tx', walletScope);
+      if (!consumedConsent) {
+        // No approved consent - create pending consent
+        const { consent, isNew } = storage.createPendingConsent(
+          agent_name,
+          'sign_tx',
+          walletScope,
+          JSON.stringify({ description, amount, currency: txCurrency, chain })
+        );
 
-      // Dispatch Telegram notification (non-blocking)
-      dispatchTelegramNotification(consent).catch(() => {});
+        // Telegram notification handled by consent watcher (avoids duplicates)
 
-      return {
-        requires_consent: true,
-        consent_id: consent.id,
-        expires_at: consent.expires_at,
-        message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
-      };
+        return {
+          requires_consent: true,
+          consent_id: consent.id,
+          expires_at: consent.expires_at,
+          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
+        };
+      }
+
+      // Approved consent consumed - proceed to signing
+      storage.logAudit('EXECUTE', 'success', {
+        agentName: agent_name,
+        scope: walletScope,
+        operation: 'consume_approval',
+        details: JSON.stringify({ consent_id: consumedConsent.id }),
+      });
     }
 
     // Get wallet and sign
@@ -3690,7 +3702,7 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     if (!hasSession) {
-      const consent = storage.createPendingConsent(
+      const { consent, isNew } = storage.createPendingConsent(
         agent_name,
         'sign_message',
         walletScope,
@@ -3702,8 +3714,7 @@ async function buildServer(): Promise<FastifyInstance> {
         })
       );
 
-      // Dispatch Telegram notification (non-blocking)
-      dispatchTelegramNotification(consent).catch(() => {});
+      // Telegram notification handled by consent watcher (avoids duplicates)
 
       return {
         requires_consent: true,
@@ -3825,7 +3836,7 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     if (!hasSession) {
-      const consent = storage.createPendingConsent(
+      const { consent, isNew } = storage.createPendingConsent(
         agent_name,
         'sign_typed_data',
         walletScope,
@@ -3835,8 +3846,7 @@ async function buildServer(): Promise<FastifyInstance> {
         })
       );
 
-      // Dispatch Telegram notification (non-blocking)
-      dispatchTelegramNotification(consent).catch(() => {});
+      // Telegram notification handled by consent watcher (avoids duplicates)
 
       return {
         requires_consent: true,
@@ -3967,7 +3977,7 @@ async function buildServer(): Promise<FastifyInstance> {
       }
 
       if (budgetResult.requires_approval) {
-        const consent = storage.createPendingConsent(
+        const { consent, isNew } = storage.createPendingConsent(
           agent_name,
           'sign_x402',
           walletScope,
@@ -3980,8 +3990,7 @@ async function buildServer(): Promise<FastifyInstance> {
           })
         );
 
-        // Dispatch Telegram notification (non-blocking)
-        dispatchTelegramNotification(consent).catch(() => {});
+        // Telegram notification handled by consent watcher (avoids duplicates)
 
         return {
           requires_consent: true,
@@ -3994,7 +4003,7 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     if (!hasSession) {
-      const consent = storage.createPendingConsent(
+      const { consent, isNew } = storage.createPendingConsent(
         agent_name,
         'sign_x402',
         walletScope,
@@ -4007,8 +4016,7 @@ async function buildServer(): Promise<FastifyInstance> {
         })
       );
 
-      // Dispatch Telegram notification (non-blocking)
-      dispatchTelegramNotification(consent).catch(() => {});
+      // Telegram notification handled by consent watcher (avoids duplicates)
 
       return {
         requires_consent: true,
