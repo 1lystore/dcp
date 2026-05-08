@@ -18,6 +18,7 @@ import { TelegramStore } from './store.js';
 import {
   formatConsentNotification,
   formatTestNotification,
+  formatBudgetExceededNotification,
   formatPairingSuccess,
   formatHelpMessage,
   formatStatusMessage,
@@ -28,6 +29,7 @@ import {
   formatApprovalQueued,
   formatApprovalProcessed,
   formatRateLimitWarning,
+  type BudgetExceededPayload,
   buildConsentInlineKeyboard,
 } from './notification.js';
 import type { ApprovalAction } from './types.js';
@@ -469,6 +471,34 @@ export class DcpTelegramBot {
       };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      return {
+        success: false,
+        error: errorMessage,
+      };
+    }
+  }
+
+  /**
+   * Send a budget exceeded notification
+   * Notifies admin when daily/tx budget is exceeded
+   */
+  async sendBudgetExceededNotification(
+    chatId: string,
+    payload: BudgetExceededPayload
+  ): Promise<NotificationResult> {
+    try {
+      const message = formatBudgetExceededNotification(payload);
+      const result = await this.bot.sendMessage(Number(chatId), message, {
+        parse_mode: 'MarkdownV2',
+      });
+
+      return {
+        success: true,
+        messageId: result.message_id,
+      };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      console.error(`[BOT] Failed to send budget notification to ${chatId}:`, errorMessage);
       return {
         success: false,
         error: errorMessage,

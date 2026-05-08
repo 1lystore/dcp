@@ -17,24 +17,51 @@ import { DcpTelegramBot } from './bot.js';
 import { TelegramStore, NonceStore } from './store.js';
 
 /**
+ * Budget exceeded notification payload
+ */
+interface BudgetExceededPayload {
+  agent_name: string;
+  amount: number;
+  currency: string;
+  chain: string;
+  error_code: 'BUDGET_EXCEEDED_TX' | 'BUDGET_EXCEEDED_DAILY';
+  remaining_daily: number;
+  remaining_tx: number;
+  limit_daily: number;
+  limit_tx: number;
+  message: string;
+}
+
+/**
+ * Consent webhook payload from desktop
+ */
+interface ConsentWebhookPayload {
+  vault_id: string;
+  event: 'consent_created' | 'test';
+  data: TelegramConsentPayload;
+  timestamp: string;
+  nonce: string;
+  signature: string;
+}
+
+/**
+ * Budget webhook payload from desktop
+ */
+interface BudgetWebhookPayload {
+  vault_id: string;
+  event: 'budget_exceeded';
+  data: BudgetExceededPayload;
+  timestamp: string;
+  nonce: string;
+  signature: string;
+}
+
+/**
  * Webhook payload from desktop (simplified - no chat_id needed)
  * PRD Sprint 8 Task 5: Every desktop-to-Telegram request must include:
  * vault ID, timestamp, nonce, signature
  */
-interface DesktopWebhookPayload {
-  /** Vault ID (required) */
-  vault_id: string;
-  /** Event type */
-  event: 'consent_created' | 'test';
-  /** Event data */
-  data: TelegramConsentPayload;
-  /** ISO timestamp (required for freshness check) */
-  timestamp: string;
-  /** Unique nonce for replay protection (required) */
-  nonce: string;
-  /** Ed25519 signature over payload (required) */
-  signature: string;
-}
+type DesktopWebhookPayload = ConsentWebhookPayload | BudgetWebhookPayload;
 
 /**
  * Pairing start request from desktop
@@ -282,10 +309,18 @@ export class WebhookServer {
     // === WEBHOOK ENDPOINTS ===
 
     // Consent webhook from desktop (no chat_id needed - we look it up)
-    this.server.post<{ Body: DesktopWebhookPayload }>(
+    this.server.post<{ Body: ConsentWebhookPayload }>(
       '/webhook/consent',
       async (request, reply) => {
         return this.handleConsentWebhook(request, reply);
+      }
+    );
+
+    // Budget exceeded webhook from desktop
+    this.server.post<{ Body: BudgetWebhookPayload }>(
+      '/webhook/budget',
+      async (request, reply) => {
+        return this.handleBudgetWebhook(request, reply);
       }
     );
 
@@ -489,7 +524,7 @@ export class WebhookServer {
    * - reused nonce
    */
   private async handleConsentWebhook(
-    request: FastifyRequest<{ Body: DesktopWebhookPayload }>,
+    request: FastifyRequest<{ Body: ConsentWebhookPayload }>,
     reply: FastifyReply
   ) {
     const payload = request.body;
@@ -657,6 +692,118 @@ export class WebhookServer {
     return reply.send({
       sent: true,
       event: 'test',
+      message_id: result.messageId,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * Handle budget exceeded webhook from desktop
+   * Notifies admin when daily/tx budget is exceeded
+   */
+  private async handleBudgetWebhook(
+    request: FastifyRequest<{ Body: BudgetWebhookPayload }>,
+    reply: FastifyReply
+  ) {
+    const payload = request.body;
+
+    // Validate required fields including security fields
+    if (!payload.vault_id || !payload.event || !payload.data || !payload.timestamp) {
+      return reply.status(400).send({
+        error: 'INVALID_PAYLOAD',
+        message: 'Missing required fields: vault_id, event, data, timestamp',
+      });
+    }
+
+    // Reject missing nonce
+    if (!payload.nonce) {
+      return reply.status(400).send({
+        error: 'MISSING_NONCE',
+        message: 'Nonce is required for replay protection',
+      });
+    }
+
+    // Reject missing signature
+    if (!payload.signature) {
+      return reply.status(400).send({
+        error: 'MISSING_SIGNATURE',
+        message: 'Signature is required',
+      });
+    }
+
+    // Reject unknown vault key
+    const publicKey = this.getVaultPublicKey(payload.vault_id);
+    if (!publicKey) {
+      return reply.status(401).send({
+        error: 'UNKNOWN_VAULT_KEY',
+        message: 'Vault public key not registered. Call /register first.',
+      });
+    }
+
+    // Reject stale timestamp and reused nonce
+    if (!this.nonceStore.checkAndMark(payload.nonce, payload.timestamp)) {
+      return reply.status(400).send({
+        error: 'REPLAY_DETECTED',
+        message: 'Stale timestamp or reused nonce',
+      });
+    }
+
+    // Verify signature
+    const { signature, ...dataToVerify } = payload;
+    const message = Buffer.from(canonicalJson(dataToVerify), 'utf8');
+    const signatureBuffer = Buffer.from(signature, 'base64');
+    if (!verifyEd25519(message, signatureBuffer, publicKey)) {
+      return reply.status(401).send({
+        error: 'INVALID_SIGNATURE',
+        message: 'Signature verification failed',
+      });
+    }
+
+    // Look up pairing for this vault
+    const pairing = this.store.pairings.getPairingByVaultId(payload.vault_id);
+
+    if (!pairing) {
+      return reply.status(404).send({
+        error: 'NOT_PAIRED',
+        message: 'Vault is not paired with Telegram. User needs to pair first.',
+      });
+    }
+
+    if (!pairing.enabled) {
+      return reply.status(403).send({
+        error: 'DISABLED',
+        message: 'Telegram notifications are disabled for this vault',
+      });
+    }
+
+    // Check rate limit
+    if (this.store.rateLimiter.isLimited(pairing.chat_id)) {
+      return reply.status(429).send({
+        error: 'RATE_LIMITED',
+        message: 'Too many notifications. Please wait.',
+        reset_in: this.store.rateLimiter.getResetTime(pairing.chat_id),
+      });
+    }
+
+    // Send budget exceeded notification
+    const result = await this.bot.sendBudgetExceededNotification(pairing.chat_id, payload.data);
+
+    if (!result.success) {
+      return reply.status(500).send({
+        error: 'SEND_FAILED',
+        message: result.error || 'Failed to send notification',
+      });
+    }
+
+    // Record success
+    this.store.rateLimiter.record(pairing.chat_id);
+    this.store.pairings.recordNotification(payload.vault_id);
+
+    console.log(`[WEBHOOK] Sent budget exceeded notification to chat ${pairing.chat_id}`);
+
+    return reply.send({
+      sent: true,
+      event: 'budget_exceeded',
       message_id: result.messageId,
       timestamp: new Date().toISOString(),
     });

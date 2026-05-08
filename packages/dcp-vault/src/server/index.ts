@@ -475,6 +475,7 @@ async function dispatchTelegramNotification(consent: {
   scope: string;
   created_at?: string;
   expires_at: string;
+  details?: string;
 }): Promise<void> {
   console.log('[TG] dispatchTelegramNotification called for consent:', consent.id);
   try {
@@ -501,6 +502,24 @@ async function dispatchTelegramNotification(consent: {
     // PRD Sprint 8 Task 5: Every desktop-to-Telegram request must include:
     // vault ID, timestamp, nonce, signature
     const category = categorizeTelegramRequest(consent.action, consent.scope);
+
+    // Extract amount/currency/chain from consent.details for transaction context
+    let amount: number | undefined;
+    let currency: string | undefined;
+    let chain: string | undefined;
+    if (consent.details) {
+      try {
+        const details = typeof consent.details === 'string'
+          ? JSON.parse(consent.details)
+          : consent.details;
+        amount = typeof details.amount === 'number' ? details.amount : undefined;
+        currency = typeof details.currency === 'string' ? details.currency : undefined;
+        chain = typeof details.chain === 'string' ? details.chain : undefined;
+      } catch {
+        // Ignore JSON parse errors
+      }
+    }
+
     const payloadWithoutSig = {
       vault_id: vaultId,
       event: 'consent_created' as const,
@@ -512,6 +531,10 @@ async function dispatchTelegramNotification(consent: {
         created_at: consent.created_at || new Date().toISOString(),
         expires_at: consent.expires_at,
         review_link: `${getApprovalBaseUrl()}/consent/${consent.id}`,
+        // Include transaction context for informed consent decisions
+        ...(amount !== undefined && { amount }),
+        ...(currency && { currency }),
+        ...(chain && { chain }),
       },
       timestamp: new Date().toISOString(),
       nonce,
@@ -562,6 +585,115 @@ async function dispatchTelegramNotification(consent: {
 }
 
 /**
+ * Send a budget exceeded notification to Telegram.
+ * This notifies the admin when daily/tx budget is exceeded so they can
+ * manually increase limits in the Desktop app if needed.
+ */
+async function dispatchBudgetExceededNotification(params: {
+  agent_name: string;
+  amount: number;
+  currency: string;
+  chain: string;
+  error_code: 'BUDGET_EXCEEDED_TX' | 'BUDGET_EXCEEDED_DAILY';
+  remaining_daily: number;
+  remaining_tx: number;
+  limit_daily: number;
+  limit_tx: number;
+}): Promise<void> {
+  console.log('[TG] dispatchBudgetExceededNotification called:', params.error_code);
+  try {
+    // Check if Telegram is enabled
+    const telegramConfig = storage.getTelegramConfig();
+    if (!telegramConfig || !telegramConfig.enabled) {
+      console.log('[TG] Skipping budget notification - not enabled');
+      return;
+    }
+
+    // Get vault identity for signing
+    const identity = await ensureRelayIdentity();
+    const vaultId = identity.vaultId;
+
+    // Ensure vault key is registered with telegram service (survives telegram restarts)
+    const publicKeyBase64 = identity.signingKeyPair.publicKey.toString('base64');
+    try {
+      await fetch(`${TELEGRAM_CLOUD_URL}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vault_id: vaultId, public_key: publicKeyBase64 }),
+      });
+    } catch {
+      // Ignore registration errors - telegram service might be down
+    }
+
+    // Generate unique nonce for replay protection
+    const nonce = crypto.randomBytes(16).toString('base64');
+
+    // Build webhook payload
+    const payloadWithoutSig = {
+      vault_id: vaultId,
+      event: 'budget_exceeded' as const,
+      data: {
+        agent_name: params.agent_name,
+        amount: params.amount,
+        currency: params.currency,
+        chain: params.chain,
+        error_code: params.error_code,
+        remaining_daily: params.remaining_daily,
+        remaining_tx: params.remaining_tx,
+        limit_daily: params.limit_daily,
+        limit_tx: params.limit_tx,
+        message: params.error_code === 'BUDGET_EXCEEDED_DAILY'
+          ? `Daily budget exceeded! Agent "${params.agent_name}" tried to spend ${params.amount} ${params.currency} but daily limit is ${params.limit_daily} ${params.currency}. Open Desktop app to increase limits.`
+          : `Transaction limit exceeded! Agent "${params.agent_name}" tried to spend ${params.amount} ${params.currency} but per-tx limit is ${params.limit_tx} ${params.currency}. Open Desktop app to increase limits.`,
+      },
+      timestamp: new Date().toISOString(),
+      nonce,
+    };
+
+    // Sign the payload with vault's Ed25519 key
+    const message = Buffer.from(canonicalJson(payloadWithoutSig), 'utf8');
+    const signatureBytes = nacl.sign.detached(
+      new Uint8Array(message),
+      new Uint8Array(identity.signingKeyPair.privateKey)
+    );
+    const signature = Buffer.from(signatureBytes).toString('base64');
+
+    const payload = {
+      ...payloadWithoutSig,
+      signature,
+    };
+
+    // Call cloud webhook
+    const webhookUrl = `${TELEGRAM_CLOUD_URL}/webhook/budget`;
+    console.log('[TG] Calling budget webhook:', webhookUrl);
+
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    const result = await response.json() as { sent?: boolean; error?: string; reason?: string };
+    console.log('[TG] Budget notification response:', response.status, result);
+
+    if (response.ok && result.sent) {
+      storage.logTelegramNotification({
+        consent_id: `budget_${Date.now()}`,
+        chat_id: telegramConfig.chat_id || 'cloud',
+        notification_type: 'budget_alert',
+      });
+      console.log('[TG] Budget exceeded notification sent via cloud');
+    } else if (response.status === 404) {
+      console.log('[TG] Vault not paired with cloud Telegram service');
+    } else {
+      console.log('[TG] Cloud error:', result.error || result.reason);
+    }
+  } catch (err) {
+    console.log('[TG] Budget notification exception:', err);
+  }
+}
+
+/**
  * Start polling for new pending consents and send Telegram notifications.
  * This enables Telegram notifications for ALL consent sources (MCP, relay, etc.)
  * without duplicating code in each client.
@@ -593,6 +725,7 @@ function startConsentWatcher(): void {
             scope: consent.scope,
             created_at: consent.created_at,
             expires_at: consent.expires_at,
+            details: consent.details,
           }).catch((err) => {
             console.log('[TG-WATCHER] Notification error:', err);
           });
@@ -860,8 +993,9 @@ async function buildServer(): Promise<FastifyInstance> {
     'http://127.0.0.1:1420',
   ]);
 
-  await server.register(cors, {
-    origin: (origin, cb) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await server.register(cors as any, {
+    origin: (origin: string | undefined, cb: (err: Error | null, allow: boolean) => void) => {
       if (!origin) return cb(null, true); // non-browser clients
       if (allowedOrigins.has(origin)) return cb(null, true);
       try {
@@ -3507,6 +3641,10 @@ async function buildServer(): Promise<FastifyInstance> {
     // Determine currency from chain if not provided
     const txCurrency = currency || (chain === 'solana' ? 'SOL' : chain === 'ethereum' ? 'ETH' : 'BASE_ETH');
 
+    // Track if budget check auto-approved this transaction (amount under threshold)
+    // When true, we skip the session/consent check since user configured this threshold
+    let budgetAutoApproved = false;
+
     // Budget check if amount is provided
     if (amount !== undefined && amount > 0) {
       const budgetResult = budget.checkBudget(amount, txCurrency, chain);
@@ -3523,6 +3661,20 @@ async function buildServer(): Promise<FastifyInstance> {
           ? 'BUDGET_EXCEEDED_TX'
           : 'BUDGET_EXCEEDED_DAILY';
 
+        // Send Telegram notification about budget exceeded (fire and forget)
+        const limits = budget.getLimits(txCurrency);
+        dispatchBudgetExceededNotification({
+          agent_name,
+          amount,
+          currency: txCurrency,
+          chain,
+          error_code: errorCode,
+          remaining_daily: budgetResult.remaining_daily,
+          remaining_tx: budgetResult.remaining_tx,
+          limit_daily: limits.daily_budget,
+          limit_tx: limits.tx_limit,
+        }).catch(err => console.log('[TG] Budget notification failed:', err));
+
         throw new VaultError(errorCode, budgetResult.reason || 'Budget exceeded', {
           remaining_daily: budgetResult.remaining_daily,
           remaining_tx: budgetResult.remaining_tx,
@@ -3537,6 +3689,8 @@ async function buildServer(): Promise<FastifyInstance> {
         const consumedConsent = storage.consumeApprovedConsent(agent_name, 'sign_tx', walletScope);
         if (consumedConsent) {
           // Approved consent found and consumed - proceed to signing below
+          // Skip session check since we already have budget approval
+          budgetAutoApproved = true;
           // Log the consumption
           storage.logAudit('EXECUTE', 'success', {
             agentName: agent_name,
@@ -3563,6 +3717,16 @@ async function buildServer(): Promise<FastifyInstance> {
             message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
           };
         }
+      } else {
+        // Amount is under approval threshold - auto-approve without session/consent
+        // This is the user's configured threshold, so we trust it
+        budgetAutoApproved = true;
+        storage.logAudit('EXECUTE', 'success', {
+          agentName: agent_name,
+          scope: `crypto.wallet.${chain}`,
+          operation: 'budget_auto_approve',
+          details: JSON.stringify({ amount, currency: txCurrency, chain, threshold: budget.getLimits(txCurrency).approval_threshold }),
+        });
       }
     }
 
@@ -3589,8 +3753,9 @@ async function buildServer(): Promise<FastifyInstance> {
       }
     }
 
-    // If no valid session, check for approved consent or create pending consent
-    if (!hasSession) {
+    // If no valid session AND not budget auto-approved, check for consent
+    // Skip this check if budget auto-approved (amount under threshold)
+    if (!hasSession && !budgetAutoApproved) {
       // Check if there's an approved consent that can be consumed (approve-once semantics)
       const consumedConsent = storage.consumeApprovedConsent(agent_name, 'sign_tx', walletScope);
       if (!consumedConsent) {
@@ -3962,6 +4127,10 @@ async function buildServer(): Promise<FastifyInstance> {
     if (parsedAmount !== undefined && !currency) {
       throw new VaultError('INTERNAL_ERROR', 'currency is required when amount is provided');
     }
+
+    // Track if budget check auto-approved this transaction
+    let budgetAutoApproved = false;
+
     if (parsedAmount !== undefined && currency) {
       const budgetResult = budget.checkBudget(parsedAmount, currency, chain);
 
@@ -3969,6 +4138,20 @@ async function buildServer(): Promise<FastifyInstance> {
         const errorCode = budgetResult.reason?.includes('BUDGET_EXCEEDED_TX')
           ? 'BUDGET_EXCEEDED_TX'
           : 'BUDGET_EXCEEDED_DAILY';
+
+        // Send Telegram notification about budget exceeded (fire and forget)
+        const limits = budget.getLimits(currency);
+        dispatchBudgetExceededNotification({
+          agent_name,
+          amount: parsedAmount,
+          currency,
+          chain,
+          error_code: errorCode,
+          remaining_daily: budgetResult.remaining_daily,
+          remaining_tx: budgetResult.remaining_tx,
+          limit_daily: limits.daily_budget,
+          limit_tx: limits.tx_limit,
+        }).catch(err => console.log('[TG] Budget notification failed:', err));
 
         throw new VaultError(errorCode, budgetResult.reason || 'Budget exceeded', {
           remaining_daily: budgetResult.remaining_daily,
@@ -3999,10 +4182,20 @@ async function buildServer(): Promise<FastifyInstance> {
           reason: 'Amount exceeds approval threshold',
           message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
         };
+      } else {
+        // Amount is under approval threshold - auto-approve
+        budgetAutoApproved = true;
+        storage.logAudit('EXECUTE', 'success', {
+          agentName: agent_name,
+          scope: walletScope,
+          operation: 'budget_auto_approve',
+          details: JSON.stringify({ amount: parsedAmount, currency, chain, threshold: budget.getLimits(currency).approval_threshold }),
+        });
       }
     }
 
-    if (!hasSession) {
+    // Skip session check if budget auto-approved
+    if (!hasSession && !budgetAutoApproved) {
       const { consent, isNew } = storage.createPendingConsent(
         agent_name,
         'sign_x402',

@@ -216,42 +216,69 @@ function getTimeRemaining(expiresAt: string): string {
 }
 
 /**
+ * Human-readable chain names
+ */
+const CHAIN_NAMES: Record<string, string> = {
+  base: 'Base',
+  ethereum: 'Ethereum',
+  solana: 'Solana',
+  polygon: 'Polygon',
+};
+
+/**
+ * Format amount with clean decimal places (avoid float artifacts)
+ */
+function formatDisplayAmount(amount: number): string {
+  // Round to 6 decimal places max, trim trailing zeros
+  const rounded = Math.round(amount * 1000000) / 1000000;
+  return String(rounded);
+}
+
+/**
  * Format a consent notification message for Telegram.
  *
- * PRIVACY: This function only includes privacy-safe fields:
- * - Agent name (sanitized)
- * - Request category (high-level)
- * - Scope description (sanitized, human-readable)
- * - Request ID (truncated)
- * - Expiration time
- *
- * NEVER includes: amounts, addresses, transaction details, credentials
+ * Human-friendly format with transaction context for informed decisions.
  */
 export function formatConsentNotification(payload: TelegramConsentPayload): string {
   const agentName = sanitizeAgentName(payload.agent_name);
-  const category = CATEGORY_LABELS[payload.category] || 'Vault Operation';
-  const icon = CATEGORY_ICONS[payload.category] || '📋';
-  const requestId = formatRequestId(payload.consent_id);
   const timeRemaining = getTimeRemaining(payload.expires_at);
-  const scopeDescription = formatScopeDescription(payload.scope);
 
-  const lines = [
-    `🔐 *DCP Vault: Approval Required*`,
-    ``,
-    `${icon} *Type:* ${escapeMarkdown(category)}`,
-  ];
+  // Build human-readable action description
+  const chainName = payload.chain ? (CHAIN_NAMES[payload.chain.toLowerCase()] || payload.chain) : null;
 
-  // Add specific scope context if available
-  if (scopeDescription) {
-    lines.push(`📌 *Requesting:* ${escapeMarkdown(scopeDescription)}`);
+  const lines = [`🔐 *Approval Needed*`, ``];
+
+  // For transaction signing with amount - lead with the key info
+  if (payload.category === 'transaction_signing' && payload.amount !== undefined && payload.currency) {
+    const amount = formatDisplayAmount(payload.amount);
+    if (chainName) {
+      lines.push(`${agentName} wants to send *${escapeMarkdown(amount)} ${escapeMarkdown(payload.currency)}* on ${escapeMarkdown(chainName)}\\.`);
+    } else {
+      lines.push(`${agentName} wants to send *${escapeMarkdown(amount)} ${escapeMarkdown(payload.currency)}*\\.`);
+    }
+  } else if (payload.category === 'transaction_signing') {
+    // Transaction signing without amount info
+    if (chainName) {
+      lines.push(`${agentName} wants to sign a transaction on ${escapeMarkdown(chainName)}\\.`);
+    } else {
+      lines.push(`${agentName} wants to sign a transaction\\.`);
+    }
+  } else if (payload.category === 'message_signing') {
+    lines.push(`${agentName} wants to sign a message\\.`);
+  } else if (payload.category === 'data_read') {
+    const what = formatScopeDescription(payload.scope) || 'data';
+    lines.push(`${agentName} wants to read ${escapeMarkdown(what.toLowerCase())}\\.`);
+  } else if (payload.category === 'data_write') {
+    const what = formatScopeDescription(payload.scope) || 'data';
+    lines.push(`${agentName} wants to write ${escapeMarkdown(what.toLowerCase())}\\.`);
+  } else if (payload.category === 'credential_access') {
+    const what = formatScopeDescription(payload.scope) || 'credentials';
+    lines.push(`${agentName} wants to access ${escapeMarkdown(what.toLowerCase())}\\.`);
+  } else {
+    lines.push(`${agentName} is requesting access\\.`);
   }
 
-  lines.push(
-    `🤖 *Agent:* ${agentName}`,
-    `🆔 *Request:* \`${requestId}\``,
-    ``,
-    `⏱️ *Expires in:* ${timeRemaining}`,
-  );
+  lines.push(``, `⏱️ Reply within ${timeRemaining}`);
 
   return lines.join('\n');
 }
@@ -319,6 +346,61 @@ export function formatTestNotification(): string {
     `Use /status to check connection status\\.`,
     `Use /mute to temporarily silence notifications\\.`,
   ].join('\n');
+}
+
+/**
+ * Budget exceeded notification payload
+ */
+export interface BudgetExceededPayload {
+  agent_name: string;
+  amount: number;
+  currency: string;
+  chain: string;
+  error_code: 'BUDGET_EXCEEDED_TX' | 'BUDGET_EXCEEDED_DAILY';
+  remaining_daily: number;
+  remaining_tx: number;
+  limit_daily: number;
+  limit_tx: number;
+  message: string;
+}
+
+/**
+ * Format a budget exceeded notification message for Telegram.
+ *
+ * This notifies the admin when an agent tries to spend beyond budget limits.
+ * The admin should then manually increase limits in the Desktop app if needed.
+ */
+export function formatBudgetExceededNotification(payload: BudgetExceededPayload): string {
+  const agentName = sanitizeAgentName(payload.agent_name);
+  const isDaily = payload.error_code === 'BUDGET_EXCEEDED_DAILY';
+  const icon = isDaily ? '📊' : '💳';
+  const limitType = isDaily ? 'Daily Budget' : 'Transaction Limit';
+
+  // Round to 4 decimal places to avoid JS float artifacts like 0.15599999999999992
+  const formatAmount = (n: number) => Math.round(n * 10000) / 10000;
+
+  const lines = [
+    `🚫 *DCP Vault: Budget Exceeded*`,
+    ``,
+    `${icon} *Type:* ${escapeMarkdown(limitType)} Exceeded`,
+    `🤖 *Agent:* ${agentName}`,
+    ``,
+    `*Attempted:* ${escapeMarkdown(String(formatAmount(payload.amount)))} ${escapeMarkdown(payload.currency)}`,
+    `*Limit:* ${escapeMarkdown(String(formatAmount(isDaily ? payload.limit_daily : payload.limit_tx)))} ${escapeMarkdown(payload.currency)}`,
+  ];
+
+  if (isDaily) {
+    lines.push(`*Remaining today:* ${escapeMarkdown(String(formatAmount(payload.remaining_daily)))} ${escapeMarkdown(payload.currency)}`);
+  }
+
+  lines.push(
+    ``,
+    `⚠️ *Transaction was rejected*`,
+    ``,
+    `To allow higher amounts, open your DCP Desktop app and increase the budget limits in Settings\\.`,
+  );
+
+  return lines.join('\n');
 }
 
 /**

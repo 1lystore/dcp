@@ -657,10 +657,12 @@ export interface TelegramNotificationLog {
 
 /**
  * Consent notification payload for Telegram webhook.
- * Contains ONLY privacy-safe fields per PRD Section 15.
  *
- * PERMITTED: agent_name, category, request_id, review_link, scope (sanitized)
- * FORBIDDEN: secrets, transaction payloads, amounts, addresses, credentials
+ * PERMITTED: agent_name, category, request_id, review_link, scope, amount/currency/chain
+ * FORBIDDEN: secrets, private keys, full transaction payloads, credentials
+ *
+ * Note: Amount/currency/chain included for transaction signing requests
+ * so admin can make informed consent decisions.
  */
 export interface TelegramConsentPayload {
   /** Consent request ID (permitted) */
@@ -683,6 +685,15 @@ export interface TelegramConsentPayload {
 
   /** When consent expires */
   expires_at: string;
+
+  /** Transaction amount (for signing requests) */
+  amount?: number;
+
+  /** Currency symbol (e.g., "ETH", "SOL") */
+  currency?: string;
+
+  /** Blockchain network (e.g., "base", "ethereum", "solana") */
+  chain?: string;
 }
 
 /**
