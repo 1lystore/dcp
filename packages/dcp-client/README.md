@@ -1,8 +1,8 @@
 # @dcprotocol/client
 
-Universal SDK for connecting an agent or service to a DCP vault.
+Low-level SDK for connecting an agent or service to a DCP vault. This package is used by `@dcprotocol/agent` and `@dcprotocol/vault`.
 
-Use this package when you want your code to talk to DCP directly instead of going through MCP.
+For most agent development, use `@dcprotocol/agent` instead which provides MCP server and HTTP proxy modes.
 
 ## Install
 
@@ -13,12 +13,12 @@ npm install @dcprotocol/client
 ## When To Use It
 
 Use `@dcprotocol/client` when:
-- your agent runs on the same machine as the vault
-- your service talks to a vault through the relay
-- you need DCP from a custom framework or app
-- you want one SDK for address lookup, signing, data reads, writes, and budget checks
+- Your agent runs on the same machine as the vault
+- Your service talks to a vault through the relay
+- You need DCP from a custom framework or app
+- You want one SDK for address lookup, signing, data reads, writes, and budget checks
 
-Do **not** use direct relay mode if you do not want the agent process to hold a service identity key. In that case, run `dcp-proxy` from `@dcprotocol/proxy` on the remote machine and let the agent talk to localhost.
+For most use cases, prefer `@dcprotocol/agent` which provides MCP server and HTTP proxy modes without requiring service identity keys.
 
 Examples below use the default public relay `wss://relay.dcp.1ly.store`. You can replace that with any compatible self-hosted relay.
 
@@ -67,9 +67,9 @@ const result = await dcp.signTx({
 });
 ```
 
-### Pairing a remote proxy
+### Pairing a remote agent
 
-This is used by `dcp-proxy --pair ...` and by any infrastructure that needs to turn a pairing token into a trusted proxy identity.
+This is used by `dcp-agent pair ...` and by any infrastructure that needs to turn a pairing token into a trusted agent identity.
 
 ```ts
 import { DcpClient, generateSigningKeyPair } from '@dcprotocol/client';
@@ -179,18 +179,18 @@ try {
 
 - Critical secrets never leave the vault.
 - Relay mode authenticates the caller with a service identity key.
-- If you want remote agents to avoid holding that key directly, run `dcp-proxy` from `@dcprotocol/proxy` and point the agent to `http://127.0.0.1:<port>` instead.
-- In proxy mode, agents should first call `GET /v1/capabilities` on the proxy URL to discover supported operations and example scopes.
+- For remote agents, prefer using `@dcprotocol/agent` which handles the relay connection and identity management.
 - Call `close()` when your process shuts down.
 
 ## Requirements
 
-- Node.js `>=18 <23`
-- For local mode, the DCP server must be reachable at `http://127.0.0.1:8420` unless you override `localUrl`
+- Node.js `>=22 <23`
+- For local mode, the DCP vault server must be reachable at `http://127.0.0.1:8421` unless you override `localUrl`
 - For relay mode, the vault must be connected to a relay and trusted for your service identity
 
 ## Related Docs
 
 - Root: `README.md`
-- CLI operator flows: `packages/dcp-cli/README.md`
-- Desktop user flows: `packages/dcp-desktop/README.md`
+- Vault CLI/Server: `packages/dcp-vault/README.md`
+- Agent: `packages/dcp-agent/README.md`
+- Desktop: `packages/dcp-desktop/README.md`

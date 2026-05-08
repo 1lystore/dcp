@@ -57,11 +57,11 @@ log_info "Detected platform: $PLATFORM"
 check_node() {
   if command -v node &> /dev/null; then
     NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
-    if [ "$NODE_VERSION" -ge 18 ] && [ "$NODE_VERSION" -lt 23 ]; then
+    if [ "$NODE_VERSION" -eq 22 ]; then
       log_success "Node.js $(node -v) detected"
       return 0
     else
-      log_warn "Node.js $(node -v) found but DCP requires Node 18-22"
+      log_warn "Node.js $(node -v) found but DCP requires Node 22"
       return 1
     fi
   fi
@@ -81,9 +81,9 @@ install_node() {
   export NVM_DIR="$HOME/.nvm"
   [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 
-  # Install Node 20 LTS
-  nvm install 20
-  nvm use 20
+  # Install the DCP runtime Node version
+  nvm install 22.22.2
+  nvm use 22.22.2
 
   log_success "Node.js $(node -v) installed"
 }

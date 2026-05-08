@@ -231,9 +231,10 @@ Example progression:
 
 ## Typical Use
 
-- `@dcprotocol/server` uses this package to connect a local vault to a relay
-- a custom desktop or headless vault can use it directly
-- it is not intended to be the primary package for agent developers
+- `@dcprotocol/vault` uses this package to connect a local vault to a relay
+- `@dcprotocol/desktop` bundles this for the desktop app's relay connection
+- A custom desktop or headless vault can use it directly
+- It is not intended to be the primary package for agent developers (use `@dcprotocol/agent` instead)
 
 ## License
 

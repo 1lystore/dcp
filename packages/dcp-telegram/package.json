@@ -11,9 +11,9 @@
   },
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.js"
     }
   },
   "files": [
@@ -47,7 +47,7 @@
     "vitest": "^3.0.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22 <23"
   },
   "author": "DCP Team",
   "license": "MIT"

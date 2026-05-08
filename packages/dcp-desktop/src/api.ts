@@ -135,8 +135,13 @@ export interface AgentConnection {
   mode: AgentConnectionMode;
   tier: AgentTier;
   permission_scopes: string[];
+  budget?: {
+    daily: number;
+    currency: string;
+    auto_approve_under: number;
+  };
   relay_url: string;
-  status: 'active' | 'revoked';
+  status: 'active' | 'revoked' | 'pending';
   paired_at: string;
   last_seen_at?: string;
   revoked_at?: string;
@@ -520,6 +525,23 @@ class ApiClient {
   async deleteAgentConnection(agentId: string): Promise<{ deleted: boolean }> {
     return this.request(`/v1/agent-connections/${encodeURIComponent(agentId)}`, {
       method: 'DELETE',
+    });
+  }
+
+  async updateAgentConnection(
+    agentId: string,
+    updates: {
+      permission_scopes?: string[];
+      budget?: {
+        daily?: number;
+        currency?: string;
+        auto_approve_under?: number;
+      };
+    }
+  ): Promise<{ updated: boolean; agent: AgentConnection }> {
+    return this.request(`/v1/agent-connections/${encodeURIComponent(agentId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
     });
   }
 

@@ -61,12 +61,16 @@ The agent starts a local proxy server at `http://127.0.0.1:8420` that forwards r
 | Command | Description |
 |---------|-------------|
 | `dcp-agent pair <grant>` | Pair with a vault using a pairing grant token |
-| `dcp-agent run` | Start the agent proxy server |
+| `dcp-agent run` | Start the agent (--mode proxy/mcp/http-mcp) |
+| `dcp-agent run --daemon` | Run in background (survives SSH disconnect) |
 | `dcp-agent status` | Show agent configuration and status |
 | `dcp-agent list` | List all configured agents |
 | `dcp-agent remove <agent_id>` | Remove an agent configuration |
+| `dcp-agent stop` | Stop daemon agent |
 | `dcp-agent secrets` | OpenClaw secrets provider (stdin/stdout) |
 | `dcp-agent get-secret <scope>` | Get a single secret from the vault |
+| `dcp-agent install-service` | Install as systemd service (VPS) |
+| `dcp-agent uninstall-service` | Uninstall systemd service |
 
 ## OpenClaw Integration
 
@@ -266,11 +270,59 @@ const secrets = await fetchSecrets([
 
 ## Agent Modes
 
-| Mode | Description | Status |
-|------|-------------|--------|
-| `proxy` | Local HTTP proxy forwarding to vault | Available |
-| `mcp` | MCP server integration | Planned |
-| `sdk` | Direct SDK mode | Planned |
+| Mode | Command | Description |
+|------|---------|-------------|
+| `proxy` | `dcp-agent run --mode proxy` | Local HTTP proxy at 127.0.0.1:8420 |
+| `mcp` | `dcp-agent run --mode mcp` | stdio MCP server for Claude Desktop, Cursor |
+| `http-mcp` | `dcp-agent run --mode http-mcp` | Streamable HTTP MCP for VPS agents |
+
+### MCP Server Configuration
+
+Add to your MCP client config (Claude Desktop, Cursor, VS Code):
+
+```json
+{
+  "mcpServers": {
+    "dcp": {
+      "command": "dcp-agent",
+      "args": ["run", "--mode", "mcp"]
+    }
+  }
+}
+```
+
+### MCP Tools Available
+
+| Tool | Purpose |
+|------|---------|
+| `vault_get_address` | Get public wallet address |
+| `vault_budget_check` | Check budget limits |
+| `vault_read` | Read data or credentials |
+| `vault_sign_tx` | Sign a transaction |
+| `vault_sign_message` | Sign a message |
+| `vault_sign_typed_data` | Sign EIP-712 typed data |
+| `vault_write` | Write data to vault |
+
+### Daemon Mode
+
+Run in background (survives SSH disconnect):
+
+```bash
+dcp-agent run --mode proxy --daemon
+```
+
+- PID file: `~/.dcp/agents/{agent_id}.pid`
+- Log file: `~/.dcp/agents/{agent_id}.log` (mode 0600)
+
+### Systemd Service
+
+Install as a systemd service for production VPS:
+
+```bash
+dcp-agent install-service
+systemctl start dcp-agent
+systemctl enable dcp-agent
+```
 
 ## Environment Variables
 

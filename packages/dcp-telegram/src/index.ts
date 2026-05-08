@@ -11,7 +11,7 @@
  *   DCP_TELEGRAM_BOT_TOKEN=xxx dcp-telegram [options]
  *
  * Options:
- *   --port          Webhook server port (default: 8422)
+ *   --port          Webhook server port (default: 8423)
  *   --host          Webhook server host (default: 0.0.0.0 for cloud)
  *   --data-dir      Data directory for SQLite (default: ./data)
  *   --debug         Enable debug logging
@@ -55,7 +55,7 @@ function parseArgs(args: string[]): {
 } {
   const config = {
     botToken: undefined as string | undefined,
-    port: 8422,
+    port: 8423, // Note: 8421=vault, 8422=relay, 8423=telegram
     host: '0.0.0.0', // Cloud default: listen on all interfaces
     dataDir: './data',
     debug: false,
@@ -72,7 +72,7 @@ function parseArgs(args: string[]): {
         i++;
         break;
       case '--port':
-        config.port = parseInt(nextArg, 10) || 8422;
+        config.port = parseInt(nextArg, 10) || 8423;
         i++;
         break;
       case '--host':

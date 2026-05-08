@@ -731,6 +731,8 @@ async fn start_server(state: State<'_, ServerState>, app: AppHandle) -> Result<(
 
         // Desktop app uses port 8421 (CLI uses 8420)
         cmd.env("VAULT_PORT", "8421");
+        // Mark as bundled to disable pino-pretty (requires worker threads)
+        cmd.env("DCP_BUNDLED", "1");
 
         cmd.spawn()
             .map_err(|e| format!("Failed to start server: {}", e))?
@@ -738,6 +740,8 @@ async fn start_server(state: State<'_, ServerState>, app: AppHandle) -> Result<(
         let mut cmd = Command::new(&server_path);
         // Desktop app uses port 8421 (CLI uses 8420)
         cmd.env("VAULT_PORT", "8421");
+        // Mark as bundled to disable pino-pretty (requires worker threads)
+        cmd.env("DCP_BUNDLED", "1");
         cmd.spawn()
             .map_err(|e| format!("Failed to start server: {}", e))?
     };

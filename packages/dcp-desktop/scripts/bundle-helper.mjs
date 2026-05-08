@@ -7,7 +7,7 @@
 
 import { build } from 'esbuild';
 import { execFileSync } from 'child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, rmSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, rmSync, readdirSync } from 'fs';
 import { dirname, join, relative } from 'path';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
@@ -48,6 +48,7 @@ const NATIVE_MODULES = [
   'keytar',
   // Transitive native deps
   'node-gyp-build',
+  'require-addon', // Required by sodium-native to load .node binaries
 ];
 
 // Native modules that must stay external.
@@ -55,6 +56,13 @@ const EXTERNAL_MODULES = [
   ...NATIVE_MODULES,
   'bindings',
   'file-uri-to-path',
+  // @hpke packages have UMD builds that require at runtime
+  '@hpke/common',
+  '@hpke/core',
+  '@hpke/chacha20poly1305',
+  '@hpke/dhkem-x25519',
+  // Pino logger transport
+  'pino-pretty',
 ];
 
 // Root runtime modules for the helper bundle. Their full dependency closure
@@ -258,6 +266,7 @@ function resolvePackageDir(name) {
     entry = require.resolve(name, {
       paths: [
         monorepoRoot,
+        monorepoNodeModules,
         serverPackageDir,
         join(monorepoRoot, 'packages', 'dcp-core'),
         join(monorepoRoot, 'packages', 'dcp-client'),
@@ -266,6 +275,23 @@ function resolvePackageDir(name) {
       ],
     });
   } catch {
+    // Fallback: search in pnpm's .pnpm directory structure
+    const pnpmDir = join(monorepoNodeModules, '.pnpm');
+    if (existsSync(pnpmDir)) {
+      try {
+        const entries = readdirSync(pnpmDir);
+        for (const entry of entries) {
+          if (entry.startsWith(`${name}@`) || entry.startsWith(`${name.replace('/', '+')}@`)) {
+            const candidatePath = join(pnpmDir, entry, 'node_modules', name);
+            if (existsSync(candidatePath)) {
+              return candidatePath;
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
     return null;
   }
   let cursor = dirname(entry);

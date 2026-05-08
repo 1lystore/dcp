@@ -222,7 +222,7 @@ export interface RelayConfig {
 }
 
 export const DEFAULT_RELAY_CONFIG: RelayConfig = {
-  port: 8421,
+  port: 8422, // Note: 8421 is used by vault, relay uses 8422
   host: '0.0.0.0', // Relay is meant to be publicly accessible
   enableLongPoll: true,
   heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,

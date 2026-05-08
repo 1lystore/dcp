@@ -1951,15 +1951,16 @@ export class VaultStorage {
 
   /**
    * Record an agent request for dashboard counters.
+   * Also updates last_seen_at since a request means the agent is active.
    */
   recordAgentRequest(agentId: string): boolean {
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
       UPDATE agent_connections
-      SET last_request_at = ?, request_count = request_count + 1
+      SET last_request_at = ?, last_seen_at = ?, request_count = request_count + 1
       WHERE agent_id = ? AND revoked_at IS NULL
     `);
-    const result = stmt.run(now, agentId);
+    const result = stmt.run(now, now, agentId);
     return result.changes > 0;
   }
 
@@ -2003,6 +2004,68 @@ export class VaultStorage {
       this.logAudit('REVOKE', 'success', {
         operation: 'delete_agent_connection',
         details: JSON.stringify({ agent_id: agentId }),
+      });
+    }
+
+    return result.changes > 0;
+  }
+
+  /**
+   * Update an agent connection's permissions and budget.
+   * Only allows updating non-revoked agents.
+   */
+  updateAgentConnection(
+    agentId: string,
+    updates: {
+      permission_scopes?: string[];
+      budget_daily?: number;
+      budget_currency?: string;
+      budget_auto_approve_under?: number;
+    }
+  ): boolean {
+    // Verify agent exists and is not revoked
+    const agent = this.getAgentConnection(agentId);
+    if (!agent || agent.status === 'revoked') {
+      return false;
+    }
+
+    // Build dynamic UPDATE statement
+    const setClauses: string[] = [];
+    const values: (string | number)[] = [];
+
+    if (updates.permission_scopes !== undefined) {
+      setClauses.push('permission_scopes = ?');
+      values.push(JSON.stringify(updates.permission_scopes));
+    }
+    if (updates.budget_daily !== undefined) {
+      setClauses.push('budget_daily = ?');
+      values.push(updates.budget_daily);
+    }
+    if (updates.budget_currency !== undefined) {
+      setClauses.push('budget_currency = ?');
+      values.push(updates.budget_currency);
+    }
+    if (updates.budget_auto_approve_under !== undefined) {
+      setClauses.push('budget_auto_approve_under = ?');
+      values.push(updates.budget_auto_approve_under);
+    }
+
+    if (setClauses.length === 0) {
+      return true; // Nothing to update
+    }
+
+    values.push(agentId);
+    const stmt = this.db.prepare(`
+      UPDATE agent_connections
+      SET ${setClauses.join(', ')}
+      WHERE agent_id = ? AND revoked_at IS NULL
+    `);
+    const result = stmt.run(...values);
+
+    if (result.changes > 0) {
+      this.logAudit('CONFIG', 'success', {
+        operation: 'update_agent_connection',
+        details: JSON.stringify({ agent_id: agentId, updates }),
       });
     }
 
@@ -2300,7 +2363,7 @@ export class VaultStorage {
   /**
    * Update Telegram configuration.
    */
-  updateTelegramConfig(updates: Partial<Omit<TelegramConfig, 'id' | 'chat_id' | 'created_at'>>): boolean {
+  updateTelegramConfig(updates: Partial<Omit<TelegramConfig, 'id' | 'created_at'>>): boolean {
     const now = new Date().toISOString();
     const config = this.getTelegramConfig();
     if (!config) return false;
@@ -2311,6 +2374,10 @@ export class VaultStorage {
     if (updates.enabled !== undefined) {
       fields.push('enabled = ?');
       values.push(updates.enabled ? 1 : 0);
+    }
+    if (updates.chat_id !== undefined) {
+      fields.push('chat_id = ?');
+      values.push(updates.chat_id);
     }
     if (updates.notify_consent !== undefined) {
       fields.push('notify_consent = ?');

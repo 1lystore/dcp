@@ -395,6 +395,40 @@ export class PairingStore {
       CREATE INDEX IF NOT EXISTS idx_pending_vault ON pending_pairings(vault_id);
       CREATE INDEX IF NOT EXISTS idx_pending_expires ON pending_pairings(expires_at);
     `);
+
+    // Vault public keys for webhook signature verification
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS vault_keys (
+        vault_id TEXT PRIMARY KEY,
+        public_key TEXT NOT NULL,
+        registered_at TEXT NOT NULL
+      );
+    `);
+  }
+
+  /**
+   * Register a vault's public key for signature verification
+   */
+  registerVaultKey(vaultId: string, publicKeyBase64: string): void {
+    this.db.prepare(`
+      INSERT OR REPLACE INTO vault_keys (vault_id, public_key, registered_at)
+      VALUES (?, ?, ?)
+    `).run(vaultId, publicKeyBase64, new Date().toISOString());
+  }
+
+  /**
+   * Get a vault's public key
+   */
+  getVaultKey(vaultId: string): string | null {
+    const row = this.db.prepare('SELECT public_key FROM vault_keys WHERE vault_id = ?').get(vaultId) as { public_key: string } | undefined;
+    return row?.public_key ?? null;
+  }
+
+  /**
+   * Get all registered vault keys (for loading into memory on startup)
+   */
+  getAllVaultKeys(): Array<{ vault_id: string; public_key: string }> {
+    return this.db.prepare('SELECT vault_id, public_key FROM vault_keys').all() as Array<{ vault_id: string; public_key: string }>;
   }
 
   /**
@@ -871,5 +905,18 @@ export class TelegramStore {
     this.rateLimiter.close();
     this.deduplication.close();
     this.nonceStore.close();
+  }
+
+  // Vault key methods (delegated to pairings store)
+  registerVaultKey(vaultId: string, publicKeyBase64: string): void {
+    this.pairings.registerVaultKey(vaultId, publicKeyBase64);
+  }
+
+  getVaultKey(vaultId: string): string | null {
+    return this.pairings.getVaultKey(vaultId);
+  }
+
+  getAllVaultKeys(): Array<{ vault_id: string; public_key: string }> {
+    return this.pairings.getAllVaultKeys();
   }
 }

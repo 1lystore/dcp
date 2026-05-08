@@ -9,7 +9,7 @@
  */
 
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { createVerify, createHmac, timingSafeEqual } from 'crypto';
+import { verify as cryptoVerify, createHmac, timingSafeEqual } from 'crypto';
 import { canonicalJson, type TelegramConsentPayload } from '@dcprotocol/core';
 import type { ApprovalAction, TelegramServiceConfig } from './types.js';
 import { TelegramError, DEFAULT_SERVICE_CONFIG } from './types.js';
@@ -58,19 +58,21 @@ interface ApprovalProcessedRequest {
 /**
  * Verify Ed25519 signature using Node.js crypto
  */
-function verifyEd25519(
+export function verifyEd25519(
   message: Buffer,
   signature: Buffer,
   publicKey: Buffer
 ): boolean {
+  if (publicKey.length !== 32 || signature.length !== 64) {
+    return false;
+  }
+
   try {
     const spkiPrefix = Buffer.from([
       0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
     ]);
     const spkiKey = Buffer.concat([spkiPrefix, publicKey]);
-    const verify = createVerify('Ed25519');
-    verify.update(message);
-    return verify.verify({ key: spkiKey, format: 'der', type: 'spki' }, signature);
+    return cryptoVerify(null, message, { key: spkiKey, format: 'der', type: 'spki' }, signature);
   } catch {
     return false;
   }
@@ -147,18 +149,70 @@ export class WebhookServer {
       logger: this.config.debug,
     });
 
+    // Load persisted vault keys from database into memory cache
+    this.loadVaultKeys();
+
     this.setupRoutes();
   }
 
   /**
+   * Load all vault keys from persistent storage into memory cache
+   */
+  private loadVaultKeys(): void {
+    const keys = this.store.getAllVaultKeys();
+    for (const { vault_id, public_key } of keys) {
+      try {
+        const keyBuffer = Buffer.from(public_key, 'base64');
+        if (keyBuffer.length === 32) {
+          this.vaultPublicKeys.set(vault_id, keyBuffer);
+        }
+      } catch {
+        // Skip invalid keys
+      }
+    }
+    if (keys.length > 0) {
+      console.log(`[WEBHOOK] Loaded ${keys.length} vault keys from storage`);
+    }
+  }
+
+  /**
    * Register a vault's public key for signature verification
+   * Persists to database and caches in memory
    */
   registerVaultKey(vaultId: string, publicKey: string): void {
     const keyBuffer = Buffer.from(publicKey, 'base64');
     if (keyBuffer.length !== 32) {
       throw new TelegramError('WEBHOOK_VERIFICATION_FAILED', 'Invalid public key length');
     }
+    // Persist to database
+    this.store.registerVaultKey(vaultId, publicKey);
+    // Cache in memory
     this.vaultPublicKeys.set(vaultId, keyBuffer);
+  }
+
+  /**
+   * Get a vault's public key (from memory cache or database)
+   */
+  private getVaultPublicKey(vaultId: string): Buffer | null {
+    // Check memory cache first
+    const cached = this.vaultPublicKeys.get(vaultId);
+    if (cached) return cached;
+
+    // Try loading from database
+    const storedKey = this.store.getVaultKey(vaultId);
+    if (storedKey) {
+      try {
+        const keyBuffer = Buffer.from(storedKey, 'base64');
+        if (keyBuffer.length === 32) {
+          // Cache it for future use
+          this.vaultPublicKeys.set(vaultId, keyBuffer);
+          return keyBuffer;
+        }
+      } catch {
+        // Invalid key format
+      }
+    }
+    return null;
   }
 
   /**
@@ -273,8 +327,8 @@ export class WebhookServer {
       });
     }
 
-    // Check for registered vault key
-    const publicKey = this.vaultPublicKeys.get(vault_id);
+    // Check for registered vault key (checks memory cache and database)
+    const publicKey = this.getVaultPublicKey(vault_id);
     if (!publicKey) {
       return reply.status(401).send({
         error: 'UNKNOWN_VAULT_KEY',
@@ -327,6 +381,7 @@ export class WebhookServer {
     if (pairing) {
       return reply.send({
         paired: true,
+        chat_id: pairing.chat_id,
         paired_at: pairing.paired_at,
         enabled: pairing.enabled,
       });
@@ -463,8 +518,8 @@ export class WebhookServer {
       });
     }
 
-    // PRD Sprint 8 Task 6: Reject unknown vault key
-    const publicKey = this.vaultPublicKeys.get(payload.vault_id);
+    // PRD Sprint 8 Task 6: Reject unknown vault key (checks memory cache and database)
+    const publicKey = this.getVaultPublicKey(payload.vault_id);
     if (!publicKey) {
       return reply.status(401).send({
         error: 'UNKNOWN_VAULT_KEY',

@@ -65797,11 +65797,11 @@ function validate(value, struct2, options = {}) {
     return [void 0, v];
   }
 }
-function define2(name, validator) {
+function define(name, validator) {
   return new Struct({ type: name, schema: null, validator });
 }
 function any() {
-  return define2("any", () => true);
+  return define("any", () => true);
 }
 function array(Element) {
   return new Struct({
@@ -65823,12 +65823,12 @@ function array(Element) {
   });
 }
 function boolean() {
-  return define2("boolean", (value) => {
+  return define("boolean", (value) => {
     return typeof value === "boolean";
   });
 }
 function instance(Class) {
-  return define2("instance", (value) => {
+  return define("instance", (value) => {
     return value instanceof Class || `Expected a \`${Class.name}\` instance, but received: ${print(value)}`;
   });
 }
@@ -65844,7 +65844,7 @@ function literal(constant) {
   });
 }
 function never() {
-  return define2("never", () => false);
+  return define("never", () => false);
 }
 function nullable(struct2) {
   return new Struct({
@@ -65854,7 +65854,7 @@ function nullable(struct2) {
   });
 }
 function number() {
-  return define2("number", (value) => {
+  return define("number", (value) => {
     return typeof value === "number" && !isNaN(value) || `Expected a number, but received: ${print(value)}`;
   });
 }
@@ -65887,7 +65887,7 @@ function record(Key, Value) {
   });
 }
 function string() {
-  return define2("string", (value) => {
+  return define("string", (value) => {
     return typeof value === "string" || `Expected a string, but received: ${print(value)}`;
   });
 }
@@ -65972,7 +65972,7 @@ function union(Structs) {
   });
 }
 function unknown() {
-  return define2("unknown", () => true);
+  return define("unknown", () => true);
 }
 function coerce(struct2, condition, coercer) {
   return new Struct({
@@ -120517,6 +120517,51 @@ var require_dist6 = __commonJS({
         }
         return result.changes > 0;
       }
+      /**
+       * Update an agent connection's permissions and budget.
+       * Only allows updating non-revoked agents.
+       */
+      updateAgentConnection(agentId, updates) {
+        const agent2 = this.getAgentConnection(agentId);
+        if (!agent2 || agent2.status === "revoked") {
+          return false;
+        }
+        const setClauses = [];
+        const values = [];
+        if (updates.permission_scopes !== void 0) {
+          setClauses.push("permission_scopes = ?");
+          values.push(JSON.stringify(updates.permission_scopes));
+        }
+        if (updates.budget_daily !== void 0) {
+          setClauses.push("budget_daily = ?");
+          values.push(updates.budget_daily);
+        }
+        if (updates.budget_currency !== void 0) {
+          setClauses.push("budget_currency = ?");
+          values.push(updates.budget_currency);
+        }
+        if (updates.budget_auto_approve_under !== void 0) {
+          setClauses.push("budget_auto_approve_under = ?");
+          values.push(updates.budget_auto_approve_under);
+        }
+        if (setClauses.length === 0) {
+          return true;
+        }
+        values.push(agentId);
+        const stmt = this.db.prepare(`
+      UPDATE agent_connections
+      SET ${setClauses.join(", ")}
+      WHERE agent_id = ? AND revoked_at IS NULL
+    `);
+        const result = stmt.run(...values);
+        if (result.changes > 0) {
+          this.logAudit("CONFIG", "success", {
+            operation: "update_agent_connection",
+            details: JSON.stringify({ agent_id: agentId, updates })
+          });
+        }
+        return result.changes > 0;
+      }
       // ==========================================================================
       // Pairing Tokens (Proxy Pairing Flow)
       // ==========================================================================
@@ -120741,6 +120786,10 @@ var require_dist6 = __commonJS({
         if (updates.enabled !== void 0) {
           fields.push("enabled = ?");
           values.push(updates.enabled ? 1 : 0);
+        }
+        if (updates.chat_id !== void 0) {
+          fields.push("chat_id = ?");
+          values.push(updates.chat_id);
         }
         if (updates.notify_consent !== void 0) {
           fields.push("notify_consent = ?");
@@ -129215,168 +129264,6 @@ Examples:
   }
 });
 
-// ../../node_modules/.pnpm/@hpke+core@1.9.0/node_modules/@hpke/core/script/mod.js
-var require_mod = __commonJS({
-  "../../node_modules/.pnpm/@hpke+core@1.9.0/node_modules/@hpke/core/script/mod.js"(exports2, module2) {
-    (function(factory) {
-      if (typeof module2 === "object" && typeof module2.exports === "object") {
-        var v = factory(require, exports2);
-        if (v !== void 0)
-          module2.exports = v;
-      } else if (typeof define === "function" && define.amd) {
-        define(["require", "exports", "@hpke/common", "./src/aeads/aesGcm.js", "./src/aeads/exportOnly.js", "./src/native.js", "./src/kems/dhkemX25519.js", "./src/kems/dhkemX448.js"], factory);
-      }
-    })(function(require2, exports3) {
-      "use strict";
-      Object.defineProperty(exports3, "__esModule", { value: true });
-      exports3.DhkemX448HkdfSha512 = exports3.DhkemX25519HkdfSha256 = exports3.HkdfSha512 = exports3.HkdfSha384 = exports3.HkdfSha256 = exports3.DhkemP521HkdfSha512 = exports3.DhkemP384HkdfSha384 = exports3.DhkemP256HkdfSha256 = exports3.CipherSuite = exports3.ExportOnly = exports3.Aes256Gcm = exports3.Aes128Gcm = exports3.ValidationError = exports3.SerializeError = exports3.SealError = exports3.OpenError = exports3.NotSupportedError = exports3.MessageLimitReachedError = exports3.KemId = exports3.KdfId = exports3.InvalidParamError = exports3.HpkeError = exports3.ExportError = exports3.EncapError = exports3.DeserializeError = exports3.DeriveKeyPairError = exports3.DecapError = exports3.AeadId = void 0;
-      var common_1 = require2("@hpke/common");
-      Object.defineProperty(exports3, "AeadId", { enumerable: true, get: function() {
-        return common_1.AeadId;
-      } });
-      Object.defineProperty(exports3, "DecapError", { enumerable: true, get: function() {
-        return common_1.DecapError;
-      } });
-      Object.defineProperty(exports3, "DeriveKeyPairError", { enumerable: true, get: function() {
-        return common_1.DeriveKeyPairError;
-      } });
-      Object.defineProperty(exports3, "DeserializeError", { enumerable: true, get: function() {
-        return common_1.DeserializeError;
-      } });
-      Object.defineProperty(exports3, "EncapError", { enumerable: true, get: function() {
-        return common_1.EncapError;
-      } });
-      Object.defineProperty(exports3, "ExportError", { enumerable: true, get: function() {
-        return common_1.ExportError;
-      } });
-      Object.defineProperty(exports3, "HpkeError", { enumerable: true, get: function() {
-        return common_1.HpkeError;
-      } });
-      Object.defineProperty(exports3, "InvalidParamError", { enumerable: true, get: function() {
-        return common_1.InvalidParamError;
-      } });
-      Object.defineProperty(exports3, "KdfId", { enumerable: true, get: function() {
-        return common_1.KdfId;
-      } });
-      Object.defineProperty(exports3, "KemId", { enumerable: true, get: function() {
-        return common_1.KemId;
-      } });
-      Object.defineProperty(exports3, "MessageLimitReachedError", { enumerable: true, get: function() {
-        return common_1.MessageLimitReachedError;
-      } });
-      Object.defineProperty(exports3, "NotSupportedError", { enumerable: true, get: function() {
-        return common_1.NotSupportedError;
-      } });
-      Object.defineProperty(exports3, "OpenError", { enumerable: true, get: function() {
-        return common_1.OpenError;
-      } });
-      Object.defineProperty(exports3, "SealError", { enumerable: true, get: function() {
-        return common_1.SealError;
-      } });
-      Object.defineProperty(exports3, "SerializeError", { enumerable: true, get: function() {
-        return common_1.SerializeError;
-      } });
-      Object.defineProperty(exports3, "ValidationError", { enumerable: true, get: function() {
-        return common_1.ValidationError;
-      } });
-      var aesGcm_js_1 = require2("./src/aeads/aesGcm.js");
-      Object.defineProperty(exports3, "Aes128Gcm", { enumerable: true, get: function() {
-        return aesGcm_js_1.Aes128Gcm;
-      } });
-      Object.defineProperty(exports3, "Aes256Gcm", { enumerable: true, get: function() {
-        return aesGcm_js_1.Aes256Gcm;
-      } });
-      var exportOnly_js_1 = require2("./src/aeads/exportOnly.js");
-      Object.defineProperty(exports3, "ExportOnly", { enumerable: true, get: function() {
-        return exportOnly_js_1.ExportOnly;
-      } });
-      var native_js_1 = require2("./src/native.js");
-      Object.defineProperty(exports3, "CipherSuite", { enumerable: true, get: function() {
-        return native_js_1.CipherSuite;
-      } });
-      Object.defineProperty(exports3, "DhkemP256HkdfSha256", { enumerable: true, get: function() {
-        return native_js_1.DhkemP256HkdfSha256;
-      } });
-      Object.defineProperty(exports3, "DhkemP384HkdfSha384", { enumerable: true, get: function() {
-        return native_js_1.DhkemP384HkdfSha384;
-      } });
-      Object.defineProperty(exports3, "DhkemP521HkdfSha512", { enumerable: true, get: function() {
-        return native_js_1.DhkemP521HkdfSha512;
-      } });
-      Object.defineProperty(exports3, "HkdfSha256", { enumerable: true, get: function() {
-        return native_js_1.HkdfSha256;
-      } });
-      Object.defineProperty(exports3, "HkdfSha384", { enumerable: true, get: function() {
-        return native_js_1.HkdfSha384;
-      } });
-      Object.defineProperty(exports3, "HkdfSha512", { enumerable: true, get: function() {
-        return native_js_1.HkdfSha512;
-      } });
-      var dhkemX25519_js_1 = require2("./src/kems/dhkemX25519.js");
-      Object.defineProperty(exports3, "DhkemX25519HkdfSha256", { enumerable: true, get: function() {
-        return dhkemX25519_js_1.DhkemX25519HkdfSha256;
-      } });
-      var dhkemX448_js_1 = require2("./src/kems/dhkemX448.js");
-      Object.defineProperty(exports3, "DhkemX448HkdfSha512", { enumerable: true, get: function() {
-        return dhkemX448_js_1.DhkemX448HkdfSha512;
-      } });
-    });
-  }
-});
-
-// ../../node_modules/.pnpm/@hpke+dhkem-x25519@1.8.0/node_modules/@hpke/dhkem-x25519/script/mod.js
-var require_mod2 = __commonJS({
-  "../../node_modules/.pnpm/@hpke+dhkem-x25519@1.8.0/node_modules/@hpke/dhkem-x25519/script/mod.js"(exports2, module2) {
-    (function(factory) {
-      if (typeof module2 === "object" && typeof module2.exports === "object") {
-        var v = factory(require, exports2);
-        if (v !== void 0)
-          module2.exports = v;
-      } else if (typeof define === "function" && define.amd) {
-        define(["require", "exports", "./src/dhkemX25519.js", "./src/hkdfSha256.js"], factory);
-      }
-    })(function(require2, exports3) {
-      "use strict";
-      Object.defineProperty(exports3, "__esModule", { value: true });
-      exports3.HkdfSha256 = exports3.X25519 = exports3.DhkemX25519HkdfSha256 = void 0;
-      var dhkemX25519_js_1 = require2("./src/dhkemX25519.js");
-      Object.defineProperty(exports3, "DhkemX25519HkdfSha256", { enumerable: true, get: function() {
-        return dhkemX25519_js_1.DhkemX25519HkdfSha256;
-      } });
-      Object.defineProperty(exports3, "X25519", { enumerable: true, get: function() {
-        return dhkemX25519_js_1.X25519;
-      } });
-      var hkdfSha256_js_1 = require2("./src/hkdfSha256.js");
-      Object.defineProperty(exports3, "HkdfSha256", { enumerable: true, get: function() {
-        return hkdfSha256_js_1.HkdfSha256;
-      } });
-    });
-  }
-});
-
-// ../../node_modules/.pnpm/@hpke+chacha20poly1305@1.8.0/node_modules/@hpke/chacha20poly1305/script/mod.js
-var require_mod3 = __commonJS({
-  "../../node_modules/.pnpm/@hpke+chacha20poly1305@1.8.0/node_modules/@hpke/chacha20poly1305/script/mod.js"(exports2, module2) {
-    (function(factory) {
-      if (typeof module2 === "object" && typeof module2.exports === "object") {
-        var v = factory(require, exports2);
-        if (v !== void 0)
-          module2.exports = v;
-      } else if (typeof define === "function" && define.amd) {
-        define(["require", "exports", "./src/chacha20Poly1305.js"], factory);
-      }
-    })(function(require2, exports3) {
-      "use strict";
-      Object.defineProperty(exports3, "__esModule", { value: true });
-      exports3.Chacha20Poly1305 = void 0;
-      var chacha20Poly1305_js_1 = require2("./src/chacha20Poly1305.js");
-      Object.defineProperty(exports3, "Chacha20Poly1305", { enumerable: true, get: function() {
-        return chacha20Poly1305_js_1.Chacha20Poly1305;
-      } });
-    });
-  }
-});
-
 // ../dcp-relay-client/dist/index.js
 var require_dist8 = __commonJS({
   "../dcp-relay-client/dist/index.js"(exports2, module2) {
@@ -129472,9 +129359,9 @@ var require_dist8 = __commonJS({
         };
       }
     };
-    var import_core2 = require_mod();
-    var import_dhkem_x25519 = require_mod2();
-    var import_chacha20poly1305 = require_mod3();
+    var import_core2 = require("@hpke/core");
+    var import_dhkem_x25519 = require("@hpke/dhkem-x25519");
+    var import_chacha20poly1305 = require("@hpke/chacha20poly1305");
     var import_sodium_native = __toESM2(require("sodium-native"));
     var suite = new import_core2.CipherSuite({
       kem: new import_dhkem_x25519.DhkemX25519HkdfSha256(),
@@ -130299,10 +130186,6 @@ function categorizeTelegramRequest(action, scope) {
   }
   return "other";
 }
-function getVaultId() {
-  const vaultDir = process.env.VAULT_DIR || process.env.DCP_VAULT_DIR || path.join(os.homedir(), ".dcp");
-  return crypto5.createHash("sha256").update(vaultDir).digest("hex").substring(0, 16);
-}
 function getApprovalBaseUrl() {
   const port = process.env.VAULT_PORT || String(DEFAULT_PORT);
   return `http://127.0.0.1:${port}`;
@@ -130462,7 +130345,8 @@ async function pollRemoteApprovals() {
   if (!telegramConfig || !telegramConfig.enabled || !telegramConfig.notify_consent) {
     return;
   }
-  const vaultId = getVaultId();
+  const identity = await ensureRelayIdentity();
+  const vaultId = identity.vaultId;
   const response = await fetch(`${TELEGRAM_CLOUD_URL}/api/approvals/${vaultId}`);
   if (response.status === 404 || response.status === 403) {
     return;
@@ -130551,17 +130435,19 @@ function cleanupOwnerState() {
   }
 }
 async function buildServer() {
-  const server = (0, import_fastify.default)({
-    logger: {
-      level: "info",
-      transport: {
-        target: "pino-pretty",
-        options: {
-          translateTime: "HH:MM:ss",
-          ignore: "pid,hostname"
-        }
+  const isDev = process.env.NODE_ENV !== "production" && !process.env.DCP_BUNDLED;
+  const loggerConfig = isDev ? {
+    level: "info",
+    transport: {
+      target: "pino-pretty",
+      options: {
+        translateTime: "HH:MM:ss",
+        ignore: "pid,hostname"
       }
     }
+  } : { level: "info" };
+  const server = (0, import_fastify.default)({
+    logger: loggerConfig
   });
   const allowedOrigins = /* @__PURE__ */ new Set([
     "tauri://localhost",
@@ -131713,6 +131599,82 @@ async function buildServer() {
     }
     return { deleted };
   });
+  server.patch("/v1/agent-connections/:id", async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: {
+          code: "OWNER_AUTH_REQUIRED",
+          message: "Owner authentication required"
+        }
+      });
+    }
+    const agentId = request.params.id;
+    const body = request.body || {};
+    const agent2 = storage.getAgentConnection(agentId);
+    if (!agent2) {
+      return reply.status(404).send({
+        error: {
+          code: "AGENT_NOT_FOUND",
+          message: "Agent connection not found"
+        }
+      });
+    }
+    if (agent2.status === "revoked") {
+      return reply.status(400).send({
+        error: {
+          code: "AGENT_REVOKED",
+          message: "Cannot update a revoked agent"
+        }
+      });
+    }
+    if (body.permission_scopes !== void 0) {
+      if (!Array.isArray(body.permission_scopes)) {
+        return reply.status(400).send({
+          error: {
+            code: "INVALID_REQUEST",
+            message: "permission_scopes must be an array"
+          }
+        });
+      }
+      for (const scope of body.permission_scopes) {
+        if (typeof scope !== "string" || scope.trim().length === 0) {
+          return reply.status(400).send({
+            error: {
+              code: "INVALID_REQUEST",
+              message: "Each permission scope must be a non-empty string"
+            }
+          });
+        }
+      }
+    }
+    const updates = {};
+    if (body.permission_scopes !== void 0) {
+      updates.permission_scopes = body.permission_scopes.map((s) => s.trim());
+    }
+    if (body.budget?.daily !== void 0) {
+      updates.budget_daily = body.budget.daily;
+    }
+    if (body.budget?.currency !== void 0) {
+      updates.budget_currency = body.budget.currency.toUpperCase();
+    }
+    if (body.budget?.auto_approve_under !== void 0) {
+      updates.budget_auto_approve_under = body.budget.auto_approve_under;
+    }
+    const updated = storage.updateAgentConnection(agentId, updates);
+    if (!updated) {
+      return reply.status(500).send({
+        error: {
+          code: "UPDATE_FAILED",
+          message: "Failed to update agent connection"
+        }
+      });
+    }
+    const updatedAgent = storage.getAgentConnection(agentId);
+    return {
+      updated: true,
+      agent: updatedAgent
+    };
+  });
   server.post("/v1/heartbeat", async (request, reply) => {
     const body = request.body || {};
     const agentId = body.agent_id?.trim();
@@ -132832,17 +132794,20 @@ async function buildServer() {
   });
   server.get("/v1/telegram/pair/status", async (request, reply) => {
     requireOwnerToken(request);
-    const vaultId = getVaultId();
+    const identity = await ensureRelayIdentity();
+    const vaultId = identity.vaultId;
     try {
       const response = await fetch(`${TELEGRAM_CLOUD_URL}/api/pair/status/${vaultId}`);
       const data = await response.json();
       if (data.paired) {
         const config = storage.getTelegramConfig();
         if (config && (!config.enabled || !config.paired_at)) {
-          storage.updateTelegramConfig({
+          const updates = {
+            chat_id: data.chat_id || config.chat_id,
             enabled: true,
             paired_at: data.paired_at || (/* @__PURE__ */ new Date()).toISOString()
-          });
+          };
+          storage.updateTelegramConfig(updates);
         }
       }
       return data;
@@ -132886,7 +132851,8 @@ async function buildServer() {
   });
   server.delete("/v1/telegram/config", async (request, reply) => {
     requireOwnerToken(request);
-    const vaultId = getVaultId();
+    const identity = await ensureRelayIdentity();
+    const vaultId = identity.vaultId;
     try {
       await fetch(`${TELEGRAM_CLOUD_URL}/api/pair/${vaultId}`, {
         method: "DELETE"

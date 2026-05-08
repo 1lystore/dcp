@@ -4,6 +4,13 @@
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { sign, generateKeyPairSync } from 'crypto';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { canonicalJson, generateSigningKeyPair, signMessage as signDcpMessage } from '@dcprotocol/core';
+import { verifyEd25519 } from '../src/webhook.js';
+import { WebhookServer } from '../src/webhook.js';
+import { TelegramStore } from '../src/store.js';
 
 // Generate test keypair
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -18,11 +25,6 @@ function getRawPublicKey(): Buffer {
 // Sign a message using Ed25519
 function signMessage(message: Buffer): Buffer {
   return sign(null, message, privateKey);
-}
-
-// Canonical JSON
-function canonicalJson(obj: object): string {
-  return JSON.stringify(obj, Object.keys(obj).sort());
 }
 
 describe('Webhook Signature Verification', () => {
@@ -43,6 +45,80 @@ describe('Webhook Signature Verification', () => {
 
     expect(canonicalJson(obj1)).toBe(canonicalJson(obj2));
     expect(canonicalJson(obj1)).toBe('{"a":1,"b":2,"c":3}');
+  });
+
+  it('should verify a vault Ed25519 signature created by DCP core', () => {
+    const keyPair = generateSigningKeyPair();
+    const payload = {
+      vault_id: 'vault_test',
+      timestamp: new Date().toISOString(),
+      nonce: 'nonce_test',
+    };
+    const message = Buffer.from(canonicalJson(payload), 'utf8');
+    const signature = signDcpMessage(message, keyPair.privateKey);
+
+    expect(verifyEd25519(message, signature, keyPair.publicKey)).toBe(true);
+  });
+
+  it('should reject an Ed25519 signature for a modified message', () => {
+    const keyPair = generateSigningKeyPair();
+    const message = Buffer.from('original', 'utf8');
+    const signature = signDcpMessage(message, keyPair.privateKey);
+
+    expect(verifyEd25519(Buffer.from('modified', 'utf8'), signature, keyPair.publicKey)).toBe(false);
+  });
+});
+
+describe('Pairing Start Endpoint', () => {
+  it('should accept a DCP core signed pairing start request', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dcp-telegram-webhook-'));
+    const store = new TelegramStore(tempDir);
+    const fakeBot = {
+      getStats: () => ({}),
+    };
+    const webhook = new WebhookServer(fakeBot as never, store);
+
+    try {
+      const keyPair = generateSigningKeyPair();
+      const vaultId = 'vault_integration_test';
+
+      const registerResponse = await webhook.getServer().inject({
+        method: 'POST',
+        url: '/register',
+        payload: {
+          vault_id: vaultId,
+          public_key: keyPair.publicKey.toString('base64'),
+        },
+      });
+
+      expect(registerResponse.statusCode).toBe(200);
+
+      const payloadWithoutSignature = {
+        vault_id: vaultId,
+        timestamp: new Date().toISOString(),
+        nonce: 'nonce_integration_test',
+      };
+      const message = Buffer.from(canonicalJson(payloadWithoutSignature), 'utf8');
+      const signature = signDcpMessage(message, keyPair.privateKey).toString('base64');
+
+      const pairResponse = await webhook.getServer().inject({
+        method: 'POST',
+        url: '/api/pair/start',
+        payload: {
+          ...payloadWithoutSignature,
+          signature,
+        },
+      });
+
+      expect(pairResponse.statusCode).toBe(200);
+      const body = pairResponse.json() as { code: string; expires_at: string };
+      expect(body.code).toMatch(/^\d{6}$/);
+      expect(new Date(body.expires_at).getTime()).toBeGreaterThan(Date.now());
+    } finally {
+      await webhook.getServer().close();
+      store.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
 

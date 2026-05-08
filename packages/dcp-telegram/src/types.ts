@@ -193,7 +193,7 @@ export const MUTE_DURATIONS: Record<string, number> = {
  * Default service configuration
  */
 export const DEFAULT_SERVICE_CONFIG: TelegramServiceConfig = {
-  port: 8422,
+  port: 8423, // Note: 8421=vault, 8422=relay, 8423=telegram
   host: '127.0.0.1',
   serverUrl: 'http://127.0.0.1:8421',
   debug: false,

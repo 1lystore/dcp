@@ -22,21 +22,20 @@ Before running examples, ensure you have:
    dcp add preferences.sizes
    ```
 
-4. **Started the DCP server:**
+4. **Started the DCP vault server:**
    ```bash
-   cd packages/dcp-server && npm run dev
+   dcp-vault start
    # or
-   npx @dcprotocol/server
+   npx @dcprotocol/vault start
    ```
 
 5. **Unlock the vault:**
-   The REST server has its own process‑local lock. Unlock it via the UI or the API:
+   The REST server has its own process‑local lock. Unlock it via the API:
    ```bash
-   curl -X POST http://127.0.0.1:8420/v1/vault/unlock \
+   curl -X POST http://127.0.0.1:8421/v1/vault/unlock \
      -H "Content-Type: application/json" \
      -d '{"passphrase":"<your-passphrase>"}'
    ```
-   Or open `http://127.0.0.1:8420` and unlock from the browser.
 
 ## Examples
 
@@ -95,7 +94,7 @@ Flow:
 
 ## API Reference
 
-The DCP server runs at `http://127.0.0.1:8420` (localhost only).
+The DCP vault server runs at `http://127.0.0.1:8421` (localhost only).
 
 ### Core Endpoints
 
@@ -125,7 +124,7 @@ Sessions allow agents to make multiple requests without repeated consent prompts
 
 Grant a session when approving:
 ```bash
-curl -X POST http://127.0.0.1:8420/consent/<id>/approve \
+curl -X POST http://127.0.0.1:8421/consent/<id>/approve \
   -H "Content-Type: application/json" \
   -d '{"session": true}'
 ```

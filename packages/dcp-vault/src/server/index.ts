@@ -198,6 +198,37 @@ function clearUnlockRateLimit(key: string): void {
   unlockAttempts.delete(key);
 }
 
+// ============================================================================
+// Permission Scope Normalization
+// ============================================================================
+// Fixes old permission_scopes saved without operation prefix (read:/write:/sign:)
+// This ensures backward compatibility with agents created before the fix
+const SIGNING_CHAINS = ['solana', 'ethereum', 'base', 'bitcoin', 'polygon'];
+
+function normalizePermissionScope(scope: string): string {
+  // Already has a valid prefix - return as-is
+  if (scope.startsWith('read:') || scope.startsWith('write:') || scope.startsWith('sign:')) {
+    return scope;
+  }
+
+  // Check if it's a chain name that should be sign:
+  const lowerScope = scope.toLowerCase();
+  if (SIGNING_CHAINS.includes(lowerScope)) {
+    return `sign:${lowerScope}`;
+  }
+
+  // Everything else gets read: prefix (identity, credentials, etc.)
+  return `read:${scope}`;
+}
+
+function normalizePermissionScopes(scopes: string[]): string[] {
+  if (!scopes || !Array.isArray(scopes)) return [];
+
+  // Normalize each scope and remove duplicates
+  const normalized = scopes.map(normalizePermissionScope);
+  return [...new Set(normalized)];
+}
+
 function getPackageVersion(): string {
   try {
     const entryPath = process.argv[1] ? path.dirname(process.argv[1]) : process.cwd();
@@ -400,7 +431,7 @@ function normalizeAmount(amount?: string | number): number | undefined {
 // ============================================================================
 
 // Cloud webhook URL - desktop calls this, cloud service sends to Telegram
-const TELEGRAM_CLOUD_URL = process.env.DCP_TELEGRAM_CLOUD_URL || 'http://127.0.0.1:8422';
+const TELEGRAM_CLOUD_URL = process.env.DCP_TELEGRAM_CLOUD_URL || 'http://127.0.0.1:8423';
 
 /**
  * Categorize a request based on action and scope
@@ -427,11 +458,6 @@ function categorizeTelegramRequest(action: string, scope: string): TelegramReque
 /**
  * Get the vault ID for this instance (consistent hash of vault directory)
  */
-function getVaultId(): string {
-  const vaultDir = process.env.VAULT_DIR || process.env.DCP_VAULT_DIR || path.join(os.homedir(), '.dcp');
-  return crypto.createHash('sha256').update(vaultDir).digest('hex').substring(0, 16);
-}
-
 function getApprovalBaseUrl(): string {
   const port = process.env.VAULT_PORT || String(DEFAULT_PORT);
   return `http://127.0.0.1:${port}`;
@@ -662,7 +688,8 @@ async function pollRemoteApprovals(): Promise<void> {
     return;
   }
 
-  const vaultId = getVaultId();
+  const identity = await ensureRelayIdentity();
+  const vaultId = identity.vaultId;
   const response = await fetch(`${TELEGRAM_CLOUD_URL}/api/approvals/${vaultId}`);
 
   if (response.status === 404 || response.status === 403) {
@@ -806,17 +833,23 @@ function cleanupOwnerState(): void {
 }
 
 async function buildServer(): Promise<FastifyInstance> {
-  const server = Fastify({
-    logger: {
-      level: 'info',
-      transport: {
-        target: 'pino-pretty',
-        options: {
-          translateTime: 'HH:MM:ss',
-          ignore: 'pid,hostname',
+  // Use pino-pretty only in development, plain JSON in production/bundled
+  const isDev = process.env.NODE_ENV !== 'production' && !process.env.DCP_BUNDLED;
+  const loggerConfig = isDev
+    ? {
+        level: 'info',
+        transport: {
+          target: 'pino-pretty',
+          options: {
+            translateTime: 'HH:MM:ss',
+            ignore: 'pid,hostname',
+          },
         },
-      },
-    },
+      }
+    : { level: 'info' };
+
+  const server = Fastify({
+    logger: loggerConfig,
   });
 
   // CORS for desktop UI access (restrict to trusted origins)
@@ -841,7 +874,7 @@ async function buildServer(): Promise<FastifyInstance> {
       }
       return cb(new Error('Not allowed by CORS'), false);
     },
-    methods: ['GET', 'POST', 'DELETE'],
+    methods: ['GET', 'POST', 'DELETE', 'PATCH'],
   });
 
   // Initialize vault storage (respects VAULT_DIR env for testing)
@@ -2125,13 +2158,23 @@ async function buildServer(): Promise<FastifyInstance> {
     const records = storage.listRecords();
 
     return {
-      scopes: records.map((r) => ({
-        scope: r.scope,
-        type: r.item_type,
-        sensitivity: r.sensitivity,
-        chain: r.chain,
-        public_address: r.public_address,
-      })),
+      scopes: records.map((r) => {
+        // Format scope with operation prefix to match authorization checks
+        // WALLET_KEY uses sign:{chain}, other data types use read:{scope}
+        let formattedScope: string;
+        if (r.item_type === 'WALLET_KEY' && r.chain) {
+          formattedScope = `sign:${r.chain}`;
+        } else {
+          formattedScope = `read:${r.scope}`;
+        }
+        return {
+          scope: formattedScope,
+          type: r.item_type,
+          sensitivity: r.sensitivity,
+          chain: r.chain,
+          public_address: r.public_address,
+        };
+      }),
     };
   });
 
@@ -2296,9 +2339,13 @@ async function buildServer(): Promise<FastifyInstance> {
       });
     }
 
-    return {
-      agents: storage.listAgentConnections(),
-    };
+    // Normalize permission_scopes to fix old data saved without read:/sign: prefix
+    const agents = storage.listAgentConnections().map((agent) => ({
+      ...agent,
+      permission_scopes: normalizePermissionScopes(agent.permission_scopes || []),
+    }));
+
+    return { agents };
   });
 
   server.post<{ Params: { id: string } }>('/v1/agent-connections/:id/revoke', async (request, reply) => {
@@ -2342,6 +2389,117 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     return { deleted };
+  });
+
+  server.patch<{
+    Params: { id: string };
+    Body: {
+      permission_scopes?: string[];
+      budget?: {
+        daily?: number;
+        currency?: string;
+        auto_approve_under?: number;
+      };
+    };
+  }>('/v1/agent-connections/:id', async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: {
+          code: 'OWNER_AUTH_REQUIRED',
+          message: 'Owner authentication required',
+        },
+      });
+    }
+
+    const agentId = request.params.id;
+    const body = request.body || {};
+
+    // Verify agent exists
+    const agent = storage.getAgentConnection(agentId);
+    if (!agent) {
+      return reply.status(404).send({
+        error: {
+          code: 'AGENT_NOT_FOUND',
+          message: 'Agent connection not found',
+        },
+      });
+    }
+
+    if (agent.status === 'revoked') {
+      return reply.status(400).send({
+        error: {
+          code: 'AGENT_REVOKED',
+          message: 'Cannot update a revoked agent',
+        },
+      });
+    }
+
+    // Validate permission_scopes if provided
+    if (body.permission_scopes !== undefined) {
+      if (!Array.isArray(body.permission_scopes)) {
+        return reply.status(400).send({
+          error: {
+            code: 'INVALID_REQUEST',
+            message: 'permission_scopes must be an array',
+          },
+        });
+      }
+      // Validate each scope is a non-empty string
+      for (const scope of body.permission_scopes) {
+        if (typeof scope !== 'string' || scope.trim().length === 0) {
+          return reply.status(400).send({
+            error: {
+              code: 'INVALID_REQUEST',
+              message: 'Each permission scope must be a non-empty string',
+            },
+          });
+        }
+      }
+    }
+
+    // Build updates object
+    const updates: {
+      permission_scopes?: string[];
+      budget_daily?: number;
+      budget_currency?: string;
+      budget_auto_approve_under?: number;
+    } = {};
+
+    if (body.permission_scopes !== undefined) {
+      // Normalize scopes to ensure they have proper read:/sign: prefix
+      updates.permission_scopes = normalizePermissionScopes(
+        body.permission_scopes.map((s: string) => s.trim())
+      );
+    }
+    if (body.budget?.daily !== undefined) {
+      updates.budget_daily = body.budget.daily;
+    }
+    if (body.budget?.currency !== undefined) {
+      updates.budget_currency = body.budget.currency.toUpperCase();
+    }
+    if (body.budget?.auto_approve_under !== undefined) {
+      updates.budget_auto_approve_under = body.budget.auto_approve_under;
+    }
+
+    const updated = storage.updateAgentConnection(agentId, updates);
+    if (!updated) {
+      return reply.status(500).send({
+        error: {
+          code: 'UPDATE_FAILED',
+          message: 'Failed to update agent connection',
+        },
+      });
+    }
+
+    // Return the updated agent with normalized scopes
+    const updatedAgent = storage.getAgentConnection(agentId);
+    return {
+      updated: true,
+      agent: updatedAgent ? {
+        ...updatedAgent,
+        permission_scopes: normalizePermissionScopes(updatedAgent.permission_scopes || []),
+      } : null,
+    };
   });
 
   server.post<{
@@ -4079,20 +4237,28 @@ async function buildServer(): Promise<FastifyInstance> {
   server.get('/v1/telegram/pair/status', async (request, reply) => {
     requireOwnerToken(request);
 
-    const vaultId = getVaultId();
+    const identity = await ensureRelayIdentity();
+    const vaultId = identity.vaultId;
 
     try {
       const response = await fetch(`${TELEGRAM_CLOUD_URL}/api/pair/status/${vaultId}`);
-      const data = await response.json() as { paired: boolean; paired_at?: string; enabled?: boolean };
+      const data = await response.json() as {
+        paired: boolean;
+        chat_id?: string;
+        paired_at?: string;
+        enabled?: boolean;
+      };
 
       if (data.paired) {
         // Update local config to mark as paired and enabled
         const config = storage.getTelegramConfig();
         if (config && (!config.enabled || !config.paired_at)) {
-          storage.updateTelegramConfig({
+          const updates: Partial<TelegramConfig> = {
+            chat_id: data.chat_id || config.chat_id,
             enabled: true,
             paired_at: data.paired_at || new Date().toISOString(),
-          });
+          };
+          storage.updateTelegramConfig(updates);
         }
       }
 
@@ -4164,7 +4330,8 @@ async function buildServer(): Promise<FastifyInstance> {
     requireOwnerToken(request);
 
     // Also notify cloud service to delete pairing
-    const vaultId = getVaultId();
+    const identity = await ensureRelayIdentity();
+    const vaultId = identity.vaultId;
     try {
       await fetch(`${TELEGRAM_CLOUD_URL}/api/pair/${vaultId}`, {
         method: 'DELETE',
@@ -4203,6 +4370,19 @@ async function buildServer(): Promise<FastifyInstance> {
     const webhookUrl = `${TELEGRAM_CLOUD_URL}/webhook/consent`;
     const identity = await ensureRelayIdentity();
     const vaultId = identity.vaultId;
+
+    // Ensure vault key is registered with telegram service (survives telegram restarts)
+    const publicKeyBase64 = identity.signingKeyPair.publicKey.toString('base64');
+    try {
+      await fetch(`${TELEGRAM_CLOUD_URL}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vault_id: vaultId, public_key: publicKeyBase64 }),
+      });
+    } catch {
+      // Ignore registration errors - telegram service might be down
+    }
+
     const nonce = crypto.randomBytes(16).toString('base64');
 
     const payloadWithoutSig = {
@@ -4623,12 +4803,15 @@ function verifyLocalAgentRequest(
 
   // Check scope permissions. Empty permissions are request-only: authenticated,
   // but not pre-authorized, so the normal consent flow must run.
-  if (agent.permission_scopes.length === 0) {
+  // Normalize scopes to handle old data saved without read:/sign: prefix
+  const normalizedScopes = normalizePermissionScopes(agent.permission_scopes || []);
+
+  if (normalizedScopes.length === 0) {
     storage.recordAgentRequest(serviceId);
     return { authorized: true, agent, preAuthorized: false };
   }
 
-  const hasScope = agent.permission_scopes.some((s: string) => {
+  const hasScope = normalizedScopes.some((s: string) => {
     if (s === '*') return true;
     if (s === requestedScope) return true;
 
@@ -4653,7 +4836,7 @@ function verifyLocalAgentRequest(
       details: JSON.stringify({
         service_id: serviceId,
         scope: requestedScope,
-        permitted_scopes: agent.permission_scopes,
+        permitted_scopes: normalizedScopes,
         reason: 'scope_not_permitted',
       }),
     });
@@ -4661,7 +4844,7 @@ function verifyLocalAgentRequest(
     return {
       authorized: false,
       agent,
-      reason: `Scope '${requestedScope}' is not permitted for agent '${agent.name}'. Permitted scopes: ${agent.permission_scopes.join(', ')}`,
+      reason: `Scope '${requestedScope}' is not permitted for agent '${agent.name}'. Permitted scopes: ${normalizedScopes.join(', ')}`,
       skipConsentFlow: true,
     };
   }

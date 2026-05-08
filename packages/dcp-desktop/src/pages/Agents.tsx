@@ -1,5 +1,13 @@
 import { useEffect, useState, useCallback } from 'react';
-import { api, type AgentConnection, type StoredPairingClaim } from '../api';
+import { api, type AgentConnection, type StoredPairingClaim, type Scope, type BudgetConfig } from '../api';
+
+// Common scope categories for quick selection
+// Scopes must include the operation prefix (read:/write:/sign:) to match authorization checks
+const SCOPE_PRESETS = {
+  identity: ['read:identity.name', 'read:identity.email', 'read:identity.phone'],
+  signing: ['sign:solana', 'sign:ethereum', 'sign:base'],
+  credentials: ['read:credentials.api.*'],
+};
 
 export default function Agents() {
   const [agents, setAgents] = useState<AgentConnection[]>([]);
@@ -11,6 +19,16 @@ export default function Agents() {
   const [filter, setFilter] = useState<'all' | 'active' | 'revoked'>('all');
   const [environmentFilter, setEnvironmentFilter] = useState<'all' | 'local' | 'vps'>('all');
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+
+  // Edit modal state
+  const [editAgent, setEditAgent] = useState<AgentConnection | null>(null);
+  const [editScopes, setEditScopes] = useState<string[]>([]);
+  const [editBudgetDaily, setEditBudgetDaily] = useState<number>(100);
+  const [editBudgetCurrency, setEditBudgetCurrency] = useState<string>('USDC');
+  const [editAutoApprove, setEditAutoApprove] = useState<number>(5);
+  const [availableScopes, setAvailableScopes] = useState<Scope[]>([]);
+  const [defaultBudget, setDefaultBudget] = useState<BudgetConfig | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
 
   const loadAgents = useCallback(async () => {
     try {
@@ -32,6 +50,73 @@ export default function Agents() {
     const interval = setInterval(loadAgents, 5000);
     return () => clearInterval(interval);
   }, [loadAgents]);
+
+  // Load available scopes and default budget for edit modal
+  useEffect(() => {
+    const loadEditData = async () => {
+      try {
+        const [scopesRes, budgetRes] = await Promise.all([
+          api.getScopes(),
+          api.getBudgetConfig().catch(() => null),
+        ]);
+        setAvailableScopes(scopesRes.scopes || []);
+        setDefaultBudget(budgetRes);
+      } catch (err) {
+        console.error('Failed to load edit data:', err);
+      }
+    };
+    loadEditData();
+  }, []);
+
+  const handleEditAgent = (agent: AgentConnection) => {
+    setEditAgent(agent);
+    setEditScopes([...agent.permission_scopes]);
+    // Prefill budget from agent or use defaults from settings
+    // Use || instead of ?? so 0 falls back to defaults (0 usually means "not configured")
+    const agentBudget = agent.budget;
+    const currency = agentBudget?.currency || 'USDC';
+    setEditBudgetDaily(agentBudget?.daily || defaultBudget?.daily_budget?.[currency] || 100);
+    setEditBudgetCurrency(currency);
+    setEditAutoApprove(agentBudget?.auto_approve_under || defaultBudget?.approval_threshold?.[currency] || 5);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editAgent) return;
+    setEditSaving(true);
+    try {
+      await api.updateAgentConnection(editAgent.agent_id, {
+        permission_scopes: editScopes,
+        budget: {
+          daily: editBudgetDaily,
+          currency: editBudgetCurrency,
+          auto_approve_under: editAutoApprove,
+        },
+      });
+      setStatusMessage('Permissions updated successfully');
+      setEditAgent(null);
+      await loadAgents();
+      setTimeout(() => setStatusMessage(null), 3000);
+    } catch (err) {
+      setStatusMessage(err instanceof Error ? err.message : 'Failed to update permissions');
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const toggleScope = (scope: string) => {
+    setEditScopes(prev =>
+      prev.includes(scope) ? prev.filter(s => s !== scope) : [...prev, scope]
+    );
+  };
+
+  const toggleScopePreset = (presetScopes: string[]) => {
+    const allIncluded = presetScopes.every(s => editScopes.includes(s));
+    if (allIncluded) {
+      setEditScopes(prev => prev.filter(s => !presetScopes.includes(s)));
+    } else {
+      setEditScopes(prev => [...new Set([...prev, ...presetScopes])]);
+    }
+  };
 
   const getAgentStatus = (agent: AgentConnection): { status: string; color: string; label: string } => {
     if (agent.status === 'revoked' || agent.revoked_at) {
@@ -617,6 +702,29 @@ export default function Agents() {
                 </div>
               </div>
 
+              {/* Budget */}
+              {selectedAgentData.budget && (
+                <div style={{
+                  padding: '12px',
+                  background: 'var(--bg-tertiary)',
+                  borderRadius: '8px',
+                }}>
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                    Budget
+                  </div>
+                  <div style={{ display: 'grid', gap: '6px', fontSize: '13px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Daily limit</span>
+                      <span>{selectedAgentData.budget.daily} {selectedAgentData.budget.currency}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Auto-approve under</span>
+                      <span>{selectedAgentData.budget.auto_approve_under} {selectedAgentData.budget.currency}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Agent ID */}
               <div style={{
                 padding: '12px',
@@ -636,30 +744,254 @@ export default function Agents() {
               </div>
 
               {/* Actions */}
-              <div style={{ display: 'flex', gap: '8px' }}>
+              <div style={{ display: 'flex', gap: '8px', flexDirection: 'column' }}>
                 {getAgentStatus(selectedAgentData).status !== 'revoked' && (
                   <button
-                    className="btn btn-secondary"
-                    style={{ flex: 1 }}
-                    onClick={() => handleRevoke(selectedAgentData.agent_id)}
-                    disabled={actionLoading === selectedAgentData.agent_id}
+                    className="btn btn-primary"
+                    style={{ width: '100%' }}
+                    onClick={() => handleEditAgent(selectedAgentData)}
                   >
-                    {actionLoading === selectedAgentData.agent_id ? 'Revoking...' : 'Revoke Access'}
+                    Edit Permissions
                   </button>
                 )}
-                <button
-                  className="btn btn-danger"
-                  style={{ flex: getAgentStatus(selectedAgentData).status === 'revoked' ? 1 : 0.5 }}
-                  onClick={() => handleDeleteClick(selectedAgentData.agent_id)}
-                  disabled={actionLoading === selectedAgentData.agent_id}
-                >
-                  {actionLoading === selectedAgentData.agent_id ? 'Deleting...' : 'Delete Agent'}
-                </button>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  {getAgentStatus(selectedAgentData).status !== 'revoked' && (
+                    <button
+                      className="btn btn-secondary"
+                      style={{ flex: 1 }}
+                      onClick={() => handleRevoke(selectedAgentData.agent_id)}
+                      disabled={actionLoading === selectedAgentData.agent_id}
+                    >
+                      {actionLoading === selectedAgentData.agent_id ? 'Revoking...' : 'Revoke'}
+                    </button>
+                  )}
+                  <button
+                    className="btn btn-danger"
+                    style={{ flex: 1 }}
+                    onClick={() => handleDeleteClick(selectedAgentData.agent_id)}
+                    disabled={actionLoading === selectedAgentData.agent_id}
+                  >
+                    {actionLoading === selectedAgentData.agent_id ? 'Deleting...' : 'Delete'}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
         )}
       </div>
+
+      {/* Edit Permissions Modal */}
+      {editAgent && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: 'rgba(0, 0, 0, 0.7)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000,
+        }}>
+          <div style={{
+            background: 'var(--bg-secondary)',
+            borderRadius: '12px',
+            padding: '24px',
+            maxWidth: '500px',
+            width: '90%',
+            maxHeight: '80vh',
+            overflow: 'auto',
+            border: '1px solid var(--border)',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <h3 style={{ margin: 0, fontSize: '18px' }}>Edit Permissions</h3>
+              <button
+                className="btn btn-secondary"
+                style={{ padding: '4px 8px', fontSize: '12px' }}
+                onClick={() => setEditAgent(null)}
+              >
+                Close
+              </button>
+            </div>
+
+            <div style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
+              {editAgent.name || editAgent.agent_name}
+            </div>
+
+            {/* Quick Presets */}
+            <div style={{ marginBottom: '16px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                Quick Presets
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                <button
+                  className={`btn ${SCOPE_PRESETS.identity.every(s => editScopes.includes(s)) ? 'btn-primary' : 'btn-secondary'}`}
+                  style={{ padding: '6px 12px', fontSize: '12px' }}
+                  onClick={() => toggleScopePreset(SCOPE_PRESETS.identity)}
+                >
+                  Identity (name, email)
+                </button>
+                <button
+                  className={`btn ${SCOPE_PRESETS.signing.some(s => editScopes.includes(s)) ? 'btn-primary' : 'btn-secondary'}`}
+                  style={{ padding: '6px 12px', fontSize: '12px' }}
+                  onClick={() => toggleScopePreset(SCOPE_PRESETS.signing)}
+                >
+                  Signing (crypto)
+                </button>
+                <button
+                  className={`btn ${SCOPE_PRESETS.credentials.some(s => editScopes.includes(s)) ? 'btn-primary' : 'btn-secondary'}`}
+                  style={{ padding: '6px 12px', fontSize: '12px' }}
+                  onClick={() => toggleScopePreset(SCOPE_PRESETS.credentials)}
+                >
+                  API Credentials
+                </button>
+              </div>
+            </div>
+
+            {/* Scopes */}
+            <div style={{ marginBottom: '20px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                Allowed Scopes ({editScopes.length} selected)
+              </div>
+              <div style={{
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+                padding: '12px',
+                maxHeight: '200px',
+                overflowY: 'auto',
+              }}>
+                {availableScopes.length === 0 ? (
+                  <div style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
+                    No scopes available. Add data to your vault first.
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gap: '8px' }}>
+                    {availableScopes.map(scope => (
+                      <label
+                        key={scope.scope}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          cursor: 'pointer',
+                          padding: '6px 8px',
+                          borderRadius: '6px',
+                          background: editScopes.includes(scope.scope) ? 'var(--bg-secondary)' : 'transparent',
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={editScopes.includes(scope.scope)}
+                          onChange={() => toggleScope(scope.scope)}
+                          style={{ width: '16px', height: '16px' }}
+                        />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: '13px', fontWeight: 500 }}>{scope.scope}</div>
+                          <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                            {scope.type} • {scope.sensitivity}
+                          </div>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Budget Settings */}
+            <div style={{ marginBottom: '20px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                Budget Settings
+              </div>
+              <div style={{
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+                padding: '12px',
+                display: 'grid',
+                gap: '12px',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <label style={{ flex: 1, fontSize: '13px' }}>Daily limit</label>
+                  <input
+                    type="number"
+                    value={editBudgetDaily}
+                    onChange={(e) => setEditBudgetDaily(Number(e.target.value))}
+                    style={{
+                      width: '100px',
+                      padding: '8px',
+                      borderRadius: '6px',
+                      border: '1px solid var(--border)',
+                      background: 'var(--bg-secondary)',
+                      color: 'var(--text-primary)',
+                      textAlign: 'right',
+                    }}
+                    min={0}
+                  />
+                  <select
+                    value={editBudgetCurrency}
+                    onChange={(e) => setEditBudgetCurrency(e.target.value)}
+                    style={{
+                      padding: '8px',
+                      borderRadius: '6px',
+                      border: '1px solid var(--border)',
+                      background: 'var(--bg-secondary)',
+                      color: 'var(--text-primary)',
+                    }}
+                  >
+                    <option value="USDC">USDC</option>
+                    <option value="SOL">SOL</option>
+                    <option value="ETH">ETH</option>
+                    <option value="USD">USD</option>
+                  </select>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <label style={{ flex: 1, fontSize: '13px' }}>Auto-approve under</label>
+                  <input
+                    type="number"
+                    value={editAutoApprove}
+                    onChange={(e) => setEditAutoApprove(Number(e.target.value))}
+                    style={{
+                      width: '100px',
+                      padding: '8px',
+                      borderRadius: '6px',
+                      border: '1px solid var(--border)',
+                      background: 'var(--bg-secondary)',
+                      color: 'var(--text-primary)',
+                      textAlign: 'right',
+                    }}
+                    min={0}
+                  />
+                  <span style={{ width: '60px', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                    {editBudgetCurrency}
+                  </span>
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                  Transactions under the auto-approve threshold will be approved automatically.
+                </div>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+              <button
+                className="btn btn-secondary"
+                onClick={() => setEditAgent(null)}
+                disabled={editSaving}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={handleSaveEdit}
+                disabled={editSaving}
+              >
+                {editSaving ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete Confirmation Modal */}
       {confirmDelete && (

@@ -6,14 +6,15 @@ This package is the source for the desktop app. It is not published to npm as an
 
 ## What The Desktop App Does
 
-- onboarding for a new vault and recovery phrase
-- wallet creation and basic vault management
-- local consent and session approval UI
-- trusted service management
-- relay setup for the default public relay or your own relay
-- one-command VPS pairing flow for remote agents
-- activity log and budget configuration
-- bundled local DCP server runtime for production builds
+- Onboarding for a new vault and recovery phrase
+- Wallet creation and basic vault management
+- Local consent and session approval UI
+- Trusted service management (1ly, Virtuals, custom)
+- Relay setup for the default public relay or your own relay
+- VPS agent pairing with verification phrase flow
+- Telegram notification setup
+- Activity log and budget configuration
+- Bundled local DCP vault runtime for production builds
 
 ## Normal User Flow
 
@@ -32,63 +33,88 @@ That hosted relay is the default public relay run by the DCP maintainers. It is 
 ### 3. Trust a service or create a VPS pairing token
 
 In **Settings**:
-- add a verified service or a custom trusted service
-- choose permissions and budgets
+- Add a verified service or a custom trusted service
+- Choose permissions and budgets
+- Configure Telegram notifications
 
-In **Connect**:
-- set permissions for a VPS agent
-- click **Generate Pairing Token**
-- copy the generated one-command VPS setup command
+In **Agents**:
+- View connected agents
+- Generate pairing tokens for new VPS agents
+- Approve pending pairing claims with verification phrase
+- Manage agent permissions and budgets
 
 ### 4. Approve requests
 
-Use the built-in consent screens when a request exceeds the current auto-approved session or threshold.
+Use the built-in consent screens or Telegram notifications when a request exceeds the current auto-approved session or threshold.
 
-## What The Desktop UI Exposes
+## Desktop UI Pages
 
-### Connect page
+### Home
 
-- relay URL configuration
-- default public relay shortcut: `wss://relay.dcp.1ly.store`
-- quick links for known services
-- pairing token generation for VPS agents
-- one-command `npx -y -p @dcprotocol/proxy dcp-proxy --pair ...` output
-- advanced connection bundle copy
+- Dashboard with vault status
+- Quick actions
 
-### Settings page
+### Agents
 
-- trusted services list and editor
-- known-service presets
-- scope presets for signing, reads, writes, and budget checks
-- per-service budgets and auto-approve thresholds
-- budget configuration for the vault
-- active session management
+- List all connected agents (local and VPS)
+- Pairing token generation
+- Pending pairing claim approval (with 3-word verification phrase)
+- Edit agent permissions and budgets
+- Revoke agent access
+
+### Connect
+
+- Relay URL configuration
+- Default public relay shortcut: `wss://relay.dcp.1ly.store`
+- Quick links for known services
+- Advanced connection bundle copy
+
+### Data
+
+- View and edit stored credentials
+- Manage identity, addresses, preferences
+
+### Activity
+
+- Audit log of all vault operations
+
+### Settings
+
+- Trusted services list and editor
+- Known-service presets (1ly, Virtuals)
+- Scope presets for signing, reads, writes
+- Per-service budgets and auto-approve thresholds
+- Budget configuration for the vault
+- Telegram notification setup
+- Recovery phrase management
 
 ## Development
 
 ### Prerequisites
 
-- Node.js `>=18 <23`
-- Node 20 LTS is the safest default
+- Node.js `>=22 <23`
+- Run `nvm use` from the repo root before installing or building
+- pnpm (`npm install -g pnpm` or use corepack)
 - Rust stable
-- platform build tools required by Tauri
+- Platform build tools required by Tauri
 
 ### Run from source
 
 From the repo root:
 
 ```bash
-npm install
-npm -w @dcprotocol/server run build
+pnpm install
+pnpm run build
 cd packages/dcp-desktop
-npm run tauri:dev
+pnpm run tauri:dev
 ```
 
 ### Build production bundles
 
 ```bash
 cd packages/dcp-desktop
-npm run tauri:build
+pnpm run bundle
+pnpm run tauri:build
 ```
 
 Build artifacts are created under:
@@ -129,26 +155,26 @@ open "src-tauri/target/release/bundle/macos/DCP Vault.app"
 Check the local vault and relay ports:
 
 ```bash
-lsof -nP -iTCP:8420 -sTCP:LISTEN  # CLI server
-lsof -nP -iTCP:8421 -sTCP:LISTEN  # Desktop app server
+lsof -nP -iTCP:8421 -sTCP:LISTEN  # Desktop app / vault server
 ```
 
 ### Native dependency mismatch during builds
 
 ```bash
-npm rebuild better-sqlite3
+pnpm rebuild better-sqlite3
 ```
 
 ## Security Notes
 
-- passphrases are not written to disk
-- recovery phrase is shown once during onboarding
-- private keys stay in the vault
-- production bundles ship with the local runtime they need
-- relay access still respects trust, budgets, sessions, and consent
+- Passphrases are not written to disk
+- Recovery phrase is shown once during onboarding
+- Private keys stay in the vault
+- Production bundles ship with the local runtime they need
+- Relay access still respects trust, budgets, sessions, and consent
 
 ## Related Docs
 
 - Root: `README.md`
-- CLI flows: `packages/dcp-cli/README.md`
-- SDK flows: `packages/dcp-client/README.md`
+- Vault CLI/Server: `packages/dcp-vault/README.md`
+- Agent: `packages/dcp-agent/README.md`
+- Telegram: `packages/dcp-telegram/README.md`

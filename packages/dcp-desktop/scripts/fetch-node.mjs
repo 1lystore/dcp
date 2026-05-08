@@ -5,7 +5,7 @@ import https from 'node:https';
 import { pipeline } from 'node:stream/promises';
 import { spawnSync } from 'node:child_process';
 
-const VERSION = process.env.DCP_NODE_VERSION || '20.18.0';
+const VERSION = process.env.DCP_NODE_VERSION || '22.22.2';
 const platform = process.platform;
 const arch = process.arch;
 
@@ -35,8 +35,13 @@ const binDir = path.join(root, 'src-tauri', 'bin');
 const outPath = path.join(binDir, isWin ? 'node.exe' : 'node');
 
 if (fs.existsSync(outPath)) {
-  console.log(`[bundle:node] Node already present at ${outPath}`);
-  process.exit(0);
+  const existing = spawnSync(outPath, ['-v'], { encoding: 'utf8' });
+  const existingVersion = existing.stdout.trim().replace(/^v/, '');
+  if (existing.status === 0 && existingVersion === VERSION) {
+    console.log(`[bundle:node] Node ${VERSION} already present at ${outPath}`);
+    process.exit(0);
+  }
+  console.log(`[bundle:node] Replacing Node ${existingVersion || 'unknown'} with ${VERSION}`);
 }
 
 fs.mkdirSync(binDir, { recursive: true });

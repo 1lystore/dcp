@@ -37,7 +37,7 @@ export class MessageStore {
 
   constructor(config: Partial<RelayConfig> = {}) {
     this.config = {
-      port: 8421,
+      port: 8422, // Note: 8421 is used by vault, relay uses 8422
       host: '0.0.0.0',
       enableLongPoll: true,
       heartbeatIntervalMs: 30_000,

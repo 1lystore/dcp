@@ -1,7 +1,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { Routes, Route, NavLink, useNavigate } from 'react-router-dom';
 import { invoke } from '@tauri-apps/api/core';
-import { api, type HealthResponse } from './api';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
+import { api, type HealthResponse, type PendingConsent } from './api';
 
 import Home from './pages/Home';
 import Connect from './pages/Connect';
@@ -30,6 +32,49 @@ export default function App() {
   const navigate = useNavigate();
   const authAttempted = useRef(false);
   const onboardingLock = useRef(false);
+  const knownConsents = useRef<Set<string>>(new Set());
+  const [pendingCount, setPendingCount] = useState(0);
+
+  const showConsentNotification = useCallback(async (consent: PendingConsent) => {
+    const details = consent.details || {};
+    const amount = 'amount' in details && 'currency' in details
+      ? `${details.amount} ${details.currency}`
+      : undefined;
+    const title = 'DCP Vault: Approval Required';
+    const body = `${consent.agent_name} wants to ${consent.action}${amount ? ` (${amount})` : ''}`;
+
+    try {
+      let permissionGranted = await isPermissionGranted();
+      if (!permissionGranted) {
+        permissionGranted = (await requestPermission()) === 'granted';
+      }
+
+      if (permissionGranted && 'Notification' in window) {
+        const notification = new window.Notification(title, {
+          body,
+          tag: `dcp-consent-${consent.id}`,
+          data: { consentId: consent.id },
+          requireInteraction: true,
+        });
+
+        notification.onclick = () => {
+          window.focus();
+          const currentWindow = getCurrentWindow();
+          void currentWindow.show();
+          void currentWindow.setFocus();
+          navigate('/', { state: { consentId: consent.id } });
+        };
+        return;
+      }
+    } catch (err) {
+      console.error('Desktop notification permission/send failed:', err);
+    }
+
+    // Fallback for environments where the Web Notification API is unavailable.
+    invoke('show_notification', { title, body }).catch((err) => {
+      console.error('Native notification fallback failed:', err);
+    });
+  }, [navigate]);
 
   // Authenticate as owner (challenge-response with Ed25519 keypair)
   const authenticateOwner = useCallback(async () => {
@@ -139,6 +184,32 @@ export default function App() {
     const interval = setInterval(checkServer, 5000);
     return () => clearInterval(interval);
   }, [checkServer]);
+
+  // Global consent polling and notifications (runs on all pages)
+  useEffect(() => {
+    if (appState !== 'unlocked') return;
+
+    const pollConsents = async () => {
+      try {
+        const { pending } = await api.getPendingConsents();
+        setPendingCount(pending.length);
+
+        // Send notification for new consents
+        pending.forEach((consent: PendingConsent) => {
+          if (!knownConsents.current.has(consent.id)) {
+            void showConsentNotification(consent);
+          }
+        });
+        knownConsents.current = new Set(pending.map((c: PendingConsent) => c.id));
+      } catch {
+        // Ignore errors - might be temporarily unavailable
+      }
+    };
+
+    pollConsents();
+    const interval = setInterval(pollConsents, 3000);
+    return () => clearInterval(interval);
+  }, [appState, showConsentNotification]);
 
   useEffect(() => {
     if (appState === 'no-vault') {
@@ -280,10 +351,30 @@ export default function App() {
 
       <nav className="nav">
         <NavLink to="/" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-            <polyline points="9 22 9 12 15 12 15 22"/>
-          </svg>
+          <div style={{ position: 'relative' }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+              <polyline points="9 22 9 12 15 12 15 22"/>
+            </svg>
+            {pendingCount > 0 && (
+              <span style={{
+                position: 'absolute',
+                top: '-4px',
+                right: '-8px',
+                background: 'var(--warning)',
+                color: '#000',
+                fontSize: '10px',
+                fontWeight: 700,
+                minWidth: '16px',
+                height: '16px',
+                borderRadius: '8px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '0 4px',
+              }}>{pendingCount}</span>
+            )}
+          </div>
           Home
         </NavLink>
         <NavLink to="/connect" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>

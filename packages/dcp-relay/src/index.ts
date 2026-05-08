@@ -7,7 +7,7 @@
  *
  * Usage:
  *   npx @dcprotocol/relay          # Start relay server on default port
- *   npx @dcprotocol/relay --port 8421 --debug
+ *   npx @dcprotocol/relay --port 8422 --debug
  *
  * From PRD Phase 1:
  * - WebSocket primary, HTTP long-poll fallback
@@ -105,7 +105,7 @@ Usage:
   dcp-relay [options]
 
 Options:
-  -p, --port <port>         Port to listen on (default: 8421)
+  -p, --port <port>         Port to listen on (default: 8422)
   -h, --host <host>         Host to bind to (default: 0.0.0.0)
   -r, --rate-limit <n>      Max requests per vault per minute (default: 60)
   -d, --debug               Enable debug logging

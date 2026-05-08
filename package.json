@@ -5,7 +5,7 @@
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "preinstall": "npx only-allow pnpm",
+    "preinstall": "node scripts/check-node-version.mjs && npx only-allow pnpm",
     "build": "pnpm -r --filter @dcprotocol/core run build && pnpm -r run build",
     "dev:cli": "pnpm -r --filter @dcprotocol/core run build && pnpm --filter @dcprotocol/cli run dev --",
     "test": "pnpm -r run test",
@@ -32,6 +32,6 @@
   "author": "DCP Protocol",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=18 <23"
+    "node": ">=22 <23"
   }
 }

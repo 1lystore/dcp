@@ -1,6 +1,5 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { invoke } from '@tauri-apps/api/core';
 import { api, type Scope, type PendingConsent, type AgentConnection } from '../api';
 
 export default function Home() {
@@ -11,7 +10,6 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
-  const knownConsents = useRef<Set<string>>(new Set());
 
   const loadData = useCallback(async () => {
     try {
@@ -23,21 +21,6 @@ export default function Home() {
       setScopes(scopesRes.scopes);
       setPendingConsents(consentsRes.pending);
       setAgents(agentsRes.agents || []);
-
-      // Notify on new consents
-      const currentIds = new Set(consentsRes.pending.map((c) => c.id));
-      consentsRes.pending.forEach((consent) => {
-        if (!knownConsents.current.has(consent.id)) {
-          const details = consent.details || {};
-          const amount = 'amount' in details && 'currency' in details
-            ? `${details.amount} ${details.currency}`
-            : undefined;
-          const title = 'DCP Vault: Approval Required';
-          const body = `${consent.agent_name} wants to ${consent.action}${amount ? ` (${amount})` : ''}`;
-          invoke('show_notification', { title, body }).catch(() => {});
-        }
-      });
-      knownConsents.current = currentIds;
     } catch (err) {
       console.error('Failed to load home data:', err);
     } finally {
