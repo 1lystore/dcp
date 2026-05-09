@@ -5083,9 +5083,14 @@ async function ensureRelayIdentity(): Promise<RelayIdentity> {
     budget.setConfig('vault_id', vaultId);
   }
 
-  // Relay URL (from env overrides config)
+  // Relay URL (env > saved config > core default)
+  const effectiveDefault = DEFAULT_RELAY_URL || CORE_DEFAULT_RELAY_URL;
   let relayUrl = config.relay_url || '';
-  if (DEFAULT_RELAY_URL && DEFAULT_RELAY_URL !== relayUrl) {
+  if (!relayUrl && effectiveDefault) {
+    relayUrl = effectiveDefault;
+    budget.setConfig('relay_url', relayUrl);
+  } else if (DEFAULT_RELAY_URL && DEFAULT_RELAY_URL !== relayUrl) {
+    // Env override takes precedence over saved config
     relayUrl = DEFAULT_RELAY_URL;
     budget.setConfig('relay_url', relayUrl);
   }

@@ -87343,11 +87343,21 @@ var require_dist5 = __commonJS({
       return chain in CHAIN_KEY_TYPES;
     }
     var import_better_sqlite3 = __toESM2(require("better-sqlite3"));
-    var keytar2 = __toESM2(require("keytar"));
     var fs2 = __toESM2(require("fs"));
     var path2 = __toESM2(require("path"));
     var os2 = __toESM2(require("os"));
     var import_crypto22 = require("crypto");
+    var keytar2 = null;
+    async function getKeytar() {
+      if (keytar2 === null) {
+        try {
+          keytar2 = await import("keytar");
+        } catch {
+          keytar2 = null;
+        }
+      }
+      return keytar2;
+    }
     var DEFAULT_VAULT_DIR = process.env.DCP_VAULT_DIR || process.env.VAULT_DIR || path2.join(os2.homedir(), ".dcp");
     var KEYCHAIN_SERVICE = "dcp";
     var KEYCHAIN_ACCOUNT_PREFIX = "master-key:";
@@ -87873,6 +87883,9 @@ var require_dist5 = __commonJS({
        */
       async storeMasterKeyInKeychain(encryptedKey, nonce, salt) {
         try {
+          const kt = await getKeytar();
+          if (!kt)
+            return false;
           const data = JSON.stringify({
             encrypted_key: encryptedKey.toString("base64"),
             nonce: nonce.toString("base64"),
@@ -87880,7 +87893,7 @@ var require_dist5 = __commonJS({
             version: "2.0"
             // Version 2.0 = AEAD encryption
           });
-          await keytar2.setPassword(KEYCHAIN_SERVICE, this.getKeychainAccount(), data);
+          await kt.setPassword(KEYCHAIN_SERVICE, this.getKeychainAccount(), data);
           return true;
         } catch {
           return false;
@@ -87892,7 +87905,10 @@ var require_dist5 = __commonJS({
        */
       async loadMasterKeyFromKeychain() {
         try {
-          const dataStr = await keytar2.getPassword(KEYCHAIN_SERVICE, this.getKeychainAccount());
+          const kt = await getKeytar();
+          if (!kt)
+            return null;
+          const dataStr = await kt.getPassword(KEYCHAIN_SERVICE, this.getKeychainAccount());
           if (!dataStr) {
             return null;
           }
@@ -97199,6 +97215,9 @@ var require_dist6 = __commonJS({
             timestamp: claim.timestamp,
             nonce: claim.nonce
           };
+          if (claim.vault_id) {
+            payload.vault_id = claim.vault_id;
+          }
           const canonical = JSON.stringify(payload, Object.keys(payload).sort());
           const message = Buffer.from(canonical, "utf8");
           const signature2 = Buffer.from(claim.signature, "base64");
@@ -97216,7 +97235,7 @@ var require_dist6 = __commonJS({
             error: "Failed to verify signature: " + (err instanceof Error ? err.message : "unknown error")
           });
         }
-        const vaultId = this.inviteVaultMap.get(claim.invite_id);
+        const vaultId = this.inviteVaultMap.get(claim.invite_id) ?? claim.vault_id;
         const { claim_id, verification_phrase } = this.pairingClaimStore.storeClaim(
           claim,
           vaultId
@@ -101886,8 +101905,12 @@ async function ensureRelayIdentity() {
     vaultId = `vault_${crypto5.randomUUID()}`;
     budget.setConfig("vault_id", vaultId);
   }
+  const effectiveDefault = DEFAULT_RELAY_URL || import_core.DEFAULT_RELAY_URL;
   let relayUrl = config.relay_url || "";
-  if (DEFAULT_RELAY_URL && DEFAULT_RELAY_URL !== relayUrl) {
+  if (!relayUrl && effectiveDefault) {
+    relayUrl = effectiveDefault;
+    budget.setConfig("relay_url", relayUrl);
+  } else if (DEFAULT_RELAY_URL && DEFAULT_RELAY_URL !== relayUrl) {
     relayUrl = DEFAULT_RELAY_URL;
     budget.setConfig("relay_url", relayUrl);
   }

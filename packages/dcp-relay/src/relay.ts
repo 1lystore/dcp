@@ -539,7 +539,7 @@ export class RelayServer {
     // Verify Ed25519 signature
     // The claim is signed over the canonical JSON of the payload (excluding signature)
     try {
-      const payload = {
+      const payload: Record<string, unknown> = {
         invite_id: claim.invite_id,
         agent_public_key: claim.agent_public_key,
         agent_hostname: claim.agent_hostname,
@@ -547,6 +547,10 @@ export class RelayServer {
         timestamp: claim.timestamp,
         nonce: claim.nonce,
       };
+      // Include vault_id if present (v2.0.1+ agents include it for self-routing)
+      if (claim.vault_id) {
+        payload.vault_id = claim.vault_id;
+      }
       const canonical = JSON.stringify(payload, Object.keys(payload).sort());
       const message = Buffer.from(canonical, 'utf8');
       const signature = Buffer.from(claim.signature, 'base64');
