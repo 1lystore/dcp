@@ -1046,6 +1046,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             match event {
+                #[cfg(target_os = "macos")]
                 RunEvent::Reopen { .. } => {
                     // Handle dock icon click on macOS
                     if let Some(window) = app_handle.get_webview_window("main") {
