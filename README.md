@@ -54,6 +54,31 @@ Endpoint:
 http://127.0.0.1:8420/mcp
 ```
 
+## Desktop App
+
+Download the latest release from [GitHub Releases](https://github.com/1lystore/dcp/releases).
+
+### macOS
+1. Download the DMG for your Mac (Apple Silicon or Intel)
+2. Open the DMG and drag DCP to Applications
+3. **Important:** The app is unsigned. Run this in Terminal before opening:
+   ```bash
+   xattr -cr /Applications/DCP.app
+   ```
+   Or: Right-click the app → "Open" → Click "Open" in the dialog
+
+### Windows
+Run the MSI or EXE installer.
+
+### Linux
+```bash
+# Debian/Ubuntu
+sudo dpkg -i DCP_0.2.0_amd64.deb
+
+# Fedora/RHEL
+sudo rpm -i DCP-0.2.0-1.x86_64.rpm
+```
+
 ## What Is Inside
 
 | Package | Purpose |
