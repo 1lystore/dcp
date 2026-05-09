@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/core",
-  "version": "0.2.0",
+  "version": "2.0.0",
   "description": "Core encryption, wallet, storage, and policy engine for DCP",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

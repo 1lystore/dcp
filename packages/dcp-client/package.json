@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/client",
-  "version": "0.2.0",
+  "version": "2.0.0",
   "description": "Internal runtime client for DCP agent and vault packages",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
