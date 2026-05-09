@@ -15,8 +15,20 @@
  */
 
 import Database, { Database as DatabaseType } from 'better-sqlite3';
-import * as keytar from 'keytar';
 import * as fs from 'fs';
+
+// Lazy-load keytar to avoid crashes in environments without native module support (e.g., Docker)
+let keytar: typeof import('keytar') | null = null;
+async function getKeytar() {
+  if (keytar === null) {
+    try {
+      keytar = await import('keytar');
+    } catch {
+      keytar = null;
+    }
+  }
+  return keytar;
+}
 import * as path from 'path';
 import * as os from 'os';
 import { randomBytes, randomUUID, createHash, randomInt } from 'crypto';
@@ -673,6 +685,9 @@ export class VaultStorage {
     salt: Buffer
   ): Promise<boolean> {
     try {
+      const kt = await getKeytar();
+      if (!kt) return false;
+
       // Store as JSON with all components
       const data = JSON.stringify({
         encrypted_key: encryptedKey.toString('base64'),
@@ -681,7 +696,7 @@ export class VaultStorage {
         version: '2.0', // Version 2.0 = AEAD encryption
       });
 
-      await keytar.setPassword(KEYCHAIN_SERVICE, this.getKeychainAccount(), data);
+      await kt.setPassword(KEYCHAIN_SERVICE, this.getKeychainAccount(), data);
       return true;
     } catch {
       // Keychain not available (CI, headless system, etc.)
@@ -699,7 +714,10 @@ export class VaultStorage {
     salt: Buffer;
   } | null> {
     try {
-      const dataStr = await keytar.getPassword(KEYCHAIN_SERVICE, this.getKeychainAccount());
+      const kt = await getKeytar();
+      if (!kt) return null;
+
+      const dataStr = await kt.getPassword(KEYCHAIN_SERVICE, this.getKeychainAccount());
 
       if (!dataStr) {
         return null;
