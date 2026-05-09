@@ -251,6 +251,8 @@ export const DEFAULT_RELAY_CONFIG: RelayConfig = {
 export interface PairingClaim {
   /** Invite ID from the pairing invite (routes to vault) */
   invite_id: string;
+  /** Vault ID from the invite (self-routing, survives relay restarts) */
+  vault_id?: string;
   /** Agent's Ed25519 public key (base64) */
   agent_public_key: string;
   /** Agent's hostname for display */

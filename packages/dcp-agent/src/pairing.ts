@@ -146,6 +146,7 @@ export function parsePairingInvite(invite: string): PairingInviteData {
 
 export interface PairingClaim {
   invite_id: string;
+  vault_id?: string;
   agent_public_key: string;
   agent_hostname: string;
   agent_version: string;
@@ -175,8 +176,10 @@ export function createPairingClaim(
   const nonce = randomUUID();
 
   // Create the claim payload
+  // Include vault_id for self-routing (survives relay restarts)
   const payload = {
     invite_id: invite.invite_id,
+    vault_id: invite.vault_id,
     agent_public_key: Buffer.from(publicKey).toString('base64'),
     agent_hostname: hostname,
     agent_version: version,

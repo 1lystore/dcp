@@ -566,8 +566,9 @@ export class RelayServer {
       } satisfies PairingClaimResponse);
     }
 
-    // Look up vault_id from invite_id
-    const vaultId = this.inviteVaultMap.get(claim.invite_id);
+    // Look up vault_id from invite_id, fallback to claim.vault_id (self-routing)
+    // This ensures claims work even after relay restarts when inviteVaultMap is cleared
+    const vaultId = this.inviteVaultMap.get(claim.invite_id) ?? claim.vault_id;
 
     // Store the claim
     const { claim_id, verification_phrase } = this.pairingClaimStore.storeClaim(
