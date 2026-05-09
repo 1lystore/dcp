@@ -2,7 +2,7 @@
  * DCP Agent Proxy Mode
  *
  * Runs a local HTTP server that proxies requests to the vault via relay.
- * Similar to dcp-proxy but uses pairing grants instead of service auth.
+ * Local HTTP bridge that uses pairing grants instead of service auth.
  */
 
 import * as http from 'node:http';

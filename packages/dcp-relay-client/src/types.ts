@@ -2,7 +2,7 @@
  * Types for DCP Relay Client
  * Local vault connector to relay with HPKE encryption
  *
- * From PRD Phase 1 Section 4.2, 6:
+ * From protocol spec Section 4.2, 6:
  * - WebSocket connection management
  * - Reconnect + heartbeat
  * - Encrypt/decrypt payloads using HPKE (X25519 + ChaCha20-Poly1305)

@@ -1,7 +1,7 @@
 /**
  * dcp connect <service>
  *
- * Connect to a trusted service (PRD Section B2).
+ * Connect to a trusted service (protocol spec section B2).
  *
  * This command:
  * 1. Opens the service's auth URL in the browser
@@ -409,7 +409,7 @@ function guessAuthUrl(connectUrl: string): string {
 function buildAuthUrl(authUrl: string, callbackUrl: string): string {
   const url = new URL(authUrl);
   url.searchParams.set('callback', callbackUrl);
-  url.searchParams.set('source', 'dcp-cli');
+  url.searchParams.set('source', 'dcp-vault-cli');
   return url.toString();
 }
 

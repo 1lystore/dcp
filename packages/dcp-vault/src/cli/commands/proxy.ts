@@ -1,7 +1,7 @@
 /**
  * dcp proxy
  *
- * Run a local proxy for remote agents (PRD Section B4 - Tier 3).
+ * Run a local proxy for remote agents (protocol spec section B4 - Tier 3).
  *
  * The proxy:
  * 1. Runs a local HTTP server that mimics DCP REST endpoints
@@ -174,7 +174,7 @@ export async function runProxy(options: ProxyOptions): Promise<void> {
       vaultHpkePublicKey: hpkeKey,
       serviceId,
       servicePrivateKey: privateKey,
-      agentName: options.agentName || 'dcp-proxy',
+      agentName: options.agentName || 'dcp-vault-proxy',
     });
 
     const spinPair = spinner('Pairing proxy with vault...');
@@ -224,7 +224,7 @@ export async function runProxy(options: ProxyOptions): Promise<void> {
     localPort: parseInt(options.port || '8420', 10),
     serviceId,
     servicePrivateKey: serviceKey,
-    agentName: options.agentName || process.env.DCP_AGENT_NAME || 'dcp-proxy',
+    agentName: options.agentName || process.env.DCP_AGENT_NAME || 'dcp-vault-proxy',
   };
 
   console.log();

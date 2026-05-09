@@ -6,7 +6,7 @@
  * - KDF: HKDF-SHA256
  * - AEAD: ChaCha20-Poly1305
  *
- * See PRD Section A4.2 and A8 for relay encryption specification.
+ * See protocol spec section A4.2 and A8 for relay encryption specification.
  *
  * SECURITY NOTES:
  * - Uses ephemeral sender keys for each encryption (forward secrecy)
@@ -83,7 +83,7 @@ export function generateKeyPairSync(): HpkeKeyPair {
 }
 
 // ============================================================================
-// AAD Construction (PRD A4.2)
+// AAD Construction (protocol spec A4.2)
 // ============================================================================
 
 /**

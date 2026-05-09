@@ -8,7 +8,7 @@
  * - RFC 9180 HPKE encryption/decryption with AAD binding
  * - Ed25519 signed registration (defense in depth)
  *
- * From PRD Phase 1 Section 4.2:
+ * From protocol spec Section 4.2:
  * - WebSocket connection management
  * - Reconnect + heartbeat
  * - Encrypt/decrypt payloads

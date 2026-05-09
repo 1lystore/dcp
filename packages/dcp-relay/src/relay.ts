@@ -3,7 +3,7 @@
  *
  * Encrypted message bus between cloud MCP clients and local vaults.
  *
- * From PRD Phase 1 Section 4.1:
+ * From protocol spec Section 4.1:
  * - WebSocket primary; HTTP long-poll fallback
  * - Heartbeat every 30s
  * - Exponential backoff with jitter (1s → 60s)
@@ -17,6 +17,7 @@
  */
 
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import type { FastifyPluginCallback, FastifyPluginOptions, RouteShorthandOptions } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
 import type { WebSocket } from 'ws';
@@ -93,8 +94,13 @@ export class RelayServer {
   // --------------------------------------------------------------------------
 
   async start(): Promise<void> {
-    await this.server.register(fastifyCors, { origin: true });
-    await this.server.register(fastifyWebsocket);
+    await this.server.register(
+      fastifyCors as unknown as FastifyPluginCallback<FastifyPluginOptions>,
+      { origin: true }
+    );
+    await this.server.register(
+      fastifyWebsocket as unknown as FastifyPluginCallback<FastifyPluginOptions>
+    );
     this.setupWebSocket();
 
     await this.server.listen({ port: this.config.port, host: this.config.host });
@@ -335,7 +341,7 @@ export class RelayServer {
       return reply.send(existingResponse);
     }
 
-    // Rate limit check (PRD Section C3: 60 req/min per vault)
+    // Rate limit check (protocol spec section C3: 60 req/min per vault)
     if (!this.rateLimiter.checkLimit(envelope.vault_id)) {
       const resetTime = this.rateLimiter.getResetTime(envelope.vault_id);
       reply.header('X-RateLimit-Limit', this.config.rateLimitPerMinute.toString());
@@ -670,7 +676,9 @@ export class RelayServer {
   // --------------------------------------------------------------------------
 
   private setupWebSocket(): void {
-    this.server.get('/ws', { websocket: true }, (socket, _req) => {
+    const websocketRoute = { websocket: true } as RouteShorthandOptions & { websocket: true };
+
+    this.server.get('/ws', websocketRoute, (socket, _req) => {
       const ws = socket as unknown as WebSocket;
       let vaultId: string | null = null;
 
@@ -703,7 +711,7 @@ export class RelayServer {
     });
 
     // Client WebSocket endpoint (agents/services)
-    this.server.get('/ws-client', { websocket: true }, (socket, _req) => {
+    this.server.get('/ws-client', websocketRoute, (socket, _req) => {
       const ws = socket as unknown as WebSocket;
       this.clientSockets.add(ws);
 
@@ -947,7 +955,7 @@ export class RelayServer {
       return;
     }
 
-    // Rate limit check (PRD Section C3: 60 req/min per vault)
+    // Rate limit check (protocol spec section C3: 60 req/min per vault)
     if (!this.rateLimiter.checkLimit(envelope.vault_id)) {
       const resetTime = this.rateLimiter.getResetTime(envelope.vault_id);
       this.sendWsError(
@@ -1131,7 +1139,7 @@ export class RelayServer {
       return new RelayError('RELAY_MESSAGE_EXPIRED', 'Message has expired');
     }
 
-    // Check TTL is reasonable (max 5 minutes as per PRD)
+    // Check TTL is reasonable (max 5 minutes as per the protocol spec)
     const ttl = expiresAt - Date.now();
     if (ttl > this.config.messageTtlMs) {
       return new RelayError('RELAY_INVALID_ENVELOPE', 'TTL too long (max 5 minutes)', {

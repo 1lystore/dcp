@@ -141,7 +141,7 @@ async function main(): Promise<void> {
   console.log('Agent ID:', approval.agent_id);
   console.log('Wrote config:', configPath);
   console.log('\nNext command:');
-  console.log(`  DCP_DATA_DIR='${dataDir}' node /Users/iftakharrahmany/myproducts/dcp/packages/dcp-agent/dist/index.js run --mode http-mcp --port ${port}`);
+  console.log(`  DCP_DATA_DIR='${dataDir}' dcp-agent run --mode http-mcp --port ${port}`);
 }
 
 main().catch((err) => {

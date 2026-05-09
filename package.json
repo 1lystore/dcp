@@ -7,7 +7,7 @@
   "scripts": {
     "preinstall": "node scripts/check-node-version.mjs && npx only-allow pnpm",
     "build": "pnpm -r --filter @dcprotocol/core run build && pnpm -r run build",
-    "dev:cli": "pnpm -r --filter @dcprotocol/core run build && pnpm --filter @dcprotocol/cli run dev --",
+    "dev:cli": "pnpm -r --filter @dcprotocol/core run build && pnpm --filter @dcprotocol/vault run dev --",
     "test": "pnpm -r run test",
     "clean": "rm -rf packages/*/dist",
     "publish-guard": "node scripts/publish-guard.mjs"

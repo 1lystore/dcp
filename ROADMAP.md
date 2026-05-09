@@ -23,7 +23,7 @@ The minimum viable protocol: wallet signing, personal data storage, consent flow
 - [x] Budget engine — per-tx limits, daily limits, approval thresholds
 - [x] Spend tracking with idempotency keys
 - [x] Audit trail (grant, read, execute, deny, revoke events)
-- [x] MCP server (@dcprotocol/mcp) — subprocess model
+- [x] MCP server (`@dcprotocol/agent`) — subprocess model
 - [x] REST API server (localhost:8420)
 - [x] CLI — init, create-wallet, add, list, agents, revoke, activity, config
 - [x] Recovery phrase (BIP-39 mnemonic) on init
@@ -41,9 +41,8 @@ Making DCP production-ready and easier to integrate with any agent framework.
 - [ ] Comprehensive examples for common workflows
 - [ ] Integration guides for popular agent frameworks **[help wanted]**
 
-### SDK & Framework Support
-- [ ] TypeScript/JavaScript SDK (`@dcprotocol/sdk`)
-- [ ] Python SDK (`dcp-python`) **[help wanted]**
+### Framework Support
+- [ ] TypeScript/JavaScript integration helpers
 - [ ] LangChain integration (tool wrapper) **[help wanted]**
 - [ ] CrewAI integration **[help wanted]**
 - [ ] AutoGen integration **[help wanted]**
@@ -134,11 +133,10 @@ Every item marked **[help wanted]** is a good starting point. See [CONTRIBUTING.
 
 ### High-Impact Contributions Right Now
 
-1. **Python SDK** — the #1 request for non-JS agent frameworks
-2. **New chain support** — EVM chains are straightforward (shared secp256k1 logic)
-3. **Framework integrations** — LangChain, CrewAI, AutoGen wrappers
-4. **New data schemas** — driver's license, health records, travel documents
-5. **Documentation & examples** — real-world agent workflows
+1. **New chain support** — EVM chains are straightforward (shared secp256k1 logic)
+2. **Framework integrations** — LangChain, CrewAI, AutoGen wrappers
+3. **New data schemas** — driver's license, health records, travel documents
+4. **Documentation & examples** — real-world agent workflows
 
 ### Proposing New Features
 

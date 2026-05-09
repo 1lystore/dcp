@@ -1,5 +1,5 @@
 /**
- * DCP Telegram Cloud Service (Option B from PRD Section 15)
+ * DCP Telegram Cloud Service (Option B from protocol spec section 15)
  *
  * Cloud service that handles Telegram notifications for ALL users:
  * - ONE shared bot token (from environment)
@@ -116,7 +116,7 @@ USAGE:
   DCP_TELEGRAM_BOT_TOKEN=xxx dcp-telegram [options]
 
 OPTIONS:
-  --port <port>          Webhook server port (default: 8422)
+  --port <port>          Webhook server port (default: 8423)
   --host <host>          Webhook server host (default: 0.0.0.0)
   --data-dir <dir>       Data directory for SQLite (default: ./data)
   --debug                Enable debug logging
@@ -138,7 +138,7 @@ API ENDPOINTS:
 
 EXAMPLE:
   # Cloud deployment
-  DCP_TELEGRAM_BOT_TOKEN="123456:ABC-DEF..." dcp-telegram --port 8422
+  DCP_TELEGRAM_BOT_TOKEN="123456:ABC-DEF..." dcp-telegram --port 8423
 
   # Local testing
   dcp-telegram --bot-token "123456:ABC-DEF..." --debug

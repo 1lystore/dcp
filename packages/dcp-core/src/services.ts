@@ -4,7 +4,7 @@
  * Built-in registry of verified services that can connect to DCP.
  * These are pre-configured with their public keys and endpoints.
  *
- * See PRD Section B2 for the trust model.
+ * See protocol spec section B2 for the trust model.
  */
 
 import type { KnownService } from './types.js';

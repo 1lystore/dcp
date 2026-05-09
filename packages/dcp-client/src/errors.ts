@@ -2,11 +2,11 @@
  * DCP Client Errors
  *
  * Consistent error handling across local and relay transports.
- * See PRD Section A6 for error specification.
+ * See protocol spec section A6 for error specification.
  */
 
 // ============================================================================
-// Error Codes (from PRD A6)
+// Error Codes (from protocol spec A6)
 // ============================================================================
 
 export type DcpErrorCode =
@@ -29,7 +29,7 @@ export type DcpErrorCode =
   | 'DECRYPTION_FAILED';
 
 // ============================================================================
-// Error Actions (from PRD A6)
+// Error Actions (from protocol spec A6)
 // ============================================================================
 
 export type DcpErrorAction =
@@ -41,7 +41,7 @@ export type DcpErrorAction =
   | undefined;
 
 // ============================================================================
-// Error → Action Mapping (from PRD A6)
+// Error → Action Mapping (from protocol spec A6)
 // ============================================================================
 
 const ERROR_ACTION_MAP: Record<DcpErrorCode, DcpErrorAction> = {
@@ -110,7 +110,7 @@ export class DcpError extends Error {
   }
 
   /**
-   * Serialize error to JSON format per PRD A6
+   * Serialize error to JSON format per protocol spec A6
    */
   toJSON(): {
     ok: false;

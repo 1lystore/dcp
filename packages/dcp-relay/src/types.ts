@@ -2,13 +2,13 @@
  * Types for DCP Relay
  * Encrypted message bus between cloud MCP clients and local vaults
  *
- * From PRD Phase 1 Section 4.1:
+ * From protocol spec Section 4.1:
  * - Relay sees only encrypted payloads and minimal routing metadata
  * - No method names, amounts, recipients, or business logic visible to relay
  */
 
 // ============================================================================
-// Constants (from PRD Section 4.1, 7.1)
+// Constants (from protocol spec section 4.1, 7.1)
 // ============================================================================
 
 export const RELAY_VERSION = '1';
@@ -18,7 +18,7 @@ export const RECONNECT_MIN_MS = 1_000; // 1 second
 export const RECONNECT_MAX_MS = 60_000; // 60 seconds
 
 // ============================================================================
-// Action Types (from PRD Section 7)
+// Action Types (from protocol spec section 7)
 // ============================================================================
 
 /**
@@ -28,7 +28,7 @@ export const RECONNECT_MAX_MS = 60_000; // 60 seconds
 export type ActionType = 'sign' | 'read' | 'write' | 'budget';
 
 // ============================================================================
-// Relay Envelope (from PRD Section 7.1)
+// Relay Envelope (from protocol spec section 7.1)
 // ============================================================================
 
 /**
@@ -158,7 +158,7 @@ export interface VaultConnection {
 }
 
 // ============================================================================
-// Error Types (from PRD Section 7.3)
+// Error Types (from protocol spec section 7.3)
 // ============================================================================
 
 /**
@@ -240,7 +240,7 @@ export const DEFAULT_RELAY_CONFIG: RelayConfig = {
 /**
  * Pairing claim submitted by VPS agent during install-service
  *
- * Flow (per PRD):
+ * Flow (per the protocol spec):
  * 1. VPS parses pairing invite (request-only, no authority)
  * 2. VPS generates Ed25519 keypair
  * 3. VPS signs claim with private key

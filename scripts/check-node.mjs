@@ -1,12 +1,12 @@
-const major = Number(process.versions.node.split('.')[0]);
-const allowed = new Set([18, 20, 22]);
+import { readFileSync } from 'node:fs';
 
-if (!allowed.has(major)) {
-  console.error(`\n[DCP] Unsupported Node.js version: ${process.versions.node}`);
-  console.error('[DCP] Please use Node.js 18, 20, or 22 (LTS).');
-  console.error('[DCP] Recommended: Node 22 LTS.');
-  console.error('\nIf you use nvm:');
-  console.error('  nvm install 22');
-  console.error('  nvm use 22');
+const requiredVersion = readFileSync(new URL('../.nvmrc', import.meta.url), 'utf8').trim();
+const version = process.versions.node;
+
+if (version !== requiredVersion) {
+  console.error(`DCP development requires Node ${requiredVersion}.`);
+  console.error(`Current Node: ${version}`);
+  console.error('Run: nvm use');
+  console.error('Then rebuild native modules: pnpm rebuild better-sqlite3 keytar sodium-native');
   process.exit(1);
 }

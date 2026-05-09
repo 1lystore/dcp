@@ -97,12 +97,12 @@ describe('formatConsentNotification', () => {
 
   it('should format notification correctly', () => {
     const result = formatConsentNotification(basePayload);
-    expect(result).toContain('DCP Vault: Approval Required');
+    expect(result).toContain('Approval Needed');
     expect(result).toContain('trading\\-bot');
-    expect(result).toContain('Transaction Signing');
-    expect(result).toContain('consent_abc123');
-    // Commands are no longer embedded in notification text for security
-    // Users interact via bot commands or desktop app
+    expect(result).toContain('sign a transaction');
+    // Request IDs, links, and commands are not embedded in notification text.
+    // Users interact through Telegram inline buttons or the desktop app.
+    expect(result).not.toContain('consent_abc123');
     expect(result).not.toContain('Review Request');
     expect(result).not.toContain('localhost');
   });

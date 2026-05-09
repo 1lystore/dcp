@@ -48,6 +48,11 @@ import {
 } from './types.js';
 import { generateKey, deriveKeyFromPassphrase, generateSalt, zeroize, encrypt, decrypt, envelopeEncrypt, envelopeDecrypt } from './crypto.js';
 
+type PendingConsentCreateResult = PendingConsent & {
+  consent: PendingConsent;
+  isNew: boolean;
+};
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -208,7 +213,7 @@ export class VaultStorage {
         updated_at TEXT NOT NULL
       );
 
-      -- Trusted services (PRD Section B2)
+      -- Trusted services (protocol spec section B2)
       CREATE TABLE IF NOT EXISTS trusted_services (
         service_id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -276,7 +281,7 @@ export class VaultStorage {
 
       CREATE INDEX IF NOT EXISTS idx_pairing_tokens_expires ON pairing_tokens(expires_at);
 
-      -- Telegram configuration (PRD Section 15)
+      -- Telegram configuration (protocol spec section 15)
       CREATE TABLE IF NOT EXISTS telegram_configs (
         id TEXT PRIMARY KEY,
         chat_id TEXT NOT NULL UNIQUE,
@@ -1478,11 +1483,11 @@ export class VaultStorage {
     action: string,
     scope: string,
     details?: string
-  ): { consent: PendingConsent; isNew: boolean } {
+  ): PendingConsentCreateResult {
     // DEDUPLICATION: Check if there's already a pending consent for this agent/action/scope
     const existing = this.findPendingConsent(agentName, action, scope);
     if (existing) {
-      return { consent: existing, isNew: false };
+      return { ...existing, consent: existing, isNew: false };
     }
 
     const now = new Date();
@@ -1508,7 +1513,7 @@ export class VaultStorage {
       expires_at: expiresAt.toISOString(),
     };
 
-    return { consent, isNew: true };
+    return { ...consent, consent, isNew: true };
   }
 
   /**
@@ -1602,7 +1607,7 @@ export class VaultStorage {
   }
 
   // ==========================================================================
-  // Trusted Services CRUD (PRD Section B2)
+  // Trusted Services CRUD (protocol spec section B2)
   // ==========================================================================
 
   /**
@@ -1981,7 +1986,7 @@ export class VaultStorage {
 
   /**
    * Mark an agent as paired and active.
-   * Per PRD Section 7.3, stores the agent's service public key for relay authentication.
+   * Per protocol spec section 7.3, stores the agent's service public key for relay authentication.
    */
   markAgentPaired(agentId: string, tokenHash?: string, servicePublicKey?: string): boolean {
     const now = new Date().toISOString();
@@ -2290,7 +2295,7 @@ export class VaultStorage {
   }
 
   // ==========================================================================
-  // Telegram Notification Methods (PRD Section 15)
+  // Telegram Notification Methods (protocol spec section 15)
   // ==========================================================================
 
   /**

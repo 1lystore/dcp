@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RELAY_PORT="${DCP_RELAY_PORT:-8421}"
+RELAY_PORT="${DCP_RELAY_PORT:-8422}"
 VAULT_PORT="${DCP_VAULT_PORT:-8420}"
 PROXY_PORT="${DCP_PROXY_PORT:-8422}"
 RELAY_URL="ws://127.0.0.1:${RELAY_PORT}"
@@ -72,7 +72,7 @@ require_node() {
 }
 
 build_cli() {
-  npm -w packages/dcp-cli run build >/dev/null
+  npm -w packages/dcp-vault run build >/dev/null
 }
 
 wait_for_health() {
@@ -152,7 +152,7 @@ start_server() {
   fi
 
   echo "Starting vault server on ${VAULT_PORT}..."
-  DCP_RELAY_URL="${RELAY_URL}" VAULT_PORT="${VAULT_PORT}" DCP_VAULT_DIR="${VAULT_DIR}" VAULT_DIR="${VAULT_DIR}" npm -w packages/dcp-server run dev >/tmp/dcp-server.log 2>&1 &
+  DCP_RELAY_URL="${RELAY_URL}" VAULT_PORT="${VAULT_PORT}" DCP_VAULT_DIR="${VAULT_DIR}" VAULT_DIR="${VAULT_DIR}" node "${ROOT_DIR}/packages/dcp-vault/dist/server/index.js" >/tmp/dcp-vault-server.log 2>&1 &
   SERVER_PID=$!
   STARTED_SERVER=1
   wait_for_health "${VAULT_URL}" 30
@@ -185,7 +185,7 @@ strip_ansi() {
 }
 
 create_pairing_token() {
-  local cli="${ROOT_DIR}/packages/dcp-cli/dist/cli.js"
+  local cli="${ROOT_DIR}/packages/dcp-vault/dist/cli/index.js"
   local output
   output="$(NO_COLOR=1 FORCE_COLOR=0 DCP_VAULT_DIR="${VAULT_DIR}" VAULT_DIR="${VAULT_DIR}" "${NODE_BIN}" "${cli}" pairing start "${SERVICE_ID}" \
     --scopes sign:solana,read:credentials.*,budget:check \
@@ -218,13 +218,13 @@ start_proxy() {
   local vault_id="$1"
   local hpke_key="$2"
   local token="$3"
-  local cli="${ROOT_DIR}/packages/dcp-cli/dist/cli.js"
+  local cli="${ROOT_DIR}/packages/dcp-vault/dist/cli/index.js"
 
   DCP_VAULT_ID="${vault_id}" \
   DCP_VAULT_HPKE_PUBLIC_KEY="${hpke_key}" \
   DCP_RELAY_URL="${RELAY_URL}" \
   DCP_VAULT_DIR="${VAULT_DIR}" VAULT_DIR="${VAULT_DIR}" \
-  "${NODE_BIN}" "${cli}" proxy --pair "${token}" --service-id "${SERVICE_ID}" --port "${PROXY_PORT}" >/tmp/dcp-proxy.log 2>&1 &
+  "${NODE_BIN}" "${cli}" proxy --pair "${token}" --service-id "${SERVICE_ID}" --port "${PROXY_PORT}" >/tmp/dcp-vault-proxy.log 2>&1 &
   PROXY_PID=$!
 
   wait_for_health "${PROXY_URL}" 30

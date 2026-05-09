@@ -1,5 +1,5 @@
 /**
- * Store for DCP Telegram Service (Option B from PRD Section 15)
+ * Store for DCP Telegram Service (Option B from protocol spec section 15)
  *
  * Provides:
  * - Persistent vault ↔ chat_id pairings (SQLite)
@@ -352,7 +352,7 @@ export class NonceStore {
 /**
  * Persistent pairing store (SQLite)
  * Stores vault_id ↔ chat_id mappings for ALL users
- * This is the core of Option B from PRD Section 15
+ * This is the core of Option B from protocol spec section 15
  */
 export class PairingStore {
   readonly db: Database.Database;
@@ -670,7 +670,7 @@ export class ApprovalCommandStore {
       this.db.exec(`DROP TABLE IF EXISTS approval_commands`);
     }
 
-    // Create table with PRD Sprint 8 fields
+    // Create table with protocol spec fields
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS approval_commands (
         id TEXT PRIMARY KEY,

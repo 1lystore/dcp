@@ -7,7 +7,7 @@
  * Prerequisites:
  * 1. Initialize vault: `dcp init`
  * 2. Add some personal data: `dcp add address.home`
- * 3. Start vault server: `npx @dcprotocol/server`
+ * 3. Start vault server: `npx dcp-vault`
  * 4. Unlock vault via `dcp init` / passphrase before making requests
  *
  * Flow:
@@ -124,7 +124,7 @@ async function main() {
     }
   } catch (error) {
     console.error('\n   ERROR: Cannot connect to vault server.');
-    console.error('   Make sure the server is running: npx @dcprotocol/server');
+    console.error('   Make sure the server is running: npx dcp-vault');
     process.exit(1);
   }
 

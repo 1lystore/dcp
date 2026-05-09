@@ -26,7 +26,7 @@ export interface TelegramBotConfig {
   /** Webhook URL for receiving Telegram updates (optional, uses polling if not set) */
   webhookUrl?: string;
 
-  /** Port for webhook server (default: 8422) */
+  /** Port for webhook server (default: 8423) */
   webhookPort?: number;
 
   /** Host for webhook server (default: 127.0.0.1) */
@@ -46,7 +46,7 @@ export interface TelegramServiceConfig {
   /** Host to bind to */
   host: string;
 
-  /** URL of the dcp-server for vault operations */
+  /** URL of the vault server for vault operations */
   serverUrl: string;
 
   /** Vault signing public key for webhook verification */
@@ -201,7 +201,7 @@ export const DEFAULT_SERVICE_CONFIG: TelegramServiceConfig = {
 
 /**
  * Vault-to-Telegram pairing (stored in cloud service)
- * This is the core of Option B from PRD Section 15
+ * This is the core of Option B from protocol spec section 15
  */
 export interface VaultPairing {
   /** Vault ID (from desktop) */

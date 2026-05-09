@@ -2,7 +2,7 @@
  * Relay Transport for DCP Client
  *
  * HPKE-encrypted transport via relay server for cloud agents.
- * See PRD Section A4.2 for relay protocol specification.
+ * See protocol spec section A4.2 for relay protocol specification.
  *
  * This transport:
  * - Encrypts all payloads with HPKE (X25519 + ChaCha20-Poly1305)
@@ -676,7 +676,7 @@ export class RelayTransport implements Transport {
   }
 
   // --------------------------------------------------------------------------
-  // Relay Protocol Implementation (PRD A4.2)
+  // Relay Protocol Implementation (protocol spec A4.2)
   // --------------------------------------------------------------------------
 
   private async relayRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -812,7 +812,7 @@ export class RelayTransport implements Transport {
   }
 
   /**
-   * Send request to relay and poll for response (PRD A4.2 long-poll fallback)
+   * Send request to relay and poll for response (protocol spec A4.2 long-poll fallback)
    */
   private async sendAndPoll(
     envelope: RelayEnvelope,

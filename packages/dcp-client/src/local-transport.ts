@@ -2,7 +2,7 @@
  * Local Transport for DCP Client
  *
  * REST transport to DCP server at localhost:8420.
- * See PRD Section A4.1 for endpoint mapping.
+ * See protocol spec section A4.1 for endpoint mapping.
  *
  * Security: When serviceId and servicePrivateKey are provided,
  * all requests are signed with Ed25519 for cryptographic verification.

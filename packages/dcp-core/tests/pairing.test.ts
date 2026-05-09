@@ -1,5 +1,5 @@
 /**
- * Tests for Signed Pairing Grants (PRD Section 7.1)
+ * Tests for Signed Pairing Grants (protocol spec section 7.1)
  */
 
 import { describe, it, expect } from 'vitest';

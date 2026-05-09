@@ -9,8 +9,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ## 0.2.0 — 2026-03-19
 
 ### Added
-- `@dcprotocol/client`, a universal SDK for local or relay-backed vault access.
-- `@dcprotocol/proxy`, a lightweight remote proxy package and `dcp-proxy` binary for VPS agents.
+- `@dcprotocol/client`, a programmatic client for local or relay-backed vault experiments.
+- `@dcprotocol/agent`, a lightweight runtime for local MCP, HTTP MCP, and remote/VPS sidecar use.
 - CLI support for trusted services with `dcp trust`.
 - CLI support for service connection handoff with `dcp connect`.
 - CLI support for short-lived proxy pairing tokens with `dcp pairing start`.
@@ -23,7 +23,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Changed
 - Desktop production builds now bundle a complete Node runtime plus packaged DCP server runtime for end-user installs.
 - Desktop close/quit behavior now matches standard desktop apps: closing hides to tray, quitting stops the bundled server.
-- Local developer docs now cover CLI, client SDK, desktop, relay, and VPS proxy setup.
+- Local developer docs now cover CLI, agent, desktop, relay, and VPS proxy setup.
 - Local CORS handling accepts localhost origins across dev ports for local approval and onboarding flows.
 
 ### Fixed

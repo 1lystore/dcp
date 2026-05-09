@@ -28,9 +28,9 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@dcprotocol/client": "workspace:*",
-    "@dcprotocol/core": "workspace:*",
-    "@dcprotocol/relay-client": "workspace:*",
+    "@dcprotocol/client": "workspace:^",
+    "@dcprotocol/core": "workspace:^",
+    "@dcprotocol/relay-client": "workspace:^",
     "@fastify/cors": "^10.0.2",
     "@fastify/rate-limit": "^10.0.0",
     "@fastify/websocket": "^11.0.0",

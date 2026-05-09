@@ -77,7 +77,7 @@ export function parseAndVerifyGrant(grantToken: string): SignedPairingGrant {
 /**
  * Create agent config from verified pairing grant
  *
- * Per PRD Section 7.3, generates a new Ed25519 keypair for the agent
+ * Per protocol spec section 7.3, generates a new Ed25519 keypair for the agent
  * to use when signing relay requests.
  *
  * IMPORTANT: The pairing grant is REQUEST-ONLY - it does not carry permission
@@ -85,7 +85,7 @@ export function parseAndVerifyGrant(grantToken: string): SignedPairingGrant {
  */
 export function createConfigFromGrant(grant: SignedPairingGrant): AgentConfig {
   // Generate agent's Ed25519 keypair for signing relay requests
-  // Per PRD Section 7.3: agents need their own keypair for authentication
+  // Per protocol spec section 7.3: agents need their own keypair for authentication
   const keypair = generateSigningKeyPair();
 
   // Create config with only connection info from the grant
@@ -345,7 +345,7 @@ export function updateSessionToken(agentId: string, sessionToken: string): void 
 /**
  * Exchange a pairing grant with the vault to get session credentials
  *
- * Per PRD Section 7.3, after generating a keypair, the agent must exchange
+ * Per protocol spec section 7.3, after generating a keypair, the agent must exchange
  * the pairing grant with the vault to:
  * 1. Register the agent's public key
  * 2. Receive a session token

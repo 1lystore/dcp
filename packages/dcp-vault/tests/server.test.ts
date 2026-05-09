@@ -26,7 +26,7 @@ describe('REST Server', () => {
     resetStorage();
 
     // Create a unique temp directory for tests
-    testVaultDir = path.join(os.tmpdir(), `dcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    testVaultDir = path.join(os.tmpdir(), `dcp-vault-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
     // Set environment variable for the server to use
     process.env.VAULT_DIR = testVaultDir;
@@ -129,7 +129,7 @@ describe('REST Server', () => {
   });
 
   // ============================================================================
-  // Unlock Rate Limiting Tests (PRD Sprint 0)
+  // Unlock Rate Limiting Tests (protocol spec)
   // ============================================================================
 
   describe('Unlock Rate Limiting', () => {
@@ -146,7 +146,7 @@ describe('REST Server', () => {
     });
 
     it('should return 429 after too many failed attempts', async () => {
-      // Make 5 failed attempts (the limit per PRD)
+      // Make 5 failed attempts (the limit per the protocol spec)
       for (let i = 0; i < 5; i++) {
         await server.inject({
           method: 'POST',

@@ -1,7 +1,7 @@
 /**
  * dcp trust <service>
  *
- * Add a trusted service to the vault (PRD Section B2).
+ * Add a trusted service to the vault (protocol spec section B2).
  *
  * Services authenticate with their own Ed25519 keypair.
  * User trusts them once; agents run autonomously within policies.

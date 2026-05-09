@@ -1,7 +1,7 @@
 /**
  * Notification Formatting for DCP Telegram Service
  *
- * PRIVACY-FIRST DESIGN (PRD Section 15):
+ * PRIVACY-FIRST DESIGN (protocol spec section 15):
  * - PERMITTED: agent_name, request category, request_id, review_link
  * - FORBIDDEN: secrets, transaction payloads, amounts, addresses, credentials
  *

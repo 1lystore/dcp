@@ -1,6 +1,6 @@
 # Contributing to DCP
 
-DCP is an open protocol. The more people build on it, the stronger it gets. Whether you're fixing a typo, adding a new chain, or building a Python SDK — we're glad you're here.
+DCP is an open protocol. The more people build on it, the stronger it gets. Whether you're fixing a typo, adding a new chain, or improving agent integrations, this guide should help you get started.
 
 ## Where to Start
 
@@ -12,7 +12,6 @@ Not sure where to jump in? Here are the highest-impact contributions right now:
 | Add an example or integration guide | Easy | High |
 | New data schema (driver's license, health profile) | Medium | High |
 | New EVM chain support (Polygon, Arbitrum, etc.) | Medium | High |
-| Python SDK | Medium | Very High |
 | LangChain / CrewAI / AutoGen integration | Medium | High |
 | Improve test coverage | Easy | Medium |
 
@@ -26,13 +25,13 @@ git clone https://github.com/YOUR_USERNAME/dcp.git
 cd dcp
 
 # Install dependencies
-npm install
+pnpm install
 
 # Build all packages
-npm run build
+pnpm run build
 
 # Run tests (make sure everything passes before you start)
-npm test
+pnpm test
 
 # Try it out
 dcp init
@@ -44,9 +43,9 @@ dcp create-wallet --chain solana
 ```
 packages/
   dcp-core/       Core library (crypto, wallet, storage, budget)
-  dcp-cli/        CLI tool (commands in src/commands/)
-  dcp-mcp/        MCP server for AI agents
-  dcp-server/     REST API server (Fastify, localhost:8420)
+  dcp-vault/      CLI and local REST API server
+  dcp-agent/      Agent runtime for MCP, HTTP MCP, and local proxy mode
+  dcp-relay/      Encrypted relay service
 ```
 
 CLI binary is `dcp`. Packages are scoped under `@dcprotocol/*`. Data lives in `~/.dcp`.
@@ -59,7 +58,6 @@ CLI binary is `dcp`. Packages are scoped under `@dcprotocol/*`. Data lives in `~
 - New data schemas (driver's license, health records, travel documents)
 - MCP tool additions following existing patterns
 - Framework integrations (LangChain, CrewAI, AutoGen, OpenAI functions)
-- Python SDK, Go SDK, Rust SDK — any language
 - Documentation improvements, examples, tutorials
 - Test coverage improvements
 - Performance optimizations
@@ -103,7 +101,7 @@ Phase 1 stores JSON payloads by scope (e.g., `address.home`, `preferences.sizes`
 There is no formal schema registry yet.
 
 To add a new data type:
-1. Choose a scope name (document it in PRD/README)
+1. Choose a scope name (document it in protocol spec/README)
 2. Add examples to `README.md`
 3. Add tests for encryption round‑trip
 
@@ -180,8 +178,8 @@ When you're in the registry:
 
 ### Integration Help
 Not sure how to implement the DCP connect endpoint? Check:
-- Example: `packages/dcp-server/` (reference implementation)
-- Client SDK: `@dcprotocol/client` (what you'll use on backend)
+- Example: `packages/dcp-vault/` (reference implementation)
+- Programmatic client: `@dcprotocol/client` (for backend experiments)
 - Docs: `README.md` section on "Service / Marketplace Flow"
 
 Questions? Open a discussion or issue - we'll help you integrate!

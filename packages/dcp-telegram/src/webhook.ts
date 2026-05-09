@@ -1,5 +1,5 @@
 /**
- * Webhook Server for DCP Telegram Service (Option B from PRD Section 15)
+ * Webhook Server for DCP Telegram Service (Option B from protocol spec section 15)
  *
  * Cloud service that:
  * - Stores vault_id ↔ chat_id pairings
@@ -58,14 +58,14 @@ interface BudgetWebhookPayload {
 
 /**
  * Webhook payload from desktop (simplified - no chat_id needed)
- * PRD Sprint 8 Task 5: Every desktop-to-Telegram request must include:
+ * protocol spec: Every desktop-to-Telegram request must include:
  * vault ID, timestamp, nonce, signature
  */
 type DesktopWebhookPayload = ConsentWebhookPayload | BudgetWebhookPayload;
 
 /**
  * Pairing start request from desktop
- * PRD Sprint 8 Task 4: Desktop creates signed pairing start request
+ * protocol spec: Desktop creates signed pairing start request
  */
 interface PairingStartRequest {
   vault_id: string;
@@ -108,7 +108,7 @@ export function verifyEd25519(
 /**
  * Validate Telegram webhook update signature
  *
- * PRD Sprint 7 Task 1: Webhook Signature Validation
+ * protocol spec: Webhook Signature Validation
  *
  * When using Telegram webhooks (instead of polling), Telegram sends
  * a secret_token header (X-Telegram-Bot-Api-Secret-Token) that must
@@ -337,7 +337,7 @@ export class WebhookServer {
    * Handle pairing start (desktop → cloud)
    * Returns a 6-digit code for user to send to bot
    *
-   * PRD Sprint 8 Task 4: Desktop creates signed pairing start request,
+   * protocol spec: Desktop creates signed pairing start request,
    * service verifies vault signature
    */
   private async handlePairingStart(
@@ -354,7 +354,7 @@ export class WebhookServer {
       });
     }
 
-    // PRD Sprint 8: Require signature, timestamp, nonce
+    // protocol spec: Require signature, timestamp, nonce
     if (!timestamp || !nonce || !signature) {
       return reply.status(400).send({
         error: 'INVALID_PAYLOAD',
@@ -390,7 +390,7 @@ export class WebhookServer {
       });
     }
 
-    // Generate pairing code (CSPRNG per PRD)
+    // Generate pairing code (CSPRNG per the protocol spec)
     const pending = this.store.pairings.createPairingCode(vault_id);
 
     console.log(`[PAIRING] Code created for vault ${vault_id.slice(0, 8)}...`);
@@ -516,7 +516,7 @@ export class WebhookServer {
    * Handle consent webhook from desktop
    * Looks up chat_id from vault_id (no chat_id in payload)
    *
-   * PRD Sprint 8 Task 6: Telegram service must reject:
+   * protocol spec: Telegram service must reject:
    * - missing signature
    * - invalid signature
    * - unknown vault key
@@ -529,7 +529,7 @@ export class WebhookServer {
   ) {
     const payload = request.body;
 
-    // Validate required fields including security fields (PRD Sprint 8 Task 5)
+    // Validate required fields including security fields (protocol spec)
     if (!payload.vault_id || !payload.event || !payload.data || !payload.timestamp) {
       return reply.status(400).send({
         error: 'INVALID_PAYLOAD',
@@ -537,7 +537,7 @@ export class WebhookServer {
       });
     }
 
-    // PRD Sprint 8 Task 6: Reject missing nonce
+    // protocol spec: Reject missing nonce
     if (!payload.nonce) {
       return reply.status(400).send({
         error: 'MISSING_NONCE',
@@ -545,7 +545,7 @@ export class WebhookServer {
       });
     }
 
-    // PRD Sprint 8 Task 6: Reject missing signature
+    // protocol spec: Reject missing signature
     if (!payload.signature) {
       return reply.status(400).send({
         error: 'MISSING_SIGNATURE',
@@ -553,7 +553,7 @@ export class WebhookServer {
       });
     }
 
-    // PRD Sprint 8 Task 6: Reject unknown vault key (checks memory cache and database)
+    // protocol spec: Reject unknown vault key (checks memory cache and database)
     const publicKey = this.getVaultPublicKey(payload.vault_id);
     if (!publicKey) {
       return reply.status(401).send({
@@ -562,7 +562,7 @@ export class WebhookServer {
       });
     }
 
-    // PRD Sprint 8 Task 6: Reject stale timestamp and reused nonce
+    // protocol spec: Reject stale timestamp and reused nonce
     if (!this.nonceStore.checkAndMark(payload.nonce, payload.timestamp)) {
       return reply.status(400).send({
         error: 'REPLAY_DETECTED',
@@ -570,7 +570,7 @@ export class WebhookServer {
       });
     }
 
-    // PRD Sprint 8 Task 6: Verify signature (REQUIRED, not optional)
+    // protocol spec: Verify signature (REQUIRED, not optional)
     const { signature, ...dataToVerify } = payload;
     const message = Buffer.from(canonicalJson(dataToVerify), 'utf8');
     const signatureBuffer = Buffer.from(signature, 'base64');

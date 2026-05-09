@@ -4,9 +4,9 @@
   "version": "0.2.0",
   "identifier": "rg.dcp.vault",
   "build": {
-    "beforeDevCommand": "pnpm --filter @dcprotocol/vault run build && npm run dev",
+    "beforeDevCommand": "corepack pnpm -r --filter @dcprotocol/core --filter @dcprotocol/client --filter @dcprotocol/relay --filter @dcprotocol/relay-client --filter @dcprotocol/vault run build && corepack pnpm --filter @dcprotocol/desktop run bundle:helper && corepack pnpm --filter @dcprotocol/desktop run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm --filter @dcprotocol/vault run build && npm run build",
+    "beforeBuildCommand": "corepack pnpm -r --filter @dcprotocol/core --filter @dcprotocol/client --filter @dcprotocol/relay --filter @dcprotocol/relay-client --filter @dcprotocol/vault run build && corepack pnpm --filter @dcprotocol/desktop run bundle:helper && corepack pnpm --filter @dcprotocol/desktop run build",
     "frontendDist": "../dist"
   },
   "app": {

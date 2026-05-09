@@ -15,7 +15,7 @@ export type ScopeConfig = {
   transform?: (data: Record<string, unknown>, scope: string) => Record<string, unknown>;
 };
 
-// Scope metadata for interactive prompts (field names match PRD schema)
+// Scope metadata for interactive prompts (field names match protocol spec schema)
 export const SCOPE_CONFIG: Record<string, ScopeConfig> = {
   'identity.name': {
     sensitivity: 'sensitive',

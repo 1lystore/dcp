@@ -29,7 +29,7 @@ export interface AgentConfig {
   relay_url: string;
   /**
    * Agent's own Ed25519 keypair for signing relay requests
-   * Generated during pairing per PRD Section 7.3
+   * Generated during pairing per protocol spec section 7.3
    */
   service_keypair: {
     public: string;  // base64 encoded

@@ -5,25 +5,25 @@
 set -e
 
 ENVIRONMENT=${1:-staging}
-RELAY_PORT=${DCP_RELAY_PORT:-8421}
+RELAY_PORT=${DCP_RELAY_PORT:-8422}
 RELAY_HOST=${DCP_RELAY_HOST:-"relay.dcp.1ly.store"}
 
 echo "🚀 Deploying DCP Relay to $ENVIRONMENT..."
 
 # Build the relay package
 echo "📦 Building @dcprotocol/relay..."
-npm run build -w @dcprotocol/relay
+pnpm --filter @dcprotocol/relay run build
 
 # Run tests
 echo "🧪 Running tests..."
-npm run test -w @dcprotocol/relay
+pnpm --filter @dcprotocol/relay run test
 
 # Create Docker image (if Docker is available)
 if command -v docker &> /dev/null; then
     echo "🐳 Building Docker image..."
 
     cat > /tmp/dcp-relay.Dockerfile << 'EOF'
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 
@@ -31,11 +31,11 @@ WORKDIR /app
 RUN npm install -g @dcprotocol/relay
 
 # Expose default port
-EXPOSE 8421
+EXPOSE 8422
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD wget -q --spider http://localhost:8421/health || exit 1
+  CMD wget -q --spider http://localhost:8422/health || exit 1
 
 # Run relay
 CMD ["npx", "@dcprotocol/relay", "--host", "0.0.0.0"]

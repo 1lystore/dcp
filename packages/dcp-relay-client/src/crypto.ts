@@ -6,7 +6,7 @@
  * - KDF: HKDF-SHA256
  * - AEAD: ChaCha20-Poly1305
  *
- * From PRD Phase 1 Section 6:
+ * From protocol spec Section 6:
  * - HPKE (X25519 + ChaCha20-Poly1305)
  * - Forward secrecy via ephemeral keys
  * - AAD binding to envelope metadata

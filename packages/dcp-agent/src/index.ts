@@ -140,7 +140,7 @@ async function pairCommand(grantToken: string, options: PairOptions): Promise<vo
     const grant = parseAndVerifyGrant(grantToken);
     spin.text = 'Creating agent configuration...';
 
-    // Create config from grant (generates keypair per PRD Section 7.3)
+    // Create config from grant (generates keypair per protocol spec section 7.3)
     let config = createConfigFromGrant(grant);
 
     // Override name if provided

@@ -1,7 +1,7 @@
 /**
  * dcp config
  *
- * View and manage vault configuration (PRD C9).
+ * View and manage vault configuration (protocol spec C9).
  *
  * Usage:
  *   dcp config show                      # Show current config

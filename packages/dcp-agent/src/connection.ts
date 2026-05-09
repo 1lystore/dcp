@@ -33,7 +33,7 @@ export class AgentConnection {
   /**
    * Connect to the vault
    *
-   * Per PRD Section 7.3, agents use their own Ed25519 keypair for relay authentication.
+   * Per protocol spec section 7.3, agents use their own Ed25519 keypair for relay authentication.
    * The agent's keypair is generated during pairing and stored in agent.json.
    *
    * Tries local mode first (for testing), falls back to relay mode.
@@ -74,7 +74,7 @@ export class AgentConnection {
     }
 
     // Use relay mode with agent's keypair for authentication
-    // Per PRD: agents have their own service_keypair generated during pairing
+    // Per protocol spec: agents have their own service_keypair generated during pairing
     this.client = new DcpClient({
       mode: 'relay',
       vaultId: this.config.vault_id,

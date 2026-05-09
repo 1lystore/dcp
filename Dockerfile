@@ -1,31 +1,28 @@
-FROM node:20-bookworm-slim AS build
+FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-COPY scripts/check-node.mjs scripts/check-node.mjs
-COPY packages/dcp-relay/package.json packages/dcp-relay/package.json
+RUN corepack enable
 
-RUN npm ci
+COPY . .
 
-COPY packages/dcp-relay packages/dcp-relay
+RUN pnpm install --frozen-lockfile --ignore-scripts
 
-RUN npm run build -w @dcprotocol/relay \
-  && npm prune --omit=dev --workspaces --include-workspace-root=false
+RUN pnpm --filter @dcprotocol/relay run build
 
 
-FROM node:20-bookworm-slim AS runtime
+FROM node:22-bookworm-slim AS runtime
 
 WORKDIR /app
 
 ENV NODE_ENV=production
 ENV DCP_RELAY_HOST=0.0.0.0
-ENV DCP_RELAY_PORT=8421
+ENV DCP_RELAY_PORT=8422
 
-COPY --from=build /app/package.json /app/package-lock.json ./
+COPY --from=build /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/packages/dcp-relay ./packages/dcp-relay
 
-EXPOSE 8421
+EXPOSE 8422
 
 CMD ["node", "packages/dcp-relay/dist/index.js"]

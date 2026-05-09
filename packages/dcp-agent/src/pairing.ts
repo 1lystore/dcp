@@ -224,7 +224,7 @@ export interface PairingApprovalStatus {
 /**
  * Submit pairing claim to vault via relay
  *
- * Per PRD: VPS agent sends pairing claim through relay to vault.
+ * Per protocol spec: VPS agent sends pairing claim through relay to vault.
  * The claim is signed with agent's private key and routed by invite_id.
  *
  * @param claim - Signed pairing claim

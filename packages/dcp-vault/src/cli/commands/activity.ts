@@ -1,7 +1,7 @@
 /**
  * dcp activity
  *
- * View audit log of vault activity (PRD C8).
+ * View audit log of vault activity (protocol spec C8).
  *
  * Usage:
  *   dcp activity                     # Show last 50 events

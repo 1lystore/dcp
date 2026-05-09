@@ -4,7 +4,7 @@
  * Universal agent SDK for DCP - connect any agent to DCP Vault.
  * Supports local REST and relay transports with auto-detection.
  *
- * See PRD Section A for full specification.
+ * See protocol spec section A for full specification.
  *
  * Usage:
  * ```typescript
@@ -50,7 +50,7 @@ import { LocalTransport } from './local-transport.js';
 import { RelayTransport } from './relay-transport.js';
 
 // ============================================================================
-// Environment Variable Names (PRD A3.1)
+// Environment Variable Names (protocol spec A3.1)
 // ============================================================================
 
 const ENV_VARS = {
@@ -79,7 +79,7 @@ export class DcpClient {
   }
 
   // --------------------------------------------------------------------------
-  // Configuration Resolution (PRD A3.1)
+  // Configuration Resolution (protocol spec A3.1)
   // --------------------------------------------------------------------------
 
   private resolveConfig(config: DcpClientConfig): ResolvedConfig {
@@ -120,7 +120,7 @@ export class DcpClient {
   }
 
   // --------------------------------------------------------------------------
-  // Transport Resolution (PRD A4.3 Auto Mode Logic)
+  // Transport Resolution (protocol spec A4.3 Auto Mode Logic)
   // --------------------------------------------------------------------------
 
   private async getTransport(): Promise<Transport> {
@@ -147,12 +147,12 @@ export class DcpClient {
       return this.transport;
     }
 
-    // Auto mode (PRD A4.3)
+    // Auto mode (protocol spec A4.3)
     return this.autoDetectTransport();
   }
 
   /**
-   * Auto-detect transport based on local DCP availability (PRD A4.3)
+   * Auto-detect transport based on local DCP availability (protocol spec A4.3)
    *
    * 1. Check http://127.0.0.1:8420/health (100ms timeout)
    * 2. If response.unlocked === true → use local transport
@@ -223,7 +223,7 @@ export class DcpClient {
   }
 
   // --------------------------------------------------------------------------
-  // Public API (PRD A3)
+  // Public API (protocol spec A3)
   // --------------------------------------------------------------------------
 
   /**

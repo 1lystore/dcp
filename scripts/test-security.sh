@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test-security.sh - Security Regression Tests
-# PRD Sprint 8 Task 4: Security Regression Tests
+# protocol spec: Security Regression Tests
 #
 # Ensures all Sprint 0 security fixes remain intact
 # and no new security vulnerabilities are introduced.

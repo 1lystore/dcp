@@ -213,7 +213,7 @@ export function handleError(err: unknown): never {
 // ============================================================================
 
 const CLI_SESSION_MINUTES = Number(process.env.DCP_CLI_SESSION_MINUTES || '30');
-const CLI_SESSION_SERVICE = 'dcp-cli';
+const CLI_SESSION_SERVICE = 'dcp-vault-cli';
 const CLI_INSECURE_SESSION = process.env.DCP_CLI_INSECURE_SESSION === '1';
 let keychainUnavailable = false;
 

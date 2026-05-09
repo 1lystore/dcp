@@ -1,235 +1,231 @@
 # Security Model
 
-This document covers the security model for **DCP (Delegated Custody Protocol)** and its open-source reference implementation, **DCP Vault**.
+DCP is designed to let AI agents use approved capabilities without receiving raw private keys or unrestricted vault access.
 
-## Design Philosophy
+Current status: beta-readiness. This document describes the intended security posture of the current open-source implementation. It is not a completed external audit.
 
-DCP Vault protects personal data from unauthorized access — including from AI agents that use the vault for legitimate operations. The core principle:
+## Core Rule
 
-**Agents get USE of data, not the VALUES.**
+Agents get use of data, not blanket access to the vault.
 
-- Standard data (addresses, preferences): Agents can read with consent
-- Critical data (private keys, API keys): Agents never see raw values; they get results (signed transactions, API responses)
+Examples:
+
+- A wallet key is used to sign; the private key is not returned.
+- A credential can be exposed only through an explicit scoped read path and policy decision.
+- A remote agent talks through a sidecar and relay; the relay should only see encrypted envelopes.
+
+## Main Components
+
+```text
+dcp-desktop     user approval UI and local vault manager
+dcp-vault       local CLI and HTTP server
+dcp-core        encryption, storage, wallet, budget, pairing, audit types
+dcp-agent       MCP / HTTP MCP / proxy / remote sidecar runtime
+dcp-relay       encrypted message relay for remote agents
+dcp-telegram    Telegram pairing and approval service
+```
 
 ## Threat Model
 
 ### In Scope
 
 | Threat | Mitigation |
-|--------|------------|
-| AI agent accessing private keys | Keys never exposed; agents only receive signed outputs |
-| Brute force passphrase attack | Argon2id with memory-hard parameters (64MB, 3 iterations) |
-| Memory extraction attacks | Sensitive buffers zeroized after use |
-| Network interception | REST server binds to localhost only (127.0.0.1) |
-| Unauthorized data access | Consent required for every read/sign operation |
-| Runaway agent spending | Budget limits, approval thresholds, session timeouts |
-| Database theft | All data encrypted at rest with envelope encryption |
-| Recovery phrase theft | Phrase is shown once and not stored; if compromised, attacker can restore |
+|---|---|
+| Agent asks for wallet private key | Critical wallet records are not readable; signing happens inside the vault process |
+| Agent exceeds policy or budget | Policy checks, budgets, approval thresholds, revoke checks |
+| Agent keeps using old access after revoke | Agent/session state is checked on future requests |
+| Relay operator reads request contents | Relay path is designed around encrypted envelopes |
+| Telegram leaks secret values | Telegram notification formatter must stay privacy-safe |
+| Local DB is copied | Vault records are encrypted at rest |
+| Duplicate/replayed Telegram approval command | Nonce/single-use command checks |
+| Accidental package publication of old/internal surfaces | `scripts/publish-guard.mjs` |
 
-### Out of Scope (Current OSS)
+### Out Of Scope
 
 | Threat | Notes |
-|--------|-------|
-| Physical device compromise | Assumes trusted execution environment |
-| Operating system compromise | Assumes OS security is maintained |
-| Side-channel attacks | Not hardened against timing/cache attacks |
-| Hardware key storage | Uses software encryption (HSM support planned) |
+|---|---|
+| Fully compromised OS account | A local attacker with user-level access may inspect processes/files |
+| Malware on the same machine | Localhost services assume a trusted local environment |
+| Physical device compromise | Use OS/device security controls |
+| Side-channel attacks | Not hardened against timing/cache/EM side channels |
+| Malicious browser extensions or local process injection | Outside current protection boundary |
+| Formal compliance guarantees | No SOC2/GDPR/HIPAA guarantee in this repo |
 
-## Cryptographic Design
+## Data Classes
 
-### Key Hierarchy
+| Class | Examples | Expected Agent Access |
+|---|---|---|
+| Standard | preferences, non-sensitive settings | May be read with policy/consent |
+| Sensitive | name, email, address, API credentials | May require explicit approval and scope |
+| Critical | wallet private keys, master key material | Must not be returned directly |
 
-```
-Recovery Phrase (12-word BIP-39 mnemonic)
-          │
-          ▼
-    Master Key (32 bytes)
-          │
-          ├──▶ Encrypted with Argon2id-derived wrapping key
-          │         (stored in OS Keychain or encrypted file)
-          │
-          └──▶ DEK per record
-                    │
-                    ▼
-              Encrypted data (XChaCha20-Poly1305)
-```
+Credential reads are sensitive. If a policy allows `read:credentials.*`, the agent may receive that credential value. Do not grant broad credential scopes casually.
 
-### Algorithms
+## Cryptography
 
-| Component | Algorithm | Parameters |
-|-----------|-----------|------------|
-| Symmetric encryption | XChaCha20-Poly1305 | 256-bit key, 192-bit nonce |
-| Key derivation | Argon2id | 64MB memory, 3 iterations, 4 parallelism |
-| Recovery phrase | BIP-39 | 128-bit entropy, 12 words |
-| Master key derivation | PBKDF2 (via BIP-39) | SHA-512, 2048 iterations |
-| Nonce generation | crypto.randomBytes | 24 bytes per encryption |
+Current core primitives:
 
-### Envelope Encryption
+| Area | Primitive |
+|---|---|
+| Record encryption | XChaCha20-Poly1305 |
+| Key derivation | Argon2id for passphrase wrapping |
+| Recovery phrase | BIP-39 mnemonic |
+| Signing identity | Ed25519 |
+| Canonical request signing | recursive canonical JSON helper |
 
-Every record uses two-layer envelope encryption:
+Record encryption uses envelope encryption:
 
-1. **Data Encryption Key (DEK)**: Random 32-byte key generated per record
-2. **Record encryption**: Data encrypted with DEK using XChaCha20-Poly1305
-3. **DEK encryption**: DEK encrypted with Master Key using XChaCha20-Poly1305
-
-This design enables:
-- Re-keying without re-encrypting all data
-- Per-record access control (future)
-- Efficient key rotation
-
-### Memory Safety
-
-Sensitive data is zeroized immediately after use:
-
-```typescript
-// Example from dcp-core
-const masterKey = deriveKeyFromMnemonic(mnemonic);
-try {
-  // Use master key
-  await storage.storeMasterKeyWithPassphrase(masterKey, passphrase);
-} finally {
-  // CRITICAL: Zeroize from memory
-  zeroize(masterKey);
-}
+```text
+record data -> random DEK -> encrypted payload
+DEK         -> master key -> encrypted DEK
 ```
 
-All functions handling secrets follow this pattern:
-- `deriveKeyFromPassphrase()` - wrapping key zeroized after use
-- `envelopeDecrypt()` - DEK zeroized after decryption
-- `signTransaction()` - private key zeroized after signing
+Sensitive buffers should be zeroized after use where practical. JavaScript cannot guarantee full memory erasure, so do not claim hard memory-safety guarantees beyond best-effort zeroization.
 
-## Access Control
+## Local Vault Security
 
-### Consent Model
+The local vault server is intended to bind to localhost for development and Desktop use.
 
-Every agent operation requires consent:
+Important local assumptions:
 
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `once` | Single operation, then expires | One-off requests |
-| `session` | Valid for scope until timeout | Repeated operations |
+- Localhost is not a security boundary against malware running as the same user.
+- Vault unlock state matters.
+- Agent requests must still pass policy/consent checks.
+- Owner/Desktop flows may have elevated local control compared with normal agent requests.
 
-Session limits:
-- **Idle timeout**: 30 minutes of inactivity
-- **Max duration**: 4 hours absolute
-- **Manual revocation**: User can revoke anytime
+## Approval Model
 
-### Budget Engine
+Requests can be:
 
-Transaction signing enforces spending limits:
+- allowed by policy/session
+- blocked by policy/revoke/budget
+- converted into a pending consent
+- denied by user action
+- expired by timeout
 
-| Limit | Default | Description |
-|-------|---------|-------------|
-| `tx_limit` | 5 SOL | Maximum per transaction |
-| `daily_budget` | 20 SOL | Maximum per 24 hours |
-| `approval_threshold` | 2 SOL | Require consent above this |
+Approval surfaces:
 
-Budget exceeded = operation denied immediately.
+- Desktop approval UI
+- Telegram approval notification/inline buttons
+- local consent endpoints used by tooling/tests
 
-### Sensitivity Levels
+Telegram approval should remain single-use and privacy-safe.
 
-| Level | Description | Agent Access |
-|-------|-------------|--------------|
-| `standard` | Non-sensitive preferences | Can read with consent |
-| `sensitive` | PII (name, address, email) | Can read with consent |
-| `critical` | Private keys, passport | Cannot read directly |
+## Telegram Privacy Rule
 
-Critical data (wallet keys) can only be used via `sign` operations; the raw data is never returned to agents.
+Telegram messages may include:
 
-## Network Security
+- agent name
+- high-level request category
+- simple human-readable context
+- expiration countdown
 
-### Localhost Binding
+Telegram messages must not include:
 
-The REST server binds exclusively to `127.0.0.1`:
+- private keys
+- API keys
+- raw transaction payloads
+- seed phrases
+- full credentials
+- decrypted vault record bodies
 
-```typescript
-const HOST = '127.0.0.1'; // SECURITY: localhost only
-await server.listen({ port, host: HOST });
+Approved notification style:
+
+```text
+🔐 Approval Needed
+
+Claude Desktop wants to send 0.02 ETH on Base.
+
+⏱️ Reply within 4m 58s
 ```
 
-This ensures:
-- No network exposure
-- Only local processes can connect
-- Firewall rules don't apply
+## Remote/VPS Security
 
-### CORS Configuration
+Remote agents use a sidecar pattern:
 
-CORS is permissive (`origin: true`) because:
-- Server is localhost-only
-- Browser-based UIs need access
-- All operations require consent anyway
+```text
+remote agent -> localhost sidecar -> encrypted relay -> local vault
+```
 
-## Audit Trail
+Security expectations:
 
-All operations are logged to an immutable audit table:
+- sidecar listens on `127.0.0.1`
+- sidecar stores only its own pairing/agent material
+- relay cannot read plaintext payloads
+- vault can revoke the remote agent
+- pairing requires a user-visible verification/approval step
 
-| Event Type | Description |
-|------------|-------------|
-| `GRANT` | Consent approved |
-| `DENY` | Consent denied |
-| `EXECUTE` | Transaction signed |
-| `READ` | Data read |
-| `REVOKE` | Session revoked |
-| `CONFIG` | Configuration changed |
-| `EXPIRE` | Session/consent expired |
+Real VPS behavior must be validated before public beta.
 
-Audit logs include:
-- Timestamp
-- Agent name
-- Operation type
-- Scope accessed
-- Outcome (success/denied)
-- Additional context
+## Audit Log
 
-## Recovery
+The vault stores local audit events for security-sensitive actions such as:
 
-### Backup
+- consent grant/deny
+- reads
+- signing/execution
+- revoke
+- config changes
+- expiration
 
-The 12-word recovery phrase is the only backup mechanism:
-- Generated from 128-bit entropy
-- Master key derived deterministically via BIP-39
-- Same phrase = same master key = access to all data
+Audit events should include enough metadata to understand what happened without leaking raw secrets.
 
-### Restore Process
+## Package And Release Safety
 
-1. User enters recovery phrase
-2. Master key derived from phrase
-3. Master key re-encrypted with new passphrase
-4. Existing encrypted data becomes accessible
+Before publishing beta packages:
 
-**Warning**: Recovery phrase provides complete vault access. Store offline in secure location.
+```bash
+node scripts/publish-guard.mjs
+pnpm -r run typecheck
+pnpm -r run test
+pnpm -r run build
+./scripts/test-security.sh
+```
 
-## Security Recommendations
+Also run:
 
-### For Users
+- clean-room npm tarball install
+- production dependency audit
+- stale package-name scan
+- secret/log scan
 
-1. **Use a strong passphrase**: 12+ characters, mix of types
-2. **Store recovery phrase offline**: Paper in secure location
-3. **Review consent requests**: Don't approve blindly
-4. **Set conservative budgets**: Start low, increase as needed
-5. **Monitor activity logs**: Run `dcp activity` regularly
-6. **Revoke unused sessions**: Don't leave sessions active
+## Secret/Log Scan
 
-### For Agent Developers
+Use:
 
-1. **Request minimal scopes**: Only what you need
-2. **Include descriptions**: Help users understand requests
-3. **Handle consent gracefully**: Don't spam with requests
-4. **Respect rate limits**: 5 requests/minute default
-5. **Use sessions appropriately**: Don't request session for one-off operations
+```bash
+rg -n "private_key|servicePrivateKey|mnemonic|seed|secret|api_key|token|signature" packages scripts -g '!**/dist/**' -g '!**/node_modules/**'
+```
+
+Review results manually. Some names are legitimate fields or tests, but logs and user-facing messages must not reveal secret values.
+
+## User Guidance
+
+- Use a strong passphrase.
+- Store the recovery phrase offline.
+- Keep budgets low at first.
+- Review agent scopes before approving.
+- Revoke agents you no longer use.
+- Do not approve broad credential access unless you understand the agent.
+
+## Developer Guidance
+
+- Request the narrowest scope possible.
+- Prefer signing/use operations over raw secret reads.
+- Include clear descriptions for user approvals.
+- Handle denied/timeout/revoked errors cleanly.
+- Do not log request payloads that may contain secrets.
+- Keep Telegram copy privacy-safe.
 
 ## Vulnerability Reporting
 
-If you discover a security vulnerability, please report it responsibly:
+Do not open a public issue for a suspected vulnerability.
 
-1. **Do not** open a public GitHub issue
-2. Email security concerns to the maintainers
-3. Allow time for a fix before public disclosure
+Report privately to the maintainers with:
 
-## Compliance Notes
+- affected package/flow
+- reproduction steps
+- expected impact
+- any logs or payloads with secrets redacted
 
-DCP Vault is designed for personal use. For enterprise deployment with compliance requirements (GDPR, SOC2, etc.), additional measures may be needed:
-- Hardware security module (HSM) integration
-- External audit logging
-- Access control policies
-- Data retention policies
+Allow time for a fix before public disclosure.

@@ -1,7 +1,7 @@
 /**
  * dcp revoke <agent|session_id>
  *
- * Revoke agent access immediately (PRD C7).
+ * Revoke agent access immediately (protocol spec C7).
  *
  * Usage:
  *   dcp revoke "Claude"     # Revoke all sessions for agent "Claude"

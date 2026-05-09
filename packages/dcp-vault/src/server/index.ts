@@ -3,9 +3,9 @@
  * DCP Vault REST Server
  *
  * REST API for AI agents and browser UIs to interact with the vault.
- * SECURITY: Binds to 127.0.0.1 only - never exposed to network (PRD R1).
+ * SECURITY: Binds to 127.0.0.1 only - never exposed to network (protocol spec R1).
  *
- * Endpoints (PRD R2):
+ * Endpoints (protocol spec R2):
  * - GET  /health               - Health check
  * - GET  /scopes               - List available scopes
  * - GET  /address/:chain       - Get wallet address
@@ -120,7 +120,7 @@ const ownerTokens: Map<string, OwnerToken> = new Map(); // token -> OwnerToken
 const pendingChallenges: Map<string, Challenge> = new Map(); // desktop_id -> Challenge
 
 // ============================================================================
-// Unlock Rate Limiting (PRD Sprint 0)
+// Unlock Rate Limiting (protocol spec)
 // ============================================================================
 // 5 failed attempts per minute -> 5 minute lockout
 const UNLOCK_MAX_ATTEMPTS = 5;
@@ -234,7 +234,7 @@ function getPackageVersion(): string {
     const entryPath = process.argv[1] ? path.dirname(process.argv[1]) : process.cwd();
     const candidates = [
       path.join(entryPath, '..', 'package.json'),
-      path.join(process.cwd(), 'packages', 'dcp-server', 'package.json'),
+      path.join(process.cwd(), 'packages', 'dcp-vault', 'package.json'),
       path.join(process.cwd(), 'package.json'),
     ];
     for (const p of candidates) {
@@ -431,7 +431,7 @@ function normalizeAmount(amount?: string | number): number | undefined {
 // ============================================================================
 
 // Cloud webhook URL - desktop calls this, cloud service sends to Telegram
-const TELEGRAM_CLOUD_URL = process.env.DCP_TELEGRAM_CLOUD_URL || 'http://127.0.0.1:8423';
+const TELEGRAM_CLOUD_URL = process.env.DCP_TELEGRAM_CLOUD_URL || 'https://telegram.dcp.1ly.store';
 
 /**
  * Categorize a request based on action and scope
@@ -464,7 +464,7 @@ function getApprovalBaseUrl(): string {
 }
 
 /**
- * Dispatch a Telegram notification via cloud service (Option B from PRD).
+ * Dispatch a Telegram notification via cloud service (Option B from the protocol spec).
  * Desktop calls cloud webhook, cloud service sends to user's Telegram.
  * Bot token is stored in cloud, not on each user's desktop.
  */
@@ -490,16 +490,16 @@ async function dispatchTelegramNotification(consent: {
       return;
     }
 
-    // Get vault identity for signing (PRD Sprint 8 Task 5)
+    // Get vault identity for signing (protocol spec)
     const identity = await ensureRelayIdentity();
     const vaultId = identity.vaultId;
     console.log('[TG] vault_id:', vaultId);
 
-    // Generate unique nonce for replay protection (PRD Sprint 8 Task 5)
+    // Generate unique nonce for replay protection (protocol spec)
     const nonce = crypto.randomBytes(16).toString('base64');
 
     // Build webhook payload (cloud service will look up chat_id from vault_id)
-    // PRD Sprint 8 Task 5: Every desktop-to-Telegram request must include:
+    // protocol spec: Every desktop-to-Telegram request must include:
     // vault ID, timestamp, nonce, signature
     const category = categorizeTelegramRequest(consent.action, consent.scope);
 
@@ -540,7 +540,7 @@ async function dispatchTelegramNotification(consent: {
       nonce,
     };
 
-    // Sign the payload with vault's Ed25519 key (PRD Sprint 8 Task 5)
+    // Sign the payload with vault's Ed25519 key (protocol spec)
     const message = Buffer.from(canonicalJson(payloadWithoutSig), 'utf8');
     const signatureBytes = nacl.sign.detached(
       new Uint8Array(message),
@@ -1557,7 +1557,7 @@ async function buildServer(): Promise<FastifyInstance> {
       custom_name?: string;
     };
   }>('/v1/vault/setup-local-mcp', async (request) => {
-    // Owner token required for local MCP setup (PRD 3.1)
+    // Owner token required for local MCP setup (protocol spec 3.1)
     requireOwnerToken(request);
 
     const body = request.body || {};
@@ -2049,7 +2049,7 @@ async function buildServer(): Promise<FastifyInstance> {
   });
 
   // ============================================================================
-  // Signed Pairing Grants (PRD Section 7.1)
+  // Signed Pairing Grants (protocol spec section 7.1)
   // ============================================================================
 
   server.post<{
@@ -2243,7 +2243,7 @@ async function buildServer(): Promise<FastifyInstance> {
     const sessionToken = crypto.randomBytes(32).toString('base64url');
     const sessionTokenHash = crypto.createHash('sha256').update(sessionToken).digest('hex');
 
-    // Mark agent as paired with their public key (PRD Section 7.3)
+    // Mark agent as paired with their public key (protocol spec section 7.3)
     storage.markAgentPaired(verified.agent_id, sessionTokenHash, body.service_public_key);
 
     // Log audit event
@@ -3116,7 +3116,7 @@ async function buildServer(): Promise<FastifyInstance> {
   server.post<{ Params: { id: string }; Body: { session?: boolean; mode?: string } }>(
     '/consent/:id/approve',
     async (request) => {
-      // Owner token required for consent approval (PRD 3.1)
+      // Owner token required for consent approval (protocol spec 3.1)
       requireOwnerToken(request);
 
       const { id } = request.params;
@@ -3178,7 +3178,7 @@ async function buildServer(): Promise<FastifyInstance> {
   // ============================================================================
 
   server.post<{ Params: { id: string } }>('/consent/:id/deny', async (request) => {
-    // Owner token required for consent denial (PRD 3.1)
+    // Owner token required for consent denial (protocol spec 3.1)
     requireOwnerToken(request);
 
     const { id } = request.params;
@@ -4349,18 +4349,18 @@ async function buildServer(): Promise<FastifyInstance> {
   });
 
   // ============================================================================
-  // V1 API: Telegram Notifications (PRD Section 15)
+  // V1 API: Telegram Notifications (protocol spec section 15)
   // ============================================================================
 
   /**
    * Start Telegram pairing - call cloud service to generate code
    * User then sends this code to the cloud bot to complete pairing
-   * PRD Sprint 8 Task 4: Desktop creates signed pairing start request
+   * protocol spec: Desktop creates signed pairing start request
    */
   server.post('/v1/telegram/pair/start', async (request, reply) => {
     requireOwnerToken(request);
 
-    // Get vault identity for signing (PRD Sprint 8 Task 5)
+    // Get vault identity for signing (protocol spec)
     const identity = await ensureRelayIdentity();
     const vaultId = identity.vaultId;
 
@@ -4382,7 +4382,7 @@ async function buildServer(): Promise<FastifyInstance> {
         // Continue anyway - might already be registered
       }
 
-      // Build signed pairing request (PRD Sprint 8 Task 5)
+      // Build signed pairing request (protocol spec)
       const timestamp = new Date().toISOString();
       const nonce = crypto.randomBytes(16).toString('base64');
       const payloadWithoutSig = { vault_id: vaultId, timestamp, nonce };
@@ -4567,7 +4567,7 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     // Send test via cloud service (Option B architecture)
-    // PRD Sprint 8 Task 5: Include vault_id, timestamp, nonce, signature
+    // protocol spec: Include vault_id, timestamp, nonce, signature
     const webhookUrl = `${TELEGRAM_CLOUD_URL}/webhook/consent`;
     const identity = await ensureRelayIdentity();
     const vaultId = identity.vaultId;
@@ -4683,7 +4683,7 @@ function getChainForCurrency(currency: string, chain?: Chain): Chain {
 }
 
 // ============================================================================
-// Service Signature Verification (PRD Section B2)
+// Service Signature Verification (protocol spec section B2)
 // ============================================================================
 
 /**
@@ -4796,7 +4796,7 @@ function verifyServiceAuthorization(
   let service = storage.getTrustedService(serviceId);
   let isAgent = false;
 
-  // If not found in trusted_services, check agent_connections (PRD Section 7 flow)
+  // If not found in trusted_services, check agent_connections (protocol spec section 7 flow)
   // Accept both 'agent_' (local) and 'vps_' (remote VPS) prefixes
   if (!service && (serviceId.startsWith('agent_') || serviceId.startsWith('vps_'))) {
     const agent = storage.getAgentConnection(serviceId);
@@ -5320,7 +5320,7 @@ async function handleRelayRequest(
   // Get the scope for this method to check authorization
   const requestedScope = getScopeForRelayMethod(method, parsed.params || {});
 
-  // Verify service authorization (PRD Section B2)
+  // Verify service authorization (protocol spec section B2)
   // Relay requests must include service_id + signature
   if (!parsed.service_id) {
     storage.logAudit('DENY', 'denied', {

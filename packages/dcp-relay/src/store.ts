@@ -7,7 +7,7 @@
  * - Vault connection tracking
  * - Message delivery tracking
  *
- * From PRD Section 4.1:
+ * From protocol spec section 4.1:
  * - Message TTL: 5 minutes
  * - Idempotency by request_id
  */
@@ -394,7 +394,7 @@ export class ConnectionStore {
 }
 
 // ============================================================================
-// Rate Limiter (PRD Section C3: 60 req/min per vault)
+// Rate Limiter (protocol spec section C3: 60 req/min per vault)
 // ============================================================================
 
 interface RateLimitEntry {

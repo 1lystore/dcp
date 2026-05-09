@@ -2,7 +2,7 @@
  * @dcprotocol/vault
  *
  * DCP Vault - Local vault runtime with CLI and server.
- * Consolidates the former dcp-server and dcp-cli packages.
+ * Provides the local vault server and CLI binaries.
  */
 
 // Server exports

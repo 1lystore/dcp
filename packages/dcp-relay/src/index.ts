@@ -9,7 +9,7 @@
  *   npx @dcprotocol/relay          # Start relay server on default port
  *   npx @dcprotocol/relay --port 8422 --debug
  *
- * From PRD Phase 1:
+ * From protocol spec:
  * - WebSocket primary, HTTP long-poll fallback
  * - Message TTL: 5 minutes
  * - Heartbeat: 30 seconds

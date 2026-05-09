@@ -7,23 +7,23 @@ info() { printf "\n==> %s\n" "$1"; }
 
 info "1) Install deps (root)"
 cd "$ROOT_DIR"
-npm install
+pnpm install
 
 info "2) Build packages"
-npm run build
+pnpm run build
 
 info "3) Initialize vault"
-./packages/dcp-cli/dist/cli.js init || true
+./packages/dcp-vault/dist/cli/index.js init || true
 
 info "4) Create Solana wallet"
-./packages/dcp-cli/dist/cli.js create-wallet --chain solana || true
+./packages/dcp-vault/dist/cli/index.js create-wallet --chain solana || true
 
 info "5) Add sample data"
-./packages/dcp-cli/dist/cli.js add address.home || true
-./packages/dcp-cli/dist/cli.js add preferences.sizes || true
+./packages/dcp-vault/dist/cli/index.js add address.home || true
+./packages/dcp-vault/dist/cli/index.js add preferences.sizes || true
 
 info "6) Start REST server (localhost:8420)"
-node ./packages/dcp-server/dist/index.js &
+node ./packages/dcp-vault/dist/server/index.js &
 SERVER_PID=$!
 
 sleep 2

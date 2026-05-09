@@ -328,7 +328,7 @@ describe('ConnectionStore', () => {
 });
 
 // ============================================================================
-// RateLimiter Tests (PRD Section C3)
+// RateLimiter Tests (protocol spec section C3)
 // ============================================================================
 
 describe('RateLimiter', () => {

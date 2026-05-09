@@ -7,7 +7,7 @@
  * Prerequisites:
  * 1. Initialize vault: `dcp init`
  * 2. Create Solana wallet: `dcp create-wallet --chain solana`
- * 3. Start vault server: `npx @dcprotocol/server` (or run from packages/dcp-server)
+ * 3. Start vault server: `npx dcp-vault` (or run from packages/dcp-vault)
  * 4. Unlock vault via CLI before making requests
  *
  * Flow:
@@ -152,7 +152,7 @@ async function main() {
     }
   } catch (error) {
     console.error('\n   ERROR: Cannot connect to vault server.');
-    console.error('   Make sure the server is running: npx @dcprotocol/server');
+    console.error('   Make sure the server is running: npx dcp-vault');
     process.exit(1);
   }
 

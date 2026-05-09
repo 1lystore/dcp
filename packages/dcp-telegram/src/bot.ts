@@ -1,5 +1,5 @@
 /**
- * Telegram Bot for DCP Vault (Option B from PRD Section 15)
+ * Telegram Bot for DCP Vault (Option B from protocol spec section 15)
  *
  * Cloud bot that:
  * - Handles pairing codes from users
@@ -10,7 +10,6 @@
  * ONE shared bot for ALL users.
  */
 
-import TelegramBot from 'node-telegram-bot-api';
 import type { TelegramConsentPayload } from '@dcprotocol/core';
 import type { TelegramBotConfig, NotificationResult } from './types.js';
 import { MUTE_DURATIONS, BOT_COMMANDS } from './types.js';
@@ -34,26 +33,116 @@ import {
 } from './notification.js';
 import type { ApprovalAction } from './types.js';
 
+type TelegramParseMode = 'MarkdownV2' | 'HTML';
+
+interface TelegramMessage {
+  message_id: number;
+  chat: {
+    id: number;
+  };
+  text?: string;
+}
+
+interface TelegramCallbackQuery {
+  id: string;
+  data?: string;
+  message?: TelegramMessage;
+}
+
+interface TelegramUpdate {
+  update_id: number;
+  message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
+}
+
+interface SendMessageOptions {
+  parse_mode?: TelegramParseMode;
+  disable_web_page_preview?: boolean;
+  reply_markup?: unknown;
+}
+
+class TelegramApiClient {
+  private baseUrl: string;
+
+  constructor(botToken: string) {
+    this.baseUrl = `https://api.telegram.org/bot${botToken}`;
+  }
+
+  async setMyCommands(commands: Array<{ command: string; description: string }>): Promise<void> {
+    await this.request('setMyCommands', { commands });
+  }
+
+  async sendMessage(
+    chatId: number,
+    text: string,
+    options: SendMessageOptions = {}
+  ): Promise<TelegramMessage> {
+    return this.request<TelegramMessage>('sendMessage', {
+      chat_id: chatId,
+      text,
+      ...options,
+    });
+  }
+
+  async answerCallbackQuery(callbackQueryId: string, options: { text?: string } = {}): Promise<void> {
+    await this.request('answerCallbackQuery', {
+      callback_query_id: callbackQueryId,
+      ...options,
+    });
+  }
+
+  async editMessageReplyMarkup(
+    replyMarkup: unknown,
+    options: { chat_id: number; message_id: number }
+  ): Promise<void> {
+    await this.request('editMessageReplyMarkup', {
+      ...options,
+      reply_markup: replyMarkup,
+    });
+  }
+
+  async getUpdates(offset: number, timeout = 30): Promise<TelegramUpdate[]> {
+    return this.request<TelegramUpdate[]>('getUpdates', {
+      offset,
+      timeout,
+      allowed_updates: ['message', 'callback_query'],
+    });
+  }
+
+  private async request<T = unknown>(method: string, body: Record<string, unknown>): Promise<T> {
+    const response = await fetch(`${this.baseUrl}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    const payload = await response.json() as { ok?: boolean; result?: T; description?: string };
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.description || `Telegram API ${method} failed`);
+    }
+
+    return payload.result as T;
+  }
+}
+
 /**
  * DCP Telegram Bot (Cloud Service)
  */
 export class DcpTelegramBot {
-  private bot: TelegramBot;
+  private bot: TelegramApiClient;
   private store: TelegramStore;
   private config: TelegramBotConfig;
   private isRunning = false;
+  private pollAbort: AbortController | null = null;
+  private pollOffset = 0;
 
   constructor(config: TelegramBotConfig, store: TelegramStore) {
     this.config = config;
     this.store = store;
 
-    // Initialize bot with polling
-    this.bot = new TelegramBot(config.botToken, {
-      polling: !config.webhookUrl,
-    });
+    this.bot = new TelegramApiClient(config.botToken);
 
     this.setupCommands();
-    this.setupHandlers();
   }
 
   /**
@@ -74,128 +163,140 @@ export class DcpTelegramBot {
     }
   }
 
-  /**
-   * Set up message handlers
-   */
-  private setupHandlers(): void {
-    // Handle /start command
-    this.bot.onText(/\/start/, async (msg) => {
-      await this.handleStart(msg.chat.id);
-    });
+  private async handleUpdate(update: TelegramUpdate): Promise<void> {
+    if (update.message?.text) {
+      await this.handleTextMessage(update.message);
+    }
 
-    // Handle /pair command with code
-    this.bot.onText(/\/pair\s+(\d{6})/, async (msg, match) => {
-      const code = match?.[1];
-      if (code) {
-        await this.handlePair(msg.chat.id, code);
-      }
-    });
+    if (update.callback_query) {
+      await this.handleCallbackQuery(update.callback_query);
+    }
+  }
 
-    // Handle /pair without code
-    this.bot.onText(/\/pair$/, async (msg) => {
+  private async handleTextMessage(message: TelegramMessage): Promise<void> {
+    const text = message.text?.trim() || '';
+    const chatId = message.chat.id;
+
+    const startPairMatch = text.match(/^\/start\s+pair_(\d{6})$/);
+    if (startPairMatch) {
+      await this.handlePair(chatId, startPairMatch[1]);
+      return;
+    }
+
+    if (/^\/start\b/.test(text)) {
+      await this.handleStart(chatId);
+      return;
+    }
+
+    const pairMatch = text.match(/^\/pair\s+(\d{6})$/);
+    if (pairMatch) {
+      await this.handlePair(chatId, pairMatch[1]);
+      return;
+    }
+
+    if (/^\/pair$/.test(text)) {
       await this.sendMessage(
-        msg.chat.id,
+        chatId,
         '❓ Please provide your 6\\-digit pairing code:\n\n`/pair 123456`',
         'MarkdownV2'
       );
-    });
+      return;
+    }
 
-    // Handle /status command
-    this.bot.onText(/\/status/, async (msg) => {
-      await this.handleStatus(msg.chat.id);
-    });
+    if (/^\/status\b/.test(text)) {
+      await this.handleStatus(chatId);
+      return;
+    }
 
-    // Handle /approve command
-    this.bot.onText(/\/approve\s+(\S+)/, async (msg, match) => {
-      const consentId = match?.[1];
-      if (consentId) {
-        await this.handleRemoteApproval(msg.chat.id, consentId, 'approve');
-      }
-    });
+    const approveMatch = text.match(/^\/approve\s+(\S+)$/);
+    if (approveMatch) {
+      await this.handleRemoteApproval(chatId, approveMatch[1], 'approve');
+      return;
+    }
 
-    this.bot.onText(/\/approve$/, async (msg) => {
-      await this.sendMessage(
-        msg.chat.id,
-        '❓ Please provide the request ID:\n\n`/approve abc123`',
-        'MarkdownV2'
+    if (/^\/approve$/.test(text)) {
+      await this.sendMessage(chatId, '❓ Please provide the request ID:\n\n`/approve abc123`', 'MarkdownV2');
+      return;
+    }
+
+    const denyMatch = text.match(/^\/deny\s+(\S+)$/);
+    if (denyMatch) {
+      await this.handleRemoteApproval(chatId, denyMatch[1], 'deny');
+      return;
+    }
+
+    if (/^\/deny$/.test(text)) {
+      await this.sendMessage(chatId, '❓ Please provide the request ID:\n\n`/deny abc123`', 'MarkdownV2');
+      return;
+    }
+
+    const muteMatch = text.match(/^\/mute(?:\s+(\S+))?/);
+    if (muteMatch) {
+      await this.handleMute(chatId, muteMatch[1] || '1h');
+      return;
+    }
+
+    if (/^\/unmute\b/.test(text)) {
+      await this.handleUnmute(chatId);
+      return;
+    }
+
+    if (/^\/unlink\b/.test(text)) {
+      await this.handleUnlink(chatId);
+      return;
+    }
+
+    if (/^\/help\b/.test(text)) {
+      await this.handleHelp(chatId);
+    }
+  }
+
+  private async handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> {
+    if (!query.data || !query.message) return;
+
+    const chatId = query.message.chat.id;
+    const [action, consentId] = query.data.split(':');
+
+    if (action !== 'approve' && action !== 'deny') {
+      return;
+    }
+
+    try {
+      await this.bot.answerCallbackQuery(query.id, {
+        text: action === 'approve' ? '✅ Processing approval...' : '❌ Processing denial...',
+      });
+
+      await this.bot.editMessageReplyMarkup(
+        { inline_keyboard: [] },
+        { chat_id: chatId, message_id: query.message.message_id }
       );
-    });
-
-    // Handle /deny command
-    this.bot.onText(/\/deny\s+(\S+)/, async (msg, match) => {
-      const consentId = match?.[1];
-      if (consentId) {
-        await this.handleRemoteApproval(msg.chat.id, consentId, 'deny');
-      }
-    });
-
-    this.bot.onText(/\/deny$/, async (msg) => {
-      await this.sendMessage(
-        msg.chat.id,
-        '❓ Please provide the request ID:\n\n`/deny abc123`',
-        'MarkdownV2'
-      );
-    });
-
-    // Handle /mute command
-    this.bot.onText(/\/mute(?:\s+(\S+))?/, async (msg, match) => {
-      const duration = match?.[1] || '1h';
-      await this.handleMute(msg.chat.id, duration);
-    });
-
-    // Handle /unmute command
-    this.bot.onText(/\/unmute/, async (msg) => {
-      await this.handleUnmute(msg.chat.id);
-    });
-
-    // Handle /unlink command
-    this.bot.onText(/\/unlink/, async (msg) => {
-      await this.handleUnlink(msg.chat.id);
-    });
-
-    // Handle /help command
-    this.bot.onText(/\/help/, async (msg) => {
-      await this.handleHelp(msg.chat.id);
-    });
-
-    // Handle inline button callbacks (approve/deny buttons)
-    this.bot.on('callback_query', async (query) => {
-      if (!query.data || !query.message) return;
-
-      const chatId = query.message.chat.id;
-      const [action, consentId] = query.data.split(':');
-
-      if (action === 'approve' || action === 'deny') {
-        // CRITICAL: Answer callback IMMEDIATELY to prevent Telegram timeout
-        // Telegram has a ~30 second timeout for callback queries
-        try {
-          await this.bot.answerCallbackQuery(query.id, {
-            text: action === 'approve' ? '✅ Processing approval...' : '❌ Processing denial...',
-          });
-
-          // Remove buttons to prevent duplicate clicks
-          await this.bot.editMessageReplyMarkup(
-            { inline_keyboard: [] },
-            { chat_id: chatId, message_id: query.message.message_id }
-          );
-        } catch (err) {
-          if (this.config.debug) {
-            console.error('Failed to acknowledge callback:', err);
-          }
-          // Continue processing even if callback ack fails (user may have already clicked)
-        }
-
-        // Now process the approval (this sends a message)
-        await this.handleRemoteApproval(chatId, consentId, action as ApprovalAction);
-      }
-    });
-
-    // Handle polling errors
-    this.bot.on('polling_error', (err) => {
+    } catch (err) {
       if (this.config.debug) {
-        console.error('Telegram polling error:', err);
+        console.error('Failed to acknowledge callback:', err);
       }
-    });
+    }
+
+    await this.handleRemoteApproval(chatId, consentId, action);
+  }
+
+  private async pollUpdates(signal: AbortSignal): Promise<void> {
+    while (!signal.aborted && this.isRunning) {
+      try {
+        const updates = await this.bot.getUpdates(this.pollOffset, 30);
+        for (const update of updates) {
+          this.pollOffset = Math.max(this.pollOffset, update.update_id + 1);
+          await this.handleUpdate(update);
+        }
+      } catch (err) {
+        if (signal.aborted || !this.isRunning) {
+          return;
+        }
+        if (this.config.debug) {
+          console.error('Telegram polling error:', err);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
   }
 
   /**
@@ -328,7 +429,7 @@ export class DcpTelegramBot {
       return;
     }
 
-    // PRD Sprint 8 Task 9: Include pairing_id for command binding
+    // protocol spec: Include pairing_id for command binding
     this.store.approvals.createApprovalCommand(
       pairing.vault_id,
       chatIdString,
@@ -562,6 +663,10 @@ export class DcpTelegramBot {
   async start(): Promise<void> {
     if (this.isRunning) return;
     this.isRunning = true;
+    if (!this.config.webhookUrl) {
+      this.pollAbort = new AbortController();
+      void this.pollUpdates(this.pollAbort.signal);
+    }
     console.log('[BOT] DCP Telegram Bot started');
   }
 
@@ -571,7 +676,8 @@ export class DcpTelegramBot {
   async stop(): Promise<void> {
     if (!this.isRunning) return;
     this.isRunning = false;
-    await this.bot.stopPolling();
+    this.pollAbort?.abort();
+    this.pollAbort = null;
     console.log('[BOT] DCP Telegram Bot stopped');
   }
 }

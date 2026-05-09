@@ -1,87 +1,43 @@
 # DCP Local Agent Test
 
-Test connecting a local agent to DCP Vault.
+A small local test agent for checking the DCP agent proxy.
 
-## Prerequisites
+## Setup
 
-- DCP Desktop running and unlocked
-- Python 3.9+ with `httpx` installed
+Install the DCP packages:
 
-## Steps
+```bash
+npm install -g @dcprotocol/vault @dcprotocol/agent
+```
 
-### 1. Install httpx
+Install the Python dependency:
 
 ```bash
 pip install httpx
 ```
 
-### 2. Generate Pairing Token in Desktop
+## Pair An Agent
 
-Open DCP Desktop > Connect page:
-1. Enter agent name: `test-local-agent`
-2. Select role preset (e.g., "Trading Bot" or "Custom")
-3. Click "Generate Pairing Token"
-4. Copy the token (starts with `dcp_pair_v1_...`)
-
-### 3. Pair dcp-agent
+Open DCP Desktop and create a pairing token for `test-local-agent`, then run:
 
 ```bash
-cd /Users/iftakharrahmany/myproducts/dcp/packages/dcp-agent
-node dist/index.js pair 'dcp_pair_v1_...'
+dcp-agent pair 'dcp_pair_v1_...'
 ```
 
-### 4. Run dcp-agent proxy
+Start the local agent proxy:
 
 ```bash
-cd /Users/iftakharrahmany/myproducts/dcp/packages/dcp-agent
-node dist/index.js run
+dcp-agent run
 ```
 
-Keep this terminal open.
+Keep that terminal open.
 
-### 5. Run test agent
+## Run The Test
 
-In a new terminal:
+From this folder:
 
 ```bash
-cd /Users/iftakharrahmany/myproducts/dcp/test-local-agent
 python test_agent.py
 ```
 
-## Expected Output
-
-```
-============================================================
-DCP Local Agent Test
-============================================================
-
-Connecting to proxy at: http://127.0.0.1:8420
-
-[1] Health Check
-----------------------------------------
-  Status: ok
-  Agent ID: agent_xxx
-  Agent Name: test-local-agent
-  Vault ID: vault_xxx
-  Connected: True
-
-[2] Capabilities
-----------------------------------------
-  Name: dcp-agent
-  Version: 0.2.0
-  Tier: free
-  Scopes: ['sign:solana', 'budget:check']
-
-[3] Get Wallet Address (Solana)
-----------------------------------------
-  Chain: solana
-  Address: 7xKx...
-
-...
-```
-
-## Cleanup
-
-```bash
-rm -rf /Users/iftakharrahmany/myproducts/dcp/test-local-agent
-```
+The test checks health, capabilities, Solana address access, budget checks, and a sample vault read request.

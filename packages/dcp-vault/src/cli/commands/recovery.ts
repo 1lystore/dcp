@@ -1,7 +1,7 @@
 /**
  * dcp recovery
  *
- * Recovery commands for the vault (PRD C10).
+ * Recovery commands for the vault (protocol spec C10).
  *
  * Usage:
  *   dcp recovery show-phrase        # Explain recovery phrase is only shown at init

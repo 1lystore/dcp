@@ -7,18 +7,18 @@
  *
  * Parked packages (must be private or not publishable):
  * - @dcprotocol/gateway
- * - @dcprotocol/client
  * - @dcprotocol/mcp
  * - @dcprotocol/proxy
  * - @dcprotocol/server (wrapper only)
  * - @dcprotocol/cli (wrapper only)
- * - @dcprotocol/relay-client (internal only)
  *
  * Publishable packages in Phase 1:
  * - @dcprotocol/core
+ * - @dcprotocol/client
  * - @dcprotocol/vault (when created)
  * - @dcprotocol/agent
  * - @dcprotocol/relay
+ * - @dcprotocol/relay-client
  */
 
 import { readFileSync, readdirSync, existsSync } from 'fs';
@@ -32,20 +32,20 @@ const packagesDir = join(rootDir, 'packages');
 // Packages that must NOT be published in Phase 1
 const PARKED_PACKAGES = [
   '@dcprotocol/gateway',
-  '@dcprotocol/client',
   '@dcprotocol/mcp',
   '@dcprotocol/proxy',
   '@dcprotocol/server',
   '@dcprotocol/cli',
-  '@dcprotocol/relay-client',
 ];
 
 // Packages that CAN be published in Phase 1
 const PUBLISHABLE_PACKAGES = [
   '@dcprotocol/core',
+  '@dcprotocol/client',
   '@dcprotocol/vault',
   '@dcprotocol/agent',
   '@dcprotocol/relay',
+  '@dcprotocol/relay-client',
   '@dcprotocol/telegram',
 ];
 
@@ -79,6 +79,14 @@ function isPublicPackage(pkg) {
   return true;
 }
 
+function getDependencyEntries(pkg) {
+  return [
+    ...Object.entries(pkg.dependencies ?? {}),
+    ...Object.entries(pkg.optionalDependencies ?? {}),
+    ...Object.entries(pkg.peerDependencies ?? {}),
+  ];
+}
+
 function main() {
   console.log('DCP Publish Guard - Phase 1\n');
   console.log('Checking package configurations...\n');
@@ -88,6 +96,7 @@ function main() {
   const publishable = [];
   const parked = [];
   const privatePackages = [];
+  const packageNames = new Map();
 
   const packageDirs = readdirSync(packagesDir, { withFileTypes: true })
     .filter((d) => d.isDirectory())
@@ -99,6 +108,18 @@ function main() {
 
     if (!pkg) {
       warnings.push(`${dir}: No package.json found`);
+      continue;
+    }
+
+    const name = pkg.name || dir;
+    packageNames.set(name, { dir, pkg });
+  }
+
+  for (const dir of packageDirs) {
+    const fullPath = join(packagesDir, dir);
+    const pkg = readPackageJson(fullPath);
+
+    if (!pkg) {
       continue;
     }
 
@@ -140,6 +161,29 @@ function main() {
       warnings.push(`${name}: Unknown package - not in any category`);
       if (isPublic) {
         warnings.push(`  -> Currently configured as PUBLIC`);
+      }
+    }
+
+    if (isPublic) {
+      for (const [depName, specifier] of getDependencyEntries(pkg)) {
+        if (typeof specifier !== 'string') {
+          continue;
+        }
+
+        if (specifier.startsWith('file:') || specifier.startsWith('link:')) {
+          errors.push(`${name}: ${depName} uses local dependency "${specifier}"`);
+        }
+
+        if (specifier.startsWith('workspace:')) {
+          const dep = packageNames.get(depName);
+          if (!dep) {
+            errors.push(`${name}: ${depName} uses workspace dependency but no package exists`);
+          } else if (!PUBLISHABLE_PACKAGES.includes(depName)) {
+            errors.push(
+              `${name}: ${depName} uses workspace dependency but is not publishable`
+            );
+          }
+        }
       }
     }
   }

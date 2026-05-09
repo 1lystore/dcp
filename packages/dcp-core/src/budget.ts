@@ -1,7 +1,7 @@
 /**
  * Budget & Policy Engine for DCP Vault
  *
- * Implements (from PRD Section 3.1.7):
+ * Implements (from protocol spec section 3.1.7):
  * - Per-transaction limits (default: 5 SOL, 0.5 ETH, 200 USDC)
  * - Daily limits (default: 20 SOL, 1 ETH, 500 USDC)
  * - Approval thresholds (default: 2 SOL, 0.1 ETH, 100 USDC)
@@ -28,7 +28,7 @@ import {
 import { VaultStorage } from './storage.js';
 
 // ============================================================================
-// Constants (from PRD Section 17 - Configuration Reference)
+// Constants (from protocol spec section 17 - Configuration Reference)
 // ============================================================================
 
 /** Default vault directory */
@@ -40,7 +40,7 @@ const DEFAULT_VAULT_DIR =
 /** Default configuration file name */
 const CONFIG_FILE = 'config.json';
 
-/** Default budget configuration (from PRD Section 17) */
+/** Default budget configuration (from protocol spec section 17) */
 export const DEFAULT_BUDGET_CONFIG: BudgetConfig = {
   daily_budget: {
     SOL: 20,
@@ -65,14 +65,14 @@ export const DEFAULT_BUDGET_CONFIG: BudgetConfig = {
   },
 };
 
-/** Rate limit: executions per minute (from PRD B5) */
+/** Rate limit: executions per minute (from protocol spec B5) */
 export const RATE_LIMIT_PER_MINUTE = 5;
 
 /** Rate limit window in milliseconds */
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
 // ============================================================================
-// Full Vault Configuration (from PRD Section 17)
+// Full Vault Configuration (from protocol spec section 17)
 // ============================================================================
 
 /** Desktop owner registration info */
@@ -275,7 +275,7 @@ export class BudgetEngine {
   }
 
   // ==========================================================================
-  // Budget Check (from PRD Section 3.1.7)
+  // Budget Check (from protocol spec section 3.1.7)
   // ==========================================================================
 
   /**
@@ -387,7 +387,7 @@ export class BudgetEngine {
   }
 
   // ==========================================================================
-  // Rate Limiting (from PRD B5: 5 executions/minute)
+  // Rate Limiting (from protocol spec B5: 5 executions/minute)
   // ==========================================================================
 
   /**

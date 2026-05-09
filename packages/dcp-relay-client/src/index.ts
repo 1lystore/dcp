@@ -3,7 +3,7 @@
  *
  * Provides encrypted connection between local vaults and DCP relay.
  *
- * From PRD Phase 1:
+ * From protocol spec:
  * - RFC 9180 HPKE (X25519 + ChaCha20-Poly1305)
  * - AAD binding to envelope metadata
  * - Ed25519 signed registration

@@ -1,7 +1,7 @@
 /**
  * dcp agents
  *
- * List active agent sessions (PRD C6).
+ * List active agent sessions (protocol spec C6).
  *
  * Usage:
  *   dcp agents           # List all active sessions

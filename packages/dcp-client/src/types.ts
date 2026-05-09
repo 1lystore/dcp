@@ -2,7 +2,7 @@
  * DCP Client SDK Types
  *
  * Type definitions for the universal agent SDK.
- * See PRD Section A3 for API specification.
+ * See protocol spec section A3 for API specification.
  */
 
 // ============================================================================
@@ -13,7 +13,7 @@ export type Chain = 'solana' | 'base' | 'ethereum';
 export type Network = 'solana' | 'base';
 
 // ============================================================================
-// Client Configuration (PRD A3)
+// Client Configuration (protocol spec A3)
 // ============================================================================
 
 export type DcpMode = 'auto' | 'local' | 'relay';
@@ -72,7 +72,7 @@ export interface ResolvedConfig {
 }
 
 // ============================================================================
-// Method Input Types (PRD A3)
+// Method Input Types (protocol spec A3)
 // ============================================================================
 
 export interface SignTxInput {
@@ -162,7 +162,7 @@ export interface PairServiceInput {
 }
 
 // ============================================================================
-// Method Output Types (PRD A3)
+// Method Output Types (protocol spec A3)
 // ============================================================================
 
 export interface GetAddressResult {
@@ -322,7 +322,7 @@ export interface Transport {
 }
 
 // ============================================================================
-// Session Types (PRD A5)
+// Session Types (protocol spec A5)
 // ============================================================================
 
 export interface SessionInfo {
@@ -333,7 +333,7 @@ export interface SessionInfo {
 }
 
 // ============================================================================
-// Relay Envelope Types (PRD A4.2)
+// Relay Envelope Types (protocol spec A4.2)
 // ============================================================================
 
 export interface RelayEnvelope {

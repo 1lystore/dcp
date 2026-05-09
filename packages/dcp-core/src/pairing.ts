@@ -1,5 +1,5 @@
 /**
- * Signed Pairing Grant (PRD Section 7.1)
+ * Signed Pairing Grant (protocol spec section 7.1)
  *
  * Self-describing, signed tokens for agent pairing.
  * Format: dcp_pair_v1_<base64url(JSON)>

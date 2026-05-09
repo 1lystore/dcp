@@ -17,6 +17,8 @@ interface LocalMcpStatus {
 
 type Tab = 'local' | 'remote' | 'telegram';
 
+const TELEGRAM_BOT_USERNAME = 'dcpagentBot';
+
 interface TelegramConfig {
   configured: boolean;
   enabled?: boolean;
@@ -188,7 +190,7 @@ export default function Connect() {
     void loadLocalMcpStatus();
   }, [loadAgentConnections, loadRelayInfo, loadTelegramConfig, loadMcpStatus, loadLocalMcpStatus]);
 
-  // Removed auto-setup - user must explicitly click "Add Agent" button (per PRD Task 6.2)
+  // Removed auto-setup - user must explicitly click "Add Agent" button (per protocol spec Task 6.2)
 
   // Keep ref in sync with state
   useEffect(() => {
@@ -721,7 +723,7 @@ export default function Connect() {
                 textAlign: 'center',
               }}>
                 <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-                  Send this code to our Telegram bot:
+                  Pair with Telegram:
                 </div>
                 <div style={{
                   fontSize: '32px',
@@ -739,13 +741,13 @@ export default function Connect() {
               </div>
 
               <a
-                href={`https://t.me/dctesttffBot?start=pair_${telegramCode}`}
+                href={`https://t.me/${TELEGRAM_BOT_USERNAME}?start=pair_${telegramCode}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="btn btn-primary"
                 style={{ textAlign: 'center', textDecoration: 'none' }}
               >
-                Open Telegram → Send /pair {telegramCode}
+                Open Telegram
               </a>
 
               <div style={{
@@ -757,7 +759,7 @@ export default function Connect() {
                 color: 'var(--warning)',
                 textAlign: 'center',
               }}>
-                ⏳ Waiting for you to send the code in Telegram...
+                Waiting for Telegram pairing. If Telegram does not complete it automatically, send /pair {telegramCode}.
               </div>
 
               <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>

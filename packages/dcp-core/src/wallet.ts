@@ -116,7 +116,7 @@ function generateEvmKeypair(chain: Chain): WalletKeyData {
  * This is the ONLY way to persist a wallet. The private key is encrypted
  * with envelope encryption and the plaintext is zeroized immediately.
  *
- * Flow (from PRD):
+ * Flow (from the protocol spec):
  * 1. Encrypt private key: XChaCha20-Poly1305(key, DEK, random_24B_nonce)
  * 2. Wrap DEK with master key: XChaCha20-Poly1305(DEK, master_key, random_24B_nonce)
  * 3. Zeroize plaintext private key

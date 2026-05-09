@@ -18,7 +18,7 @@
 #       volumes:
 #         - dcp-config:/root/.dcp
 
-FROM node:20-alpine
+FROM node:22-alpine
 
 LABEL org.opencontainers.image.title="DCP Agent"
 LABEL org.opencontainers.image.description="Secure secrets provider for AI agents"

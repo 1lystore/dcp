@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test-local-agent.sh - Local Agent E2E Test
-# PRD Sprint 8 Task 1: Local Agent E2E Test
+# protocol spec: Local Agent E2E Test
 #
 # Tests the complete local agent flow:
 # 1. Start vault server
@@ -81,9 +81,9 @@ check_prerequisites() {
   fi
 
   # Check if packages are built
-  if [[ ! -f "${ROOT_DIR}/packages/dcp-server/dist/index.js" ]]; then
-    yellow "dcp-server not built, building..."
-    (cd "${ROOT_DIR}" && pnpm --filter @dcprotocol/server run build)
+  if [[ ! -f "${ROOT_DIR}/packages/dcp-vault/dist/server/index.js" ]]; then
+    yellow "dcp-vault server not built, building..."
+    (cd "${ROOT_DIR}" && pnpm --filter @dcprotocol/vault run build)
   fi
 
   if [[ ! -f "${ROOT_DIR}/packages/dcp-agent/dist/index.js" ]]; then
@@ -110,7 +110,7 @@ start_vault() {
   VAULT_PORT="${VAULT_PORT}" \
   DCP_VAULT_DIR="${VAULT_DIR}" \
   VAULT_DIR="${VAULT_DIR}" \
-  node "${ROOT_DIR}/packages/dcp-server/dist/index.js" >/tmp/dcp-e2e-vault.log 2>&1 &
+  node "${ROOT_DIR}/packages/dcp-vault/dist/server/index.js" >/tmp/dcp-e2e-vault.log 2>&1 &
   VAULT_PID=$!
   STARTED_VAULT=1
 
@@ -206,11 +206,11 @@ run_unit_tests() {
   echo ""
   echo "=== Running Unit Tests ==="
 
-  echo "Running dcp-server tests..."
-  if (cd "${ROOT_DIR}" && pnpm --filter @dcprotocol/server run test 2>&1 | tail -5); then
-    green "dcp-server tests OK"
+  echo "Running dcp-vault tests..."
+  if (cd "${ROOT_DIR}" && pnpm --filter @dcprotocol/vault run test 2>&1 | tail -5); then
+    green "dcp-vault tests OK"
   else
-    red "dcp-server tests failed"
+    red "dcp-vault tests failed"
     exit 1
   fi
 

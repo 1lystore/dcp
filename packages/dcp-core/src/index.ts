@@ -111,7 +111,7 @@ export {
   RELAY_URLS,
 } from './services.js';
 
-// Signed Pairing Grants (PRD Section 7.1)
+// Signed Pairing Grants (protocol spec section 7.1)
 export {
   createSignedPairingGrant,
   decodePairingGrant,

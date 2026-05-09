@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RELAY_PORT="${DCP_RELAY_PORT:-8421}"
+RELAY_PORT="${DCP_RELAY_PORT:-8422}"
 VAULT_PORT="${DCP_VAULT_PORT:-8420}"
 RELAY_URL="ws://127.0.0.1:${RELAY_PORT}"
 VAULT_URL="http://127.0.0.1:${VAULT_PORT}"
@@ -69,8 +69,8 @@ require_node() {
 }
 
 run_dcp() {
-  local cli="${ROOT_DIR}/packages/dcp-cli/dist/cli.js"
-  local src_dir="${ROOT_DIR}/packages/dcp-cli/src"
+  local cli="${ROOT_DIR}/packages/dcp-vault/dist/cli/index.js"
+  local src_dir="${ROOT_DIR}/packages/dcp-vault/src/cli"
 
   local get_mtime
   get_mtime() {
@@ -103,8 +103,8 @@ run_dcp() {
   fi
 
   if [[ "${needs_build}" -eq 1 ]]; then
-    echo "Building @dcprotocol/cli..."
-    npm -w packages/dcp-cli run build
+    echo "Building @dcprotocol/vault..."
+    npm -w packages/dcp-vault run build
   fi
 
   if [[ -f "${cli}" ]]; then
@@ -205,7 +205,7 @@ start_server() {
   fi
 
   echo "Starting vault server on ${VAULT_PORT}..."
-  DCP_RELAY_URL="${RELAY_URL}" VAULT_PORT="${VAULT_PORT}" DCP_VAULT_DIR="${VAULT_DIR}" VAULT_DIR="${VAULT_DIR}" npm -w packages/dcp-server run dev >/tmp/dcp-server.log 2>&1 &
+  DCP_RELAY_URL="${RELAY_URL}" VAULT_PORT="${VAULT_PORT}" DCP_VAULT_DIR="${VAULT_DIR}" VAULT_DIR="${VAULT_DIR}" node "${ROOT_DIR}/packages/dcp-vault/dist/server/index.js" >/tmp/dcp-vault-server.log 2>&1 &
   SERVER_PID=$!
   STARTED_SERVER=1
   wait_for_health "${VAULT_URL}" "vault" 30

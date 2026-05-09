@@ -16,7 +16,7 @@ import * as bip39 from 'bip39';
 import { EncryptedPayload, VaultError } from './types.js';
 
 // ============================================================================
-// Constants (from PRD Section 3.2.1)
+// Constants (from protocol spec section 3.2.1)
 // ============================================================================
 
 /** XChaCha20-Poly1305 key size: 256 bits */
@@ -71,13 +71,13 @@ export function generateSalt(): Buffer {
 }
 
 // ============================================================================
-// Argon2id Key Derivation (from PRD Section 3.2.1)
+// Argon2id Key Derivation (from protocol spec section 3.2.1)
 // ============================================================================
 
 /**
  * Derive a 256-bit key from passphrase using Argon2id
  *
- * Parameters (from PRD):
+ * Parameters (from the protocol spec):
  * - m = 64MB (memory cost)
  * - t = 3 (time cost / iterations)
  * - p = 4 (parallelism - handled internally by libsodium)
@@ -111,7 +111,7 @@ export function deriveKeyFromPassphrase(passphrase: string, salt: Buffer): Buffe
 }
 
 // ============================================================================
-// XChaCha20-Poly1305 Encryption (from PRD Section 5)
+// XChaCha20-Poly1305 Encryption (from protocol spec section 5)
 // ============================================================================
 
 /**
@@ -187,7 +187,7 @@ export function decrypt(
 }
 
 // ============================================================================
-// Envelope Encryption (from PRD Section 5)
+// Envelope Encryption (from protocol spec section 5)
 // ============================================================================
 
 /**
@@ -256,7 +256,7 @@ export function envelopeDecrypt(payload: EncryptedPayload, masterKey: Buffer): B
 }
 
 // ============================================================================
-// Memory Zeroization (from PRD Section 3.2.1)
+// Memory Zeroization (from protocol spec section 3.2.1)
 // ============================================================================
 
 /**
@@ -288,7 +288,7 @@ export function secureAlloc(size: number): Buffer {
 }
 
 // ============================================================================
-// BIP-39 Recovery Phrase (from PRD Section 3.2.1)
+// BIP-39 Recovery Phrase (from protocol spec section 3.2.1)
 // ============================================================================
 
 /**

@@ -2,7 +2,7 @@
  * dcp approve <consent_id>
  *
  * Approve or deny a pending consent request from an MCP agent.
- * This enables the non-TTY consent flow (PRD CN3, CN10).
+ * This enables the non-TTY consent flow (protocol spec CN3, CN10).
  *
  * Usage:
  *   dcp approve <consent_id>         # Approve once

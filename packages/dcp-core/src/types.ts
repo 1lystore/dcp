@@ -4,13 +4,13 @@
  */
 
 // ============================================================================
-// Sensitivity Levels (from PRD Section 6)
+// Sensitivity Levels (from protocol spec section 6)
 // ============================================================================
 
 export type SensitivityLevel = 'standard' | 'sensitive' | 'critical';
 
 // ============================================================================
-// Item Types (from PRD Schema Section 4.3)
+// Item Types (from protocol spec Schema Section 4.3)
 // ============================================================================
 
 export type ItemType =
@@ -74,7 +74,7 @@ export interface SignResult {
 }
 
 // ============================================================================
-// Personal Data Types (from PRD Appendix B)
+// Personal Data Types (from protocol spec Appendix B)
 // ============================================================================
 
 export interface AddressData {
@@ -139,7 +139,7 @@ export interface MasterKeyInfo {
 }
 
 // ============================================================================
-// Agent Session Types (from PRD Schema Section 4.3)
+// Agent Session Types (from protocol spec Schema Section 4.3)
 // ============================================================================
 
 export type ConsentMode = 'once' | 'session' | 'always' | 'profile';
@@ -163,7 +163,7 @@ export interface AgentSession {
 }
 
 // ============================================================================
-// Spend Event Types (from PRD Schema Section 4.3)
+// Spend Event Types (from protocol spec Schema Section 4.3)
 // ============================================================================
 
 export type SpendStatus = 'committed' | 'pending' | 'failed';
@@ -183,7 +183,7 @@ export interface SpendEvent {
 }
 
 // ============================================================================
-// Audit Event Types (from PRD Schema Section 4.3)
+// Audit Event Types (from protocol spec Schema Section 4.3)
 // ============================================================================
 
 export type AuditEventType = 'GRANT' | 'READ' | 'EXECUTE' | 'DENY' | 'REVOKE' | 'EXPIRE' | 'CONFIG';
@@ -219,7 +219,7 @@ export interface PendingConsent {
 }
 
 // ============================================================================
-// Budget Config Types (from PRD Section 17)
+// Budget Config Types (from protocol spec section 17)
 // ============================================================================
 
 export interface BudgetConfig {
@@ -237,7 +237,7 @@ export interface BudgetCheckResult {
 }
 
 // ============================================================================
-// Token Types (PASETO v4, from PRD Section 3.1.8)
+// Token Types (PASETO v4, from protocol spec section 3.1.8)
 // ============================================================================
 
 export interface TokenPayload {
@@ -257,7 +257,7 @@ export interface TokenPayload {
 }
 
 // ============================================================================
-// Trusted Service Types (PRD Section B2)
+// Trusted Service Types (protocol spec section B2)
 // ============================================================================
 
 /**
@@ -316,7 +316,7 @@ export interface AgentConnection {
   mode: AgentConnectionMode;
   status: AgentConnectionStatus;
   service_id?: string;
-  /** Agent's Ed25519 public key for relay authentication (PRD Section 7.3) */
+  /** Agent's Ed25519 public key for relay authentication (protocol spec section 7.3) */
   service_public_key?: string;
   permission_scopes: string[];
   budget: {
@@ -335,7 +335,7 @@ export interface AgentConnection {
 }
 
 /**
- * Signed Pairing Grant (PRD Section 7.1)
+ * Signed Pairing Grant (protocol spec section 7.1)
  *
  * Self-describing, signed token for agent pairing.
  * Encoded as: dcp_pair_v1_<base64url(JSON)>
@@ -482,7 +482,7 @@ export interface ProxyConfig {
 }
 
 // ============================================================================
-// Error Types (from PRD Section 7)
+// Error Types (from protocol spec section 7)
 // ============================================================================
 
 export type VaultErrorCode =
@@ -535,7 +535,7 @@ export class VaultError extends Error {
 }
 
 // ============================================================================
-// Telegram Notification Types (PRD Section 15)
+// Telegram Notification Types (protocol spec section 15)
 // ============================================================================
 
 /**
@@ -642,7 +642,7 @@ export interface TelegramNotificationLog {
   /** High-level request category (privacy-safe) */
   category?: TelegramRequestCategory;
 
-  /** Agent name (permitted per PRD) */
+  /** Agent name (permitted per the protocol spec) */
   agent_name?: string;
 
   /** When notification was sent */
@@ -697,7 +697,7 @@ export interface TelegramConsentPayload {
 }
 
 /**
- * Webhook payload sent from dcp-server to dcp-telegram service.
+ * Webhook payload sent from the vault server to the dcp-telegram service.
  * Signed with Ed25519 for verification.
  */
 export interface TelegramWebhookPayload {
