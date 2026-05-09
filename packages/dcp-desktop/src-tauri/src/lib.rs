@@ -899,6 +899,37 @@ pub fn run() {
         .manage(OwnerState {
             token: Mutex::new(None),
         })
+        // Hide to tray on close (Tauri 2 pattern from official docs)
+        // macOS fullscreen fix: exit fullscreen first, wait for animation, then hide
+        // See: https://github.com/tauri-apps/tauri/issues/10580
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                #[cfg(target_os = "macos")]
+                {
+                    match window.is_fullscreen() {
+                        Ok(true) => {
+                            let app_handle = window.app_handle().clone();
+                            let window_label = window.label().to_string();
+                            let _ = window.set_fullscreen(false);
+                            tauri::async_runtime::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+                                if let Some(win) = app_handle.get_webview_window(&window_label) {
+                                    let _ = win.hide();
+                                }
+                            });
+                        }
+                        _ => {
+                            let _ = window.hide();
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             if RESOURCE_DIR.get().is_none() {
                 if let Ok(dir) = app.path().resource_dir() {
@@ -929,7 +960,7 @@ pub fn run() {
 
             // Create tray menu
             let quit = MenuItem::with_id(app, "quit", "Quit & Stop Server", true, None::<&str>)?;
-            let open = MenuItem::with_id(app, "open", "Open DCP Vault", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open", "Open DCP", true, None::<&str>)?;
             let lock = MenuItem::with_id(app, "lock", "Lock Vault", true, None::<&str>)?;
 
             let menu = Menu::with_items(app, &[&open, &lock, &quit])?;
@@ -955,6 +986,7 @@ pub fn run() {
                     "open" => {
                         if let Some(window) = app.get_webview_window("main") {
                             window.show().ok();
+                            window.unminimize().ok();
                             window.set_focus().ok();
                         }
                     }
@@ -975,21 +1007,12 @@ pub fn run() {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
                             window.show().ok();
+                            window.unminimize().ok();
                             window.set_focus().ok();
                         }
                     }
                 })
                 .build(app)?;
-
-            if let Some(window) = app.get_webview_window("main") {
-                let window_clone = window.clone();
-                window.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = window_clone.hide();
-                    }
-                });
-            }
 
             // Start server on app launch
             let app_handle = app.handle().clone();
@@ -1023,6 +1046,14 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             match event {
+                RunEvent::Reopen { .. } => {
+                    // Handle dock icon click on macOS
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        window.show().ok();
+                        window.unminimize().ok();
+                        window.set_focus().ok();
+                    }
+                }
                 RunEvent::ExitRequested { api, code, .. } => {
                     // Prevent default exit to ensure cleanup completes
                     api.prevent_exit();

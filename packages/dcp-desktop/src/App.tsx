@@ -40,7 +40,7 @@ export default function App() {
     const amount = 'amount' in details && 'currency' in details
       ? `${details.amount} ${details.currency}`
       : undefined;
-    const title = 'DCP Vault: Approval Required';
+    const title = 'DCP: Approval Required';
     const body = `${consent.agent_name} wants to ${consent.action}${amount ? ` (${amount})` : ''}`;
 
     try {
@@ -325,7 +325,7 @@ export default function App() {
             <path d="M12 2L3 7V12C3 16.97 6.84 21.56 12 23C17.16 21.56 21 16.97 21 12V7L12 2Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
             <path d="M9 12L11 14L15 10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
-          <h1>DCP Vault</h1>
+          <h1>DCP</h1>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <span className="status-badge unlocked">

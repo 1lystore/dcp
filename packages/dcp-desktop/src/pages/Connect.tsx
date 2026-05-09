@@ -534,7 +534,7 @@ export default function Connect() {
                       padding: '12px',
                     }}
                   >
-                    ⚡ One-Click Install in {LOCAL_AGENT_TYPES.find(a => a.id === selectedAgentType)?.label}
+                    One-Click Install in {LOCAL_AGENT_TYPES.find(a => a.id === selectedAgentType)?.label}
                   </button>
                   <div style={{ fontSize: '11px', color: 'var(--text-muted)', textAlign: 'center', marginTop: '8px' }}>
                     or copy config manually below
@@ -587,7 +587,7 @@ export default function Connect() {
               borderRadius: '8px',
               fontSize: '13px',
             }}>
-              <strong>Important:</strong> Keep this DCP Vault app open and unlocked while using your AI assistant.
+              <strong>Important:</strong> Keep this DCP app open and unlocked while using your AI assistant.
             </div>
           </div>
         </div>

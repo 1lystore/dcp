@@ -40,7 +40,7 @@ export default function Unlock({ onUnlock, onSetupNew }: UnlockProps) {
             <rect x="8" y="10" width="8" height="7" rx="1" stroke="var(--accent)" strokeWidth="2"/>
             <path d="M10 10V8C10 6.89543 10.8954 6 12 6C13.1046 6 14 6.89543 14 8V10" stroke="var(--accent)" strokeWidth="2"/>
           </svg>
-          <h1 style={{ fontSize: '24px', fontWeight: 700, marginBottom: '8px' }}>DCP Vault</h1>
+          <h1 style={{ fontSize: '24px', fontWeight: 700, marginBottom: '8px' }}>DCP</h1>
           <p style={{ color: 'var(--text-secondary)' }}>Enter your passphrase to unlock</p>
         </div>
 

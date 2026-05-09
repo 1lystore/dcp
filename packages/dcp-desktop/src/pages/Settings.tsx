@@ -566,22 +566,9 @@ export default function Settings() {
         {showAdvanced && (
           <div style={{ padding: '0 16px 16px' }}>
             <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-              For power users: trusted services, relay configuration, and manual overrides.
+              For power users: relay configuration and manual overrides.
             </div>
             <div style={{ display: 'grid', gap: '8px' }}>
-              <div style={{
-                padding: '12px',
-                background: 'var(--bg-tertiary)',
-                borderRadius: '8px',
-                fontSize: '13px',
-              }}>
-                <strong>Trusted Services:</strong> Manage which apps can access your vault without per-request consent.
-                <div style={{ marginTop: '8px' }}>
-                  <button className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '12px' }}>
-                    Manage Services
-                  </button>
-                </div>
-              </div>
               <div style={{
                 padding: '12px',
                 background: 'var(--bg-tertiary)',
@@ -591,19 +578,6 @@ export default function Settings() {
                 <strong>Relay Configuration:</strong> Custom relay server for remote agent connections.
                 <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
                   Default: wss://relay.dcp.1ly.store
-                </div>
-              </div>
-              <div style={{
-                padding: '12px',
-                background: 'var(--bg-tertiary)',
-                borderRadius: '8px',
-                fontSize: '13px',
-              }}>
-                <strong>Recovery Phrase:</strong> View your 12-word recovery phrase.
-                <div style={{ marginTop: '8px' }}>
-                  <button className="btn btn-danger" style={{ padding: '6px 12px', fontSize: '12px' }}>
-                    Show Recovery Phrase
-                  </button>
                 </div>
               </div>
             </div>

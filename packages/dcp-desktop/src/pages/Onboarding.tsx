@@ -122,7 +122,7 @@ export default function Onboarding({ onBegin, onComplete }: OnboardingProps) {
                 <path d="M12 2L3 7V12C3 16.97 6.84 21.56 12 23C17.16 21.56 21 16.97 21 12V7L12 2Z" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
                 <path d="M9 12L11 14L15 10" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
-              <h1 style={{ fontSize: '28px', fontWeight: 700, marginBottom: '8px' }}>Welcome to DCP Vault</h1>
+              <h1 style={{ fontSize: '28px', fontWeight: 700, marginBottom: '8px' }}>Welcome to DCP</h1>
               <p style={{ color: 'var(--text-secondary)', fontSize: '15px' }}>
                 Your secure personal data vault for AI agents
               </p>
@@ -390,7 +390,7 @@ export default function Onboarding({ onBegin, onComplete }: OnboardingProps) {
               </div>
               <h2 style={{ fontSize: '24px', fontWeight: 700, marginBottom: '8px' }}>Vault Created!</h2>
               <p style={{ color: 'var(--text-secondary)' }}>
-                Your DCP Vault is ready to use
+                Your DCP is ready to use
               </p>
             </div>
 

@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    dcp_vault_lib::run()
+    dcp_lib::run()
 }

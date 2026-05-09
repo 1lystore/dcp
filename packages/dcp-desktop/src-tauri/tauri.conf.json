@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DCP Vault",
+  "productName": "DCP",
   "version": "0.2.0",
   "identifier": "rg.dcp.vault",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "DCP Vault",
+        "title": "DCP",
         "width": 900,
         "height": 700,
         "minWidth": 600,
@@ -49,8 +49,8 @@
       "resources"
     ],
     "category": "Utility",
-    "shortDescription": "DCP Vault Desktop",
-    "longDescription": "Cross-platform desktop app for DCP Vault - manage your personal data securely with AI agents",
+    "shortDescription": "DCP Desktop",
+    "longDescription": "Cross-platform desktop app for DCP - manage your personal data securely with AI agents",
     "copyright": "Copyright 2024 DCP Protocol",
     "macOS": {
       "entitlements": null,

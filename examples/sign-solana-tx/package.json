@@ -1,7 +1,7 @@
 {
   "name": "sign-solana-tx-example",
   "version": "1.0.0",
-  "description": "Example: Sign a Solana transaction via DCP Vault REST API",
+  "description": "Example: Sign a Solana transaction via DCP REST API",
   "type": "module",
   "scripts": {
     "start": "node index.js"

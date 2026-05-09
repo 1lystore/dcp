@@ -129,9 +129,9 @@ jobs:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && format('dev-{0}', github.sha) || github.ref_name }}
           name: ${{ github.event_name == 'workflow_dispatch' && format('Development Build ({0})', github.sha) || github.ref_name }}
           body: |
-            ## DCP Vault Desktop v0.2.0
+            ## DCP Desktop v0.2.0
 
-            Cross-platform desktop application for DCP Vault - securely manage your personal data with AI agents.
+            Cross-platform desktop application for DCP - securely manage your personal data with AI agents.
 
             ### Downloads
 
@@ -148,7 +148,7 @@ jobs:
 
             ### Installation
 
-            - **macOS**: Open the DMG file and drag DCP Vault to your Applications folder
+            - **macOS**: Open the DMG file and drag DCP to your Applications folder
             - **Windows**: Run the MSI or EXE installer
             - **Linux**: Install the DEB or RPM package using your package manager
 

@@ -1,7 +1,7 @@
 {
   "name": "@dcprotocol/vault",
   "version": "0.2.0",
-  "description": "DCP Vault - Local vault runtime with CLI and server",
+  "description": "DCP - Local vault runtime with CLI and server",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

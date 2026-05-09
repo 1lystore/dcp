@@ -1,7 +1,8 @@
 {
   "name": "@dcprotocol/telegram",
   "version": "0.2.0",
-  "description": "Telegram notification service for DCP Vault",
+  "private": true,
+  "description": "Telegram notification service for DCP - deployable infrastructure",
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -19,9 +20,6 @@
   "files": [
     "dist"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/index.ts",

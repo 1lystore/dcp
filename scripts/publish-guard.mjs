@@ -46,11 +46,13 @@ const PUBLISHABLE_PACKAGES = [
   '@dcprotocol/agent',
   '@dcprotocol/relay',
   '@dcprotocol/relay-client',
-  '@dcprotocol/telegram',
 ];
 
-// Always private packages
-const PRIVATE_PACKAGES = ['@dcprotocol/desktop'];
+// Deployable infrastructure (not npm, deploy via Docker/fly.io)
+const DEPLOYABLE_PACKAGES = ['@dcprotocol/telegram'];
+
+// Always private packages (includes deployable infrastructure)
+const PRIVATE_PACKAGES = ['@dcprotocol/desktop', '@dcprotocol/telegram'];
 
 function readPackageJson(dir) {
   const pkgPath = join(dir, 'package.json');

@@ -1,13 +1,13 @@
 [package]
-name = "dcp-vault"
+name = "dcp"
 version = "0.1.0"
-description = "DCP Vault Desktop"
+description = "DCP Desktop"
 authors = ["DCP Protocol"]
 edition = "2021"
 license = "Apache-2.0"
 
 [lib]
-name = "dcp_vault_lib"
+name = "dcp_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
