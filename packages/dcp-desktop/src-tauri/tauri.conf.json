@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "corepack pnpm -r --filter @dcprotocol/core --filter @dcprotocol/client --filter @dcprotocol/relay --filter @dcprotocol/relay-client --filter @dcprotocol/vault run build && corepack pnpm --filter @dcprotocol/desktop run bundle:helper && corepack pnpm --filter @dcprotocol/desktop run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "corepack pnpm -r --filter @dcprotocol/core --filter @dcprotocol/client --filter @dcprotocol/relay --filter @dcprotocol/relay-client --filter @dcprotocol/vault run build && corepack pnpm --filter @dcprotocol/desktop run bundle:helper && corepack pnpm --filter @dcprotocol/desktop run build",
+    "beforeBuildCommand": "corepack pnpm -r --filter @dcprotocol/core --filter @dcprotocol/client --filter @dcprotocol/relay --filter @dcprotocol/relay-client --filter @dcprotocol/vault run build && corepack pnpm --filter @dcprotocol/desktop run bundle:node && corepack pnpm --filter @dcprotocol/desktop run bundle:helper && corepack pnpm --filter @dcprotocol/desktop run build",
     "frontendDist": "../dist"
   },
   "app": {
