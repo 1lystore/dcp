@@ -146,7 +146,7 @@ Example approved format:
 ```text
 🔐 Approval Needed
 
-Claude Desktop wants to send 0.02 ETH on Base.
+Claude Desktop wants to send 0.02 SOL on Solana.
 
 ⏱️ Reply within 4m 58s
 ```

@@ -115,7 +115,7 @@ export class AgentProxy {
 
       // Get address
       if (method === 'GET' && reqPath.startsWith('/address/')) {
-        const chain = reqPath.split('/')[2] as 'solana' | 'base' | 'ethereum';
+        const chain = reqPath.split('/')[2] as 'solana';
         const result = await this.connection.getAddress(chain);
         this.sendJson(res, 200, result);
         return;
@@ -125,7 +125,7 @@ export class AgentProxy {
       if (method === 'GET' && reqPath === '/budget/check') {
         const amount = parseFloat(url.searchParams.get('amount') || '0');
         const currency = url.searchParams.get('currency') || 'USDC';
-        const chain = url.searchParams.get('chain') as 'solana' | 'base' | 'ethereum' | undefined;
+        const chain = url.searchParams.get('chain') as 'solana' | undefined;
 
         const result = await this.connection.budgetCheck({ amount, currency, chain });
         this.sendJson(res, 200, result);
@@ -153,17 +153,6 @@ export class AgentProxy {
           chain: body.chain,
           message: body.message,
           encoding: body.encoding,
-          description: body.description,
-        });
-        this.sendJson(res, 200, result);
-        return;
-      }
-
-      // Sign typed data
-      if (method === 'POST' && reqPath === '/v1/vault/sign_typed_data') {
-        const result = await this.connection.signTypedData({
-          chain: body.chain,
-          typedData: body.typed_data,
           description: body.description,
         });
         this.sendJson(res, 200, result);
@@ -248,7 +237,6 @@ export class AgentProxy {
         { method: 'GET', path: '/budget/check', description: 'Check budget limits' },
         { method: 'POST', path: '/v1/vault/sign', description: 'Sign transaction' },
         { method: 'POST', path: '/v1/vault/sign_message', description: 'Sign message' },
-        { method: 'POST', path: '/v1/vault/sign_typed_data', description: 'Sign EIP-712 data' },
         { method: 'POST', path: '/v1/vault/read', description: 'Read credential' },
         { method: 'POST', path: '/v1/vault/write', description: 'Write credential' },
       ],

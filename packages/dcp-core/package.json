@@ -47,7 +47,6 @@
     "better-sqlite3": "^11.7.0",
     "bip39": "^3.1.0",
     "bs58": "^6.0.0",
-    "ethers": "^6.13.4",
     "keytar": "^7.9.0",
     "paseto": "^3.1.4",
     "sodium-native": "^4.3.1",

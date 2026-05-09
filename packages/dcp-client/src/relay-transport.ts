@@ -21,8 +21,6 @@ import type {
   SignTxResult,
   SignMessageInput,
   SignMessageResult,
-  SignTypedDataInput,
-  SignTypedDataResult,
   SignX402Input,
   SignX402Result,
   ReadCredentialResult,
@@ -323,66 +321,14 @@ export class RelayTransport implements Transport {
   }
 
   // --------------------------------------------------------------------------
-  // Sign Typed Data (EIP-712)
-  // --------------------------------------------------------------------------
-
-  async signTypedData(input: SignTypedDataInput): Promise<SignTypedDataResult> {
-    const walletScope = `crypto.wallet.${input.chain}`;
-    const sessionId = this.getSessionId(walletScope);
-
-    const params = {
-      chain: input.chain,
-      typed_data: input.typedData,
-      description: input.description,
-      session_id: sessionId,
-    };
-
-    const response = await this.relayRequest('vault_sign_typed_data', params);
-
-    const data = response as {
-      signature?: string;
-      public_key?: string;
-      chain?: Chain;
-      session_id?: string;
-      requires_consent?: boolean;
-      consent_id?: string;
-      expires_at?: string;
-      error?: { code?: string; message?: string };
-    };
-
-    if (data.error) {
-      throw parseErrorResponse({ error: data.error });
-    }
-
-    if (data.requires_consent && data.consent_id) {
-      throw new DcpError('CONSENT_REQUIRED', 'User consent required for signing', {
-        consent_id: data.consent_id,
-        expires_at: data.expires_at,
-      });
-    }
-
-    if (!data.signature || !data.public_key) {
-      throw new DcpError('INTERNAL_ERROR', 'Invalid response from vault');
-    }
-
-    if (data.session_id) {
-      this.cacheSession(walletScope, data.session_id);
-    }
-
-    return {
-      signature: data.signature,
-      publicKey: data.public_key,
-      chain: data.chain || input.chain,
-      sessionId: data.session_id,
-    };
-  }
-
-  // --------------------------------------------------------------------------
   // Sign x402 Payment
   // --------------------------------------------------------------------------
 
   async signX402(input: SignX402Input): Promise<SignX402Result> {
-    const chain = input.network === 'solana' ? 'solana' : 'base';
+    if (input.network !== 'solana') {
+      throw new DcpError('INVALID_CHAIN', 'Only solana network is supported');
+    }
+    const chain: Chain = 'solana';
     const walletScope = `crypto.wallet.${chain}`;
     const sessionId = this.getSessionId(walletScope);
 
@@ -393,7 +339,6 @@ export class RelayTransport implements Transport {
       currency: input.currency,
       recipient: input.recipient,
       purpose: input.purpose,
-      typed_data: input.typedData,
       session_id: sessionId,
     };
 
@@ -921,7 +866,6 @@ export class RelayTransport implements Transport {
     switch (method) {
       case 'vault_sign':
       case 'vault_sign_message':
-      case 'vault_sign_typed_data':
       case 'vault_sign_x402':
         return 'sign';
       case 'vault_read':

@@ -3,7 +3,6 @@
  *
  * These tests verify:
  * - Solana (Ed25519) keypair generation
- * - EVM (secp256k1) keypair generation
  * - Wallet encryption/decryption roundtrip
  * - Transaction signing
  * - Message signing
@@ -35,30 +34,6 @@ describe('Wallet Manager', () => {
       expect(wallet.key_type).toBe('ed25519');
       expect(wallet.private_key.length).toBe(32); // Ed25519 seed
       expect(wallet.public_address).toMatch(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/); // Base58
-
-      // Cleanup
-      zeroize(wallet.private_key);
-    });
-
-    it('should generate Base secp256k1 keypair', () => {
-      const wallet = generateWalletKeypair('base');
-
-      expect(wallet.chain).toBe('base');
-      expect(wallet.key_type).toBe('secp256k1');
-      expect(wallet.private_key.length).toBe(32); // secp256k1 private key
-      expect(wallet.public_address).toMatch(/^0x[a-fA-F0-9]{40}$/); // Ethereum address format
-
-      // Cleanup
-      zeroize(wallet.private_key);
-    });
-
-    it('should generate Ethereum secp256k1 keypair', () => {
-      const wallet = generateWalletKeypair('ethereum');
-
-      expect(wallet.chain).toBe('ethereum');
-      expect(wallet.key_type).toBe('secp256k1');
-      expect(wallet.private_key.length).toBe(32);
-      expect(wallet.public_address).toMatch(/^0x[a-fA-F0-9]{40}$/);
 
       // Cleanup
       zeroize(wallet.private_key);
@@ -150,17 +125,6 @@ describe('Wallet Manager', () => {
       zeroize(masterKey);
     });
 
-    it('should create Base wallet in one operation', () => {
-      const masterKey = generateKey();
-
-      const { encrypted, info } = createWallet('base', masterKey);
-
-      expect(info.chain).toBe('base');
-      expect(info.key_type).toBe('secp256k1');
-      expect(info.public_address).toMatch(/^0x/);
-
-      zeroize(masterKey);
-    });
   });
 
   describe('Message Signing', () => {
@@ -255,36 +219,6 @@ describe('Wallet Manager', () => {
       zeroize(masterKey);
     });
 
-    it('should import EVM wallet from hex private key', () => {
-      const masterKey = generateKey();
-
-      // Known test private key (DO NOT use in production)
-      const testPrivateKey = '0x' + 'ab'.repeat(32);
-      const { Wallet } = require('ethers');
-      const expectedAddress = new Wallet(testPrivateKey).address;
-
-      const { info } = importWallet('base', testPrivateKey, masterKey);
-
-      expect(info.chain).toBe('base');
-      expect(info.public_address.toLowerCase()).toBe(expectedAddress.toLowerCase());
-
-      zeroize(masterKey);
-    });
-
-    it('should import EVM wallet without 0x prefix', () => {
-      const masterKey = generateKey();
-
-      const testPrivateKey = 'cd'.repeat(32); // Without 0x
-      const { Wallet } = require('ethers');
-      const expectedAddress = new Wallet('0x' + testPrivateKey).address;
-
-      const { info } = importWallet('ethereum', testPrivateKey, masterKey);
-
-      expect(info.public_address.toLowerCase()).toBe(expectedAddress.toLowerCase());
-
-      zeroize(masterKey);
-    });
-
     it('should reject invalid Solana private key', () => {
       const masterKey = generateKey();
 
@@ -293,13 +227,6 @@ describe('Wallet Manager', () => {
       zeroize(masterKey);
     });
 
-    it('should reject invalid EVM private key', () => {
-      const masterKey = generateKey();
-
-      expect(() => importWallet('base', '0x123', masterKey)).toThrow(VaultError);
-
-      zeroize(masterKey);
-    });
   });
 
   describe('Utility Functions', () => {
@@ -323,8 +250,6 @@ describe('Wallet Manager', () => {
 
     it('should validate supported chains', () => {
       expect(isChainSupported('solana')).toBe(true);
-      expect(isChainSupported('base')).toBe(true);
-      expect(isChainSupported('ethereum')).toBe(true);
       expect(isChainSupported('bitcoin')).toBe(false);
       expect(isChainSupported('random')).toBe(false);
     });

@@ -228,8 +228,8 @@ Wallet keys are stored encrypted and never returned to agents. Only the public a
 
 **Supported Chains:**
 - `solana` (Ed25519)
-- `ethereum` (secp256k1)
-- `base` (secp256k1)
+
+*Multi-chain architecture supports adding additional chains in the future.*
 
 **Stored Data (Internal Only):**
 ```json
@@ -511,6 +511,7 @@ Privacy-safe categories for notifications (no sensitive details):
 | `RATE_LIMITED` | Rate limit exceeded |
 | `RECORD_NOT_FOUND` | Record not found |
 | `INTERNAL_ERROR` | Internal error |
+| `VALIDATION_ERROR` | Input validation failed |
 | `UNAUTHORIZED` | Not authorized |
 | `SERVICE_NOT_TRUSTED` | Service not trusted |
 | `SERVICE_NOT_FOUND` | Service not found |

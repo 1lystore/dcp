@@ -80,7 +80,7 @@ export default function Onboarding({ onBegin, onComplete }: OnboardingProps) {
     setError(null);
 
     try {
-      // Create Solana and Base wallets
+      // Create Solana wallet
       const result = await invoke<{ wallets: { chain: string; address: string }[] }>('create_wallets', {
         passphrase,
       });
@@ -141,7 +141,7 @@ export default function Onboarding({ onBegin, onComplete }: OnboardingProps) {
                 </li>
                 <li style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                   <span style={{ color: 'var(--accent)' }}>✓</span>
-                  Blockchain wallets (Solana + Base)
+                  Blockchain wallet (Solana)
                 </li>
               </ul>
             </div>

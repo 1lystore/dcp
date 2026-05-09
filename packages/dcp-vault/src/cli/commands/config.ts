@@ -6,7 +6,7 @@
  * Usage:
  *   dcp config show                      # Show current config
  *   dcp config set tx_limit.SOL 5        # Set SOL tx limit to 5
- *   dcp config set daily_budget.ETH 2    # Set ETH daily budget to 2
+ *   dcp config set daily_budget.USDC 100 # Set USDC daily budget to 100
  *   dcp config set approval_threshold.USDC 100
  */
 
@@ -25,7 +25,7 @@ import { VaultStorage, BudgetEngine, getBudgetEngine, getStorage } from '@dcprot
 export const configCommand = new Command('config')
   .description('View and manage vault configuration')
   .argument('[action]', 'Action: show, set')
-  .argument('[key]', 'Config key (e.g., tx_limit.SOL, daily_budget.ETH)')
+  .argument('[key]', 'Config key (e.g., tx_limit.SOL, daily_budget.USDC)')
   .argument('[value]', 'Value to set')
   .action(async (action?: string, key?: string, value?: string) => {
     try {
@@ -51,7 +51,7 @@ async function runConfig(action?: string, key?: string, value?: string): Promise
       console.log();
       info('Examples:');
       console.log(dim('  dcp config set tx_limit.SOL 5'));
-      console.log(dim('  dcp config set daily_budget.ETH 2'));
+      console.log(dim('  dcp config set daily_budget.USDC 100'));
       console.log(dim('  dcp config set approval_threshold.USDC 100'));
       console.log(dim('  dcp config set rate_limit_per_minute 10'));
       console.log();
@@ -137,7 +137,7 @@ async function setConfig(budget: BudgetEngine, key: string, value: string): Prom
   const parts = key.split('.');
 
   if (parts.length === 2) {
-    // Budget limit format: tx_limit.SOL, daily_budget.ETH, etc.
+    // Budget limit format: tx_limit.SOL, daily_budget.USDC, etc.
     const [type, currency] = parts;
 
     if (!['tx_limit', 'daily_budget', 'approval_threshold'].includes(type)) {

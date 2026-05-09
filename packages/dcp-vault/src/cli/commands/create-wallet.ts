@@ -2,7 +2,7 @@
  * dcp create-wallet
  *
  * Generate a new wallet inside the vault:
- * 1. Generate keypair (Ed25519 for Solana, secp256k1 for EVM)
+ * 1. Generate keypair (Ed25519 for Solana)
  * 2. Encrypt immediately with per-record DEK
  * 3. Store in vault
  * 4. Display only the public address
@@ -32,7 +32,7 @@ import {
 
 export const createWalletCommand = new Command('create-wallet')
   .description('Generate a new wallet inside the vault')
-  .requiredOption('-c, --chain <chain>', 'Blockchain: solana, base, or ethereum')
+  .requiredOption('-c, --chain <chain>', 'Blockchain (currently: solana)')
   .action(async (options) => {
     try {
       await runCreateWallet(options);
@@ -47,7 +47,7 @@ async function runCreateWallet(options: { chain: string }): Promise<void> {
   // Validate chain
   if (!isChainSupported(chain)) {
     error(`Unsupported chain: ${chain}`);
-    info('Supported chains: solana, base, ethereum');
+    info('Supported chains: solana');
     process.exit(1);
   }
 

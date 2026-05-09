@@ -40,8 +40,6 @@
     "sdk",
     "wallet",
     "solana",
-    "ethereum",
-    "base",
     "signing",
     "mcp",
     "ai-agents"

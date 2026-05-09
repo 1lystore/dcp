@@ -5,7 +5,7 @@ import { api, type AgentConnection, type StoredPairingClaim, type Scope, type Bu
 // Scopes must include the operation prefix (read:/write:/sign:) to match authorization checks
 const SCOPE_PRESETS = {
   identity: ['read:identity.name', 'read:identity.email', 'read:identity.phone'],
-  signing: ['sign:solana', 'sign:ethereum', 'sign:base'],
+  signing: ['sign:solana'],
   credentials: ['read:credentials.api.*'],
 };
 
@@ -939,10 +939,10 @@ export default function Agents() {
                       color: 'var(--text-primary)',
                     }}
                   >
-                    <option value="USDC">USDC</option>
                     <option value="SOL">SOL</option>
-                    <option value="ETH">ETH</option>
-                    <option value="USD">USD</option>
+                    <option value="USDC">USDC</option>
+                    <option value="USDT">USDT</option>
+                    <option value="1LY">1LY</option>
                   </select>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>

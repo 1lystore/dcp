@@ -143,13 +143,10 @@ describe('Storage Layer', () => {
 
       storage.storeRecord('crypto.wallet.sol.1', 'WALLET_KEY', 'critical', encrypted, 'solana', 'sol1');
       storage.storeRecord('crypto.wallet.sol.2', 'WALLET_KEY', 'critical', encrypted, 'solana', 'sol2');
-      storage.storeRecord('crypto.wallet.base', 'WALLET_KEY', 'critical', encrypted, 'base', 'base1');
+      storage.storeRecord('crypto.wallet.sol.3', 'WALLET_KEY', 'critical', encrypted, 'solana', 'sol3');
 
       const solanaWallets = storage.getWalletsByChain('solana');
-      expect(solanaWallets.length).toBe(2);
-
-      const baseWallets = storage.getWalletsByChain('base');
-      expect(baseWallets.length).toBe(1);
+      expect(solanaWallets.length).toBe(3);
 
       zeroize(masterKey);
     });

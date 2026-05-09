@@ -26,8 +26,8 @@ export type ItemType =
 // Chain Types
 // ============================================================================
 
-export type Chain = 'solana' | 'base' | 'ethereum';
-export type KeyType = 'ed25519' | 'secp256k1';
+export type Chain = 'solana';
+export type KeyType = 'ed25519';
 
 // ============================================================================
 // Vault Record (stored in SQLite)
@@ -505,6 +505,7 @@ export type VaultErrorCode =
   | 'RATE_LIMITED'
   | 'RECORD_NOT_FOUND'
   | 'INTERNAL_ERROR'
+  | 'VALIDATION_ERROR'
   | 'UNAUTHORIZED'
   | 'SERVICE_NOT_TRUSTED'
   | 'SERVICE_NOT_FOUND'
@@ -689,10 +690,10 @@ export interface TelegramConsentPayload {
   /** Transaction amount (for signing requests) */
   amount?: number;
 
-  /** Currency symbol (e.g., "ETH", "SOL") */
+  /** Currency symbol (e.g., "SOL", "USDC") */
   currency?: string;
 
-  /** Blockchain network (e.g., "base", "ethereum", "solana") */
+  /** Blockchain network (e.g., "solana") */
   chain?: string;
 }
 

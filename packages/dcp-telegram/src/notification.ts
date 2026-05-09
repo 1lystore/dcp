@@ -46,9 +46,6 @@ function formatScopeDescription(scope?: string): string | null {
     const chain = scope.split(':')[1] || 'blockchain';
     const chainNames: Record<string, string> = {
       solana: 'Solana',
-      ethereum: 'Ethereum',
-      base: 'Base',
-      polygon: 'Polygon',
     };
     return `Sign ${chainNames[chain.toLowerCase()] || chain} transaction`;
   }
@@ -169,10 +166,7 @@ export function categorizeRequest(action: string, scope: string): TelegramReques
   }
 
   // Message signing
-  if (
-    actionLower === 'sign_message' ||
-    actionLower === 'sign_typed_data'
-  ) {
+  if (actionLower === 'sign_message') {
     return 'message_signing';
   }
 
@@ -219,10 +213,7 @@ function getTimeRemaining(expiresAt: string): string {
  * Human-readable chain names
  */
 const CHAIN_NAMES: Record<string, string> = {
-  base: 'Base',
-  ethereum: 'Ethereum',
   solana: 'Solana',
-  polygon: 'Polygon',
 };
 
 /**

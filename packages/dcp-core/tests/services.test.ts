@@ -80,7 +80,7 @@ describe('Trusted Services', () => {
           service_id: 'dup-service',
           name: 'Dup Service 2',
           public_key: 'ed25519:different-key',
-          scopes: ['sign:base'],
+          scopes: ['sign:solana'],
           budget: { daily: 20, currency: 'USDC', auto_approve_under: 0 },
           verified: false,
         });
@@ -126,7 +126,7 @@ describe('Trusted Services', () => {
         service_id: 'service-2',
         name: 'Service 2',
         public_key: 'ed25519:b3RoZXItcHVibGljLWtleS10aGlydHl0d29ieXRlcw==',
-        scopes: ['sign:base'],
+        scopes: ['sign:solana'],
         budget: { daily: 20, currency: 'USDC', auto_approve_under: 0 },
         verified: false,
       });
@@ -149,7 +149,7 @@ describe('Trusted Services', () => {
         service_id: 'disabled-service',
         name: 'Disabled Service',
         public_key: 'ed25519:b3RoZXItcHVibGljLWtleS10aGlydHl0d29ieXRlcw==',
-        scopes: ['sign:base'],
+        scopes: ['sign:solana'],
         budget: { daily: 20, currency: 'USDC', auto_approve_under: 0 },
         verified: false,
       });
@@ -175,11 +175,11 @@ describe('Trusted Services', () => {
       });
 
       storage.updateTrustedService('update-test', {
-        scopes: ['sign:solana', 'sign:base', 'read:credentials.api.test'],
+        scopes: ['sign:solana', 'sign:solana', 'read:credentials.api.test'],
       });
 
       const service = storage.getTrustedService('update-test');
-      expect(service!.scopes).toEqual(['sign:solana', 'sign:base', 'read:credentials.api.test']);
+      expect(service!.scopes).toEqual(['sign:solana', 'sign:solana', 'read:credentials.api.test']);
     });
 
     it('should update service budget', () => {
@@ -258,7 +258,7 @@ describe('Trusted Services', () => {
         service_id: 'auth-test',
         name: 'Auth Test',
         public_key: 'ed25519:dGVzdC1wdWJsaWMta2V5LXRoaXJ0eXR3b2J5dGVz',
-        scopes: ['sign:solana', 'sign:base', 'read:credentials.api.test'],
+        scopes: ['sign:solana', 'sign:solana', 'read:credentials.api.test'],
         budget: { daily: 10, currency: 'USDC', auto_approve_under: 0 },
         verified: true,
       });
@@ -277,7 +277,7 @@ describe('Trusted Services', () => {
     });
 
     it('should deny unauthorized scope', () => {
-      const result = storage.isServiceAuthorized('auth-test', 'sign:ethereum');
+      const result = storage.isServiceAuthorized('auth-test', 'sign:bitcoin');
       expect(result.authorized).toBe(false);
       expect(result.reason).toBeTruthy();
     });
@@ -310,8 +310,8 @@ describe('Trusted Services', () => {
       const result1 = storage.isServiceAuthorized('wildcard-test', 'sign:solana');
       expect(result1.authorized).toBe(true);
 
-      // 'sign:*' should match 'sign:base'
-      const result2 = storage.isServiceAuthorized('wildcard-test', 'sign:base');
+      // 'sign:*' should match 'sign:solana'
+      const result2 = storage.isServiceAuthorized('wildcard-test', 'sign:solana');
       expect(result2.authorized).toBe(true);
 
       // 'read:credentials.api.*' should match 'read:credentials.api.openai'

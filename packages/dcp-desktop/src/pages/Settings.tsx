@@ -15,12 +15,23 @@ export default function Settings() {
   const [activityLoading, setActivityLoading] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  const currencyOptions = ['SOL', 'ETH', 'USDC', 'USDT', 'BASE_ETH'];
+  // Dynamic currency management
+  const [currencies, setCurrencies] = useState<{ default: string[]; custom: string[] }>({
+    default: ['SOL', 'USDC', 'USDT', '1LY'],
+    custom: [],
+  });
+  const [newCurrency, setNewCurrency] = useState('');
+  const [currencyError, setCurrencyError] = useState<string | null>(null);
+  const [addingCurrency, setAddingCurrency] = useState(false);
+
+  // All currencies combined for display
+  const allCurrencies = [...currencies.default, ...currencies.custom];
 
   useEffect(() => {
     loadAgents();
     loadBudgets();
     loadActivity();
+    loadCurrencies();
   }, []);
 
   const loadAgents = async () => {
@@ -55,6 +66,67 @@ export default function Settings() {
       console.error('Failed to load activity:', err);
     } finally {
       setActivityLoading(false);
+    }
+  };
+
+  const loadCurrencies = async () => {
+    try {
+      const res = await api.getCurrencies();
+      setCurrencies(res);
+      setCurrencyError(null);
+    } catch (err) {
+      console.error('Failed to load currencies:', err);
+      // Keep defaults if API fails
+    }
+  };
+
+  const handleAddCurrency = async () => {
+    const code = newCurrency.toUpperCase().trim();
+    if (!code) return;
+
+    // Validate format
+    if (!/^[A-Z0-9]{2,10}$/.test(code)) {
+      setCurrencyError('Currency code must be 2-10 uppercase characters');
+      return;
+    }
+
+    // Check for duplicates
+    if (allCurrencies.includes(code)) {
+      setCurrencyError(`${code} already exists`);
+      return;
+    }
+
+    setAddingCurrency(true);
+    setCurrencyError(null);
+    try {
+      const res = await api.addCurrency(code);
+      setCurrencies({ default: res.default, custom: res.custom });
+      setNewCurrency('');
+      // Reload budgets to get the new currency's default values
+      await loadBudgets();
+    } catch (err) {
+      console.error('Failed to add currency:', err);
+      setCurrencyError(err instanceof Error ? err.message : 'Failed to add currency');
+    } finally {
+      setAddingCurrency(false);
+    }
+  };
+
+  const handleRemoveCurrency = async (code: string) => {
+    if (currencies.default.includes(code)) {
+      setCurrencyError('Cannot remove default currency');
+      return;
+    }
+
+    setCurrencyError(null);
+    try {
+      const res = await api.removeCurrency(code);
+      setCurrencies({ default: res.default, custom: res.custom });
+      // Reload budgets to remove the currency's values
+      await loadBudgets();
+    } catch (err) {
+      console.error('Failed to remove currency:', err);
+      setCurrencyError(err instanceof Error ? err.message : 'Failed to remove currency');
     }
   };
 
@@ -174,7 +246,7 @@ export default function Settings() {
           </div>
         </div>
 
-        {budgetError && (
+        {(budgetError || currencyError) && (
           <div style={{
             padding: '12px',
             background: 'rgba(239, 68, 68, 0.1)',
@@ -184,7 +256,7 @@ export default function Settings() {
             fontSize: '13px',
             marginBottom: '16px'
           }}>
-            {budgetError}
+            {budgetError || currencyError}
           </div>
         )}
 
@@ -194,54 +266,126 @@ export default function Settings() {
           </div>
         ) : (
           <div style={{ display: 'grid', gap: '12px' }}>
-            {currencyOptions.map((currency) => (
-              <div
-                key={currency}
-                style={{
-                  padding: '12px 16px',
-                  background: 'var(--bg-tertiary)',
-                  border: '1px solid var(--border)',
-                  borderRadius: '8px',
+            {/* Add Currency Input */}
+            <div style={{
+              display: 'flex',
+              gap: '8px',
+              alignItems: 'center',
+              padding: '8px 12px',
+              background: 'var(--bg-secondary)',
+              borderRadius: '8px',
+            }}>
+              <input
+                className="input"
+                type="text"
+                placeholder="Token code (e.g. BONK)"
+                value={newCurrency}
+                onChange={(e) => {
+                  setNewCurrency(e.target.value.toUpperCase());
+                  setCurrencyError(null);
                 }}
+                onKeyDown={(e) => e.key === 'Enter' && handleAddCurrency()}
+                style={{ flex: 1, maxWidth: '200px' }}
+                maxLength={10}
+              />
+              <button
+                className="btn btn-secondary"
+                onClick={handleAddCurrency}
+                disabled={addingCurrency || !newCurrency.trim()}
+                style={{ padding: '8px 16px' }}
               >
-                <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>{currency}</div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
-                  <div>
-                    <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Daily Limit</label>
-                    <input
-                      className="input"
-                      type="number"
-                      min="0"
-                      value={budgetConfig.daily_budget[currency] ?? 0}
-                      onChange={(e) => handleBudgetChange('daily_budget', currency, e.target.value)}
-                      style={{ marginTop: '4px' }}
-                    />
+                {addingCurrency ? '...' : '+ Add Currency'}
+              </button>
+            </div>
+
+            {/* Currency List */}
+            {allCurrencies.map((currency) => {
+              const isCustom = currencies.custom.includes(currency);
+              return (
+                <div
+                  key={currency}
+                  style={{
+                    padding: '12px 16px',
+                    background: 'var(--bg-tertiary)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '8px',
+                  }}
+                >
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    marginBottom: '8px',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontSize: '13px', fontWeight: 600 }}>{currency}</span>
+                      {!isCustom && (
+                        <span style={{
+                          fontSize: '10px',
+                          padding: '2px 6px',
+                          background: 'var(--bg-secondary)',
+                          borderRadius: '4px',
+                          color: 'var(--text-muted)',
+                        }}>
+                          default
+                        </span>
+                      )}
+                    </div>
+                    {isCustom && (
+                      <button
+                        onClick={() => handleRemoveCurrency(currency)}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: 'var(--text-muted)',
+                          cursor: 'pointer',
+                          fontSize: '16px',
+                          padding: '0 4px',
+                        }}
+                        title={`Remove ${currency}`}
+                      >
+                        ×
+                      </button>
+                    )}
                   </div>
-                  <div>
-                    <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Per Transaction</label>
-                    <input
-                      className="input"
-                      type="number"
-                      min="0"
-                      value={budgetConfig.tx_limit[currency] ?? 0}
-                      onChange={(e) => handleBudgetChange('tx_limit', currency, e.target.value)}
-                      style={{ marginTop: '4px' }}
-                    />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Auto-approve under</label>
-                    <input
-                      className="input"
-                      type="number"
-                      min="0"
-                      value={budgetConfig.approval_threshold[currency] ?? 0}
-                      onChange={(e) => handleBudgetChange('approval_threshold', currency, e.target.value)}
-                      style={{ marginTop: '4px' }}
-                    />
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+                    <div>
+                      <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Daily Limit</label>
+                      <input
+                        className="input"
+                        type="number"
+                        min="0"
+                        value={budgetConfig.daily_budget[currency] ?? 0}
+                        onChange={(e) => handleBudgetChange('daily_budget', currency, e.target.value)}
+                        style={{ marginTop: '4px' }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Per Transaction</label>
+                      <input
+                        className="input"
+                        type="number"
+                        min="0"
+                        value={budgetConfig.tx_limit[currency] ?? 0}
+                        onChange={(e) => handleBudgetChange('tx_limit', currency, e.target.value)}
+                        style={{ marginTop: '4px' }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Auto-approve under</label>
+                      <input
+                        className="input"
+                        type="number"
+                        min="0"
+                        value={budgetConfig.approval_threshold[currency] ?? 0}
+                        onChange={(e) => handleBudgetChange('approval_threshold', currency, e.target.value)}
+                        style={{ marginTop: '4px' }}
+                      />
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             <button
               className="btn btn-primary"
               onClick={handleSaveBudgets}

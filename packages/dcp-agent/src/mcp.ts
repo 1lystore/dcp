@@ -5,13 +5,12 @@
  * through the relay connection. Unlike dcp-mcp which uses local VaultStorage,
  * this uses AgentConnection to proxy requests through the relay.
  *
- * MCP Tools (subset that works via relay):
+ * MCP Tools (6 tools):
  * - vault_get_address(chain) - Get public address (no consent)
  * - vault_budget_check(amount, currency) - Check budget (no consent)
  * - vault_read(scope, fields?) - Read data (consent may be required)
  * - vault_sign_tx(chain, unsigned_tx, description?) - Sign transaction (consent required)
  * - vault_sign_message(chain, message, encoding?) - Sign message (consent required)
- * - vault_sign_typed_data(chain, typed_data) - Sign typed data (consent required)
  * - vault_write(scope, data) - Write data (consent required)
  */
 
@@ -150,7 +149,7 @@ export class AgentMcpServer {
               properties: {
                 chain: {
                   type: 'string',
-                  enum: ['solana', 'base', 'ethereum'],
+                  enum: ['solana'],
                   description: 'The blockchain to get the address for',
                 },
               },
@@ -169,11 +168,11 @@ export class AgentMcpServer {
                 },
                 currency: {
                   type: 'string',
-                  description: 'The currency code (SOL, ETH, USDC, BASE_ETH)',
+                  description: 'The currency code (SOL, USDC, USDT)',
                 },
                 chain: {
                   type: 'string',
-                  enum: ['solana', 'base', 'ethereum'],
+                  enum: ['solana'],
                   description: 'Optional: The blockchain for chain-specific budget limits',
                 },
               },
@@ -214,12 +213,12 @@ Example scopes: "identity.email", "credentials.api.openai", "address.home"`,
               properties: {
                 chain: {
                   type: 'string',
-                  enum: ['solana', 'base', 'ethereum'],
+                  enum: ['solana'],
                   description: 'The blockchain for the transaction',
                 },
                 unsigned_tx: {
                   type: 'string',
-                  description: 'The unsigned transaction (base64 for Solana, JSON for EVM)',
+                  description: 'The unsigned transaction (base64 encoded)',
                 },
                 description: {
                   type: 'string',
@@ -253,7 +252,7 @@ Example scopes: "identity.email", "credentials.api.openai", "address.home"`,
               properties: {
                 chain: {
                   type: 'string',
-                  enum: ['solana', 'base', 'ethereum'],
+                  enum: ['solana'],
                   description: 'The blockchain for the message signing',
                 },
                 message: {
@@ -271,29 +270,6 @@ Example scopes: "identity.email", "credentials.api.openai", "address.home"`,
                 },
               },
               required: ['chain', 'message'],
-            },
-          },
-          {
-            name: 'vault_sign_typed_data',
-            description: 'Sign EIP-712 typed data using the vault wallet. Requires user consent.',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                chain: {
-                  type: 'string',
-                  enum: ['base', 'ethereum'],
-                  description: 'The EVM chain for typed data signing',
-                },
-                typed_data: {
-                  type: 'object',
-                  description: 'EIP-712 typed data object',
-                },
-                description: {
-                  type: 'string',
-                  description: 'Human-readable description of what the typed data represents',
-                },
-              },
-              required: ['chain', 'typed_data'],
             },
           },
           {
@@ -332,7 +308,7 @@ Example: scope="credentials.api.openai", data={"key": "sk-xxx", "name": "My Open
   private async executeToolCall(name: string, args: Record<string, unknown> | undefined): Promise<{ content: Array<{ type: string; text: string }> }> {
     switch (name) {
       case 'vault_get_address': {
-        const input = args as { chain: 'solana' | 'base' | 'ethereum' };
+        const input = args as { chain: 'solana' };
         if (!input.chain) {
           throw new McpError(ErrorCode.InvalidParams, 'chain is required');
         }
@@ -343,7 +319,7 @@ Example: scope="credentials.api.openai", data={"key": "sk-xxx", "name": "My Open
       }
 
       case 'vault_budget_check': {
-        const input = args as { amount: number; currency: string; chain?: 'solana' | 'base' | 'ethereum' };
+        const input = args as { amount: number; currency: string; chain?: 'solana' };
         if (input.amount === undefined || !input.currency) {
           throw new McpError(ErrorCode.InvalidParams, 'amount and currency are required');
         }
@@ -370,7 +346,7 @@ Example: scope="credentials.api.openai", data={"key": "sk-xxx", "name": "My Open
 
       case 'vault_sign_tx': {
         const input = args as {
-          chain: 'solana' | 'base' | 'ethereum';
+          chain: 'solana';
           unsigned_tx: string;
           description?: string;
           amount?: number;
@@ -397,7 +373,7 @@ Example: scope="credentials.api.openai", data={"key": "sk-xxx", "name": "My Open
 
       case 'vault_sign_message': {
         const input = args as {
-          chain: 'solana' | 'base' | 'ethereum';
+          chain: 'solana';
           message: string;
           encoding?: 'utf8' | 'base64';
           description?: string;
@@ -409,25 +385,6 @@ Example: scope="credentials.api.openai", data={"key": "sk-xxx", "name": "My Open
           chain: input.chain,
           message: input.message,
           encoding: input.encoding,
-          description: input.description,
-        });
-        return {
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      case 'vault_sign_typed_data': {
-        const input = args as {
-          chain: 'base' | 'ethereum';
-          typed_data: Record<string, unknown>;
-          description?: string;
-        };
-        if (!input.chain || !input.typed_data) {
-          throw new McpError(ErrorCode.InvalidParams, 'chain and typed_data are required');
-        }
-        const result = await this.connection.signTypedData({
-          chain: input.chain,
-          typedData: input.typed_data,
           description: input.description,
         });
         return {

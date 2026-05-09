@@ -41,12 +41,11 @@ describe('Input Validation', () => {
   describe('ChainSchema', () => {
     it('should accept valid chains', () => {
       expect(ChainSchema.parse('solana')).toBe('solana');
-      expect(ChainSchema.parse('ethereum')).toBe('ethereum');
-      expect(ChainSchema.parse('base')).toBe('base');
     });
 
     it('should reject invalid chains', () => {
       expect(() => ChainSchema.parse('bitcoin')).toThrow();
+      expect(() => ChainSchema.parse('invalid-chain')).toThrow();
       expect(() => ChainSchema.parse('')).toThrow();
     });
   });
@@ -90,7 +89,7 @@ describe('Input Validation', () => {
 
     it('should accept optional fields', () => {
       const result = validateRequest(SignMessageRequestSchema, {
-        chain: 'ethereum',
+        chain: 'solana',
         message: 'Sign this',
         encoding: 'utf8',
         description: 'Test signing',

@@ -18,7 +18,7 @@ export const TimestampSchema = z.number().int().positive();
 export const HexSchema = z.string().regex(/^(0x)?[0-9a-fA-F]+$/, 'Invalid hex string');
 
 // Chain validation
-export const ChainSchema = z.enum(['solana', 'ethereum', 'base']);
+export const ChainSchema = z.enum(['solana']);
 export type Chain = z.infer<typeof ChainSchema>;
 
 // ============================================================================
@@ -76,14 +76,6 @@ export const SignMessageRequestSchema = z.object({
   description: z.string().max(500).optional(),
 });
 
-/**
- * Sign typed data request (EIP-712)
- */
-export const SignTypedDataRequestSchema = z.object({
-  chain: z.enum(['ethereum', 'base']),
-  typedData: z.record(z.string(), z.unknown()),
-  description: z.string().max(500).optional(),
-});
 
 /**
  * Write data request

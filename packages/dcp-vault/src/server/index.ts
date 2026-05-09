@@ -22,7 +22,6 @@
  * - POST /v1/vault/sign        - Sign transaction (with consent + budget)
  * - POST /v1/vault/sign-message - Sign message (with consent)
  * - POST /v1/vault/sign_message - Sign message (alias)
- * - POST /v1/vault/sign_typed_data - Sign typed data (EIP-712)
  * - POST /v1/vault/sign_x402   - Sign x402 payment (with consent)
  * - GET  /v1/vault/activity    - Get audit events
  * - POST /v1/vault/unlock      - Unlock vault (local only)
@@ -45,8 +44,6 @@ import {
   envelopeDecrypt,
   signTransaction,
   signSolanaMessage,
-  signEvmMessage,
-  signEvmTypedData,
   type VaultErrorCode,
   type TrustedService,
   type AgentConnection,
@@ -203,7 +200,7 @@ function clearUnlockRateLimit(key: string): void {
 // ============================================================================
 // Fixes old permission_scopes saved without operation prefix (read:/write:/sign:)
 // This ensures backward compatibility with agents created before the fix
-const SIGNING_CHAINS = ['solana', 'ethereum', 'base', 'bitcoin', 'polygon'];
+const SIGNING_CHAINS = ['solana'];
 
 function normalizePermissionScope(scope: string): string {
   // Already has a valid prefix - return as-is
@@ -440,7 +437,7 @@ function categorizeTelegramRequest(action: string, scope: string): TelegramReque
   if (action === 'sign_tx' || scope.startsWith('crypto.wallet')) {
     return 'transaction_signing';
   }
-  if (action === 'sign_message' || action === 'sign_typed_data') {
+  if (action === 'sign_message') {
     return 'message_signing';
   }
   if (action === 'read') {
@@ -2440,6 +2437,78 @@ async function buildServer(): Promise<FastifyInstance> {
   });
 
   // ============================================================================
+  // Currency Management (Owner Only)
+  // ============================================================================
+
+  server.get('/v1/vault/currencies', async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: {
+          code: 'OWNER_AUTH_REQUIRED',
+          message: 'Owner authentication required',
+        },
+      });
+    }
+
+    return budget.getAllCurrencies();
+  });
+
+  server.post<{
+    Body: {
+      action: 'add' | 'remove';
+      code: string;
+    };
+  }>('/v1/vault/currencies', async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: {
+          code: 'OWNER_AUTH_REQUIRED',
+          message: 'Owner authentication required',
+        },
+      });
+    }
+
+    const { action, code } = request.body || {};
+
+    if (!action || !code) {
+      return reply.status(400).send({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'action and code are required',
+        },
+      });
+    }
+
+    try {
+      if (action === 'add') {
+        budget.addCustomCurrency(code);
+      } else if (action === 'remove') {
+        budget.removeCustomCurrency(code);
+      } else {
+        return reply.status(400).send({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'action must be "add" or "remove"',
+          },
+        });
+      }
+
+      return {
+        success: true,
+        ...budget.getAllCurrencies(),
+      };
+    } catch (err) {
+      const error = err as Error;
+      return reply.status(400).send({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: error.message,
+        },
+      });
+    }
+  });
+
+  // ============================================================================
   // Agents (Sessions)
   // ============================================================================
 
@@ -3639,7 +3708,7 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     // Determine currency from chain if not provided
-    const txCurrency = currency || (chain === 'solana' ? 'SOL' : chain === 'ethereum' ? 'ETH' : 'BASE_ETH');
+    const txCurrency = currency || 'SOL';
 
     // Track if budget check auto-approved this transaction (amount under threshold)
     // When true, we skip the session/consent check since user configured this threshold
@@ -3794,7 +3863,7 @@ async function buildServer(): Promise<FastifyInstance> {
       throw new VaultError('RECORD_NOT_FOUND', `No wallet found for chain: ${chain}`);
     }
 
-    // Sign the transaction (signTransaction expects base64 string for Solana, JSON string for EVM)
+    // Sign the transaction (signTransaction expects base64 string for Solana)
     const signResult = await signTransaction(payload, masterKey, chain, unsigned_tx);
 
     // Record spend event if amount provided
@@ -3904,14 +3973,7 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     const resolvedEncoding = encoding || 'utf8';
-    let signature: string;
-    if (chain === 'solana') {
-      signature = signSolanaMessage(payload, masterKey, message, resolvedEncoding);
-    } else {
-      const messagePayload =
-        resolvedEncoding === 'base64' ? Buffer.from(message, 'base64') : message;
-      signature = await signEvmMessage(payload, masterKey, messagePayload);
-    }
+    const signature = signSolanaMessage(payload, masterKey, message, resolvedEncoding);
 
     storage.logAudit('EXECUTE', 'success', {
       agentName: agent_name,
@@ -3955,128 +4017,17 @@ async function buildServer(): Promise<FastifyInstance> {
   });
 
   // ============================================================================
-  // V1 API: Vault Sign Typed Data (with consent)
-  // ============================================================================
-
-  const handleSignTypedData = async (body: {
-    chain: Chain;
-    typed_data: Record<string, unknown>;
-    agent_name: string;
-    session_id?: string;
-    description?: string;
-  }) => {
-    const { chain, typed_data, agent_name, session_id, description } = body;
-    let effectiveSessionId = session_id;
-
-    if (!chain || !typed_data || !agent_name) {
-      throw new VaultError('INTERNAL_ERROR', 'chain, typed_data, and agent_name are required');
-    }
-
-    if (chain !== 'base' && chain !== 'ethereum') {
-      throw new VaultError('INVALID_CHAIN', `Unsupported chain for typed data: ${chain}`);
-    }
-
-    if (!storage.isUnlocked()) {
-      throw new VaultError('VAULT_LOCKED', 'Vault is locked. Please unlock first.');
-    }
-
-    const walletScope = `crypto.wallet.${chain}`;
-
-    if (!effectiveSessionId) {
-      const existing = findActiveSessionForScope(agent_name, walletScope);
-      if (existing) {
-        effectiveSessionId = existing;
-      }
-    }
-
-    let hasSession = false;
-    if (effectiveSessionId) {
-      const session = storage.getSession(effectiveSessionId);
-      if (session && !session.revoked_at && new Date(session.expires_at) > new Date()) {
-        if (session.granted_scopes.includes(walletScope)) {
-          hasSession = true;
-          storage.touchSession(effectiveSessionId);
-        }
-      }
-    }
-
-    if (!hasSession) {
-      const { consent, isNew } = storage.createPendingConsent(
-        agent_name,
-        'sign_typed_data',
-        walletScope,
-        JSON.stringify({
-          description,
-          chain,
-        })
-      );
-
-      // Telegram notification handled by consent watcher (avoids duplicates)
-
-      return {
-        requires_consent: true,
-        consent_id: consent.id,
-        expires_at: consent.expires_at,
-        message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
-      };
-    }
-
-    const records = storage.listRecords();
-    const walletRecord = records.find(
-      (r) => r.item_type === 'WALLET_KEY' && r.chain === chain
-    );
-    if (!walletRecord || !walletRecord.public_address) {
-      throw new VaultError('RECORD_NOT_FOUND', `No wallet found for chain: ${chain}`);
-    }
-
-    const masterKey = storage.getMasterKey();
-    const payload = storage.getEncryptedPayload(walletScope);
-    if (!payload) {
-      throw new VaultError('RECORD_NOT_FOUND', `No wallet found for chain: ${chain}`);
-    }
-
-    const signature = await signEvmTypedData(payload, masterKey, typed_data);
-
-    storage.logAudit('EXECUTE', 'success', {
-      agentName: agent_name,
-      scope: walletScope,
-      operation: 'sign_typed_data',
-      details: JSON.stringify({ chain }),
-    });
-
-    return {
-      signature,
-      public_key: walletRecord.public_address,
-      chain,
-      session_id: effectiveSessionId,
-    };
-  };
-
-  server.post<{
-    Body: {
-      chain: Chain;
-      typed_data: Record<string, unknown>;
-      agent_name: string;
-      session_id?: string;
-      description?: string;
-    };
-  }>('/v1/vault/sign_typed_data', async (request) => {
-    return handleSignTypedData(request.body);
-  });
-
-  // ============================================================================
   // V1 API: Vault Sign x402 (with consent)
   // ============================================================================
 
   server.post<{
     Body: {
-      network: 'solana' | 'base';
+      network: 'solana';
       payload: string;
       amount?: string | number;
       currency?: string;
       recipient?: string;
       purpose?: string;
-      typed_data?: Record<string, unknown>;
       agent_name: string;
       session_id?: string;
     };
@@ -4088,7 +4039,6 @@ async function buildServer(): Promise<FastifyInstance> {
       currency,
       recipient,
       purpose,
-      typed_data,
       agent_name,
       session_id,
     } = request.body;
@@ -4098,11 +4048,15 @@ async function buildServer(): Promise<FastifyInstance> {
       throw new VaultError('INTERNAL_ERROR', 'network, payload, and agent_name are required');
     }
 
+    if (network !== 'solana') {
+      throw new VaultError('INVALID_CHAIN', 'Only solana network is supported');
+    }
+
     if (!storage.isUnlocked()) {
       throw new VaultError('VAULT_LOCKED', 'Vault is locked. Please unlock first.');
     }
 
-    const chain: Chain = network === 'solana' ? 'solana' : 'base';
+    const chain: Chain = 'solana';
     const walletScope = `crypto.wallet.${chain}`;
 
     if (!effectiveSessionId) {
@@ -4233,15 +4187,7 @@ async function buildServer(): Promise<FastifyInstance> {
       throw new VaultError('RECORD_NOT_FOUND', `No wallet found for chain: ${chain}`);
     }
 
-    let signature: string;
-    if (chain === 'solana') {
-      signature = signSolanaMessage(encryptedKey, masterKey, payload, 'base64');
-    } else if (typed_data) {
-      signature = await signEvmTypedData(encryptedKey, masterKey, typed_data);
-    } else {
-      const payloadBytes = Buffer.from(payload, 'base64');
-      signature = await signEvmMessage(encryptedKey, masterKey, payloadBytes);
-    }
+    const signature = signSolanaMessage(encryptedKey, masterKey, payload, 'base64');
 
     if (parsedAmount !== undefined && currency && effectiveSessionId) {
       storage.recordSpend(effectiveSessionId, parsedAmount, currency, chain, 'sign_x402', 'committed', {
@@ -4670,10 +4616,6 @@ function getChainForCurrency(currency: string, chain?: Chain): Chain {
   switch (currency.toUpperCase()) {
     case 'SOL':
       return 'solana';
-    case 'ETH':
-      return 'ethereum';
-    case 'BASE_ETH':
-      return 'base';
     case 'USDC':
     case 'USDT':
       throw new VaultError('INTERNAL_ERROR', `chain is required for ${currency}`);
@@ -5072,8 +5014,6 @@ function getScopeForRelayMethod(method: string, params: Record<string, unknown>)
       return `sign:${params.chain || 'solana'}`;
     case 'vault_sign_message':
       return `sign:${params.chain || 'solana'}`;
-    case 'vault_sign_typed_data':
-      return `sign:${params.chain || 'base'}`;
     case 'vault_sign_x402':
       return `sign:${params.network || 'solana'}`;
     case 'vault_pair':
@@ -5396,9 +5336,6 @@ async function handleRelayRequest(
       break;
     case 'vault_sign_message':
       url = '/v1/vault/sign_message';
-      break;
-    case 'vault_sign_typed_data':
-      url = '/v1/vault/sign_typed_data';
       break;
     case 'vault_sign_x402':
       url = '/v1/vault/sign_x402';

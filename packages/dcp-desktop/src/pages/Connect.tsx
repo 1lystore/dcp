@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { open } from '@tauri-apps/plugin-shell';
 import { api, type AgentConnection, type RelayInfo, type VpsPairingInviteResponse } from '../api';
 
 // MCP status interface
@@ -31,12 +32,12 @@ const isTelegramPaired = (config: TelegramConfig | null): boolean => {
   return !!(config?.configured && config?.enabled && config?.paired_at);
 };
 
-// Local AI agent types with their config file paths
+// Local AI agent types with their config instructions
 type LocalAgentType = 'claude-desktop' | 'cursor' | 'vscode' | 'openclaw' | 'other';
 const LOCAL_AGENT_TYPES: { id: LocalAgentType; label: string; configPath: string }[] = [
-  { id: 'claude-desktop', label: 'Claude Desktop', configPath: '~/Library/Application Support/Claude/claude_desktop_config.json' },
-  { id: 'cursor', label: 'Cursor', configPath: '~/.cursor/mcp.json' },
-  { id: 'vscode', label: 'VS Code', configPath: 'Settings → Extensions → MCP' },
+  { id: 'claude-desktop', label: 'Claude Desktop', configPath: 'Settings → Developer → Add MCP Server' },
+  { id: 'cursor', label: 'Cursor', configPath: 'Cursor Settings → MCP → Add new global MCP server' },
+  { id: 'vscode', label: 'VS Code', configPath: 'Cmd+Shift+P → "MCP: Add Server"' },
   { id: 'openclaw', label: 'OpenClaw', configPath: '~/.openclaw/openclaw.json' },
   { id: 'other', label: 'Other MCP Client', configPath: 'Check your app documentation' },
 ];
@@ -284,6 +285,28 @@ export default function Connect() {
     }
   };
 
+  // Generate one-click install deep link for Cursor/VS Code
+  const getInstallDeepLink = useMemo(() => {
+    const serverConfig = {
+      command: 'npx',
+      args: ['-y', '@dcprotocol/agent', 'run', '--mode', 'mcp', '--agent', agentIdMap[selectedAgentType]],
+    };
+
+    if (selectedAgentType === 'cursor') {
+      // Cursor: cursor://anysphere.cursor-deeplink/mcp/install?name=X&config=BASE64
+      const configBase64 = btoa(JSON.stringify(serverConfig));
+      return `cursor://anysphere.cursor-deeplink/mcp/install?name=dcp&config=${configBase64}`;
+    }
+
+    if (selectedAgentType === 'vscode') {
+      // VS Code: vscode:mcp/install?URL_ENCODED_JSON
+      const configWithName = { name: 'dcp', ...serverConfig };
+      return `vscode:mcp/install?${encodeURIComponent(JSON.stringify(configWithName))}`;
+    }
+
+    return null;
+  }, [selectedAgentType]);
+
   // Telegram handlers
   const startTelegramPairing = async (forceNew = false) => {
     // If we have an active code that hasn't expired, reuse it
@@ -495,8 +518,32 @@ export default function Connect() {
               <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '8px' }}>
                 2. Add to your MCP config
               </div>
+
+              {/* One-click install for Cursor/VS Code */}
+              {getInstallDeepLink && (
+                <div style={{ marginBottom: '16px' }}>
+                  <button
+                    onClick={() => open(getInstallDeepLink)}
+                    className="btn btn-primary"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      width: '100%',
+                      justifyContent: 'center',
+                      padding: '12px',
+                    }}
+                  >
+                    ⚡ One-Click Install in {LOCAL_AGENT_TYPES.find(a => a.id === selectedAgentType)?.label}
+                  </button>
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', textAlign: 'center', marginTop: '8px' }}>
+                    or copy config manually below
+                  </div>
+                </div>
+              )}
+
               <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '12px' }}>
-                Config file: <code>{LOCAL_AGENT_TYPES.find(a => a.id === selectedAgentType)?.configPath}</code>
+                <code>{LOCAL_AGENT_TYPES.find(a => a.id === selectedAgentType)?.configPath}</code>
               </div>
               <pre style={{
                 background: 'var(--bg-secondary)',

@@ -72,6 +72,9 @@
       "timestampUrl": ""
     }
   },
-  "plugins": {}
-
+  "plugins": {
+    "shell": {
+      "open": "(https?://.*|mailto:.*|tel:.*|cursor://.*|vscode:.*)"
+    }
+  }
 }

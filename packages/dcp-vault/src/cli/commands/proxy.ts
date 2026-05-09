@@ -368,7 +368,7 @@ class DcpProxy {
 
       if (method === 'GET' && path.startsWith('/address/')) {
         const chain = path.split('/')[2];
-        const result = await this.client.getAddress(chain as 'solana' | 'base' | 'ethereum');
+        const result = await this.client.getAddress(chain as 'solana');
         this.sendJson(res, 200, {
           chain: result.chain,
           address: result.address,
@@ -384,7 +384,7 @@ class DcpProxy {
         const result = await this.client.budgetCheck({
           amount,
           currency,
-          chain: chain as 'solana' | 'base' | 'ethereum' | undefined,
+          chain: chain as 'solana' | undefined,
         });
 
         this.sendJson(res, 200, {
@@ -442,21 +442,6 @@ class DcpProxy {
         return;
       }
 
-      if (method === 'POST' && path === '/v1/vault/sign_typed_data') {
-        const result = await this.client.signTypedData({
-          chain: body.chain,
-          typedData: body.typed_data,
-          description: body.description,
-        });
-        this.sendJson(res, 200, {
-          signature: result.signature,
-          public_key: result.publicKey,
-          chain: result.chain,
-          session_id: result.sessionId,
-        });
-        return;
-      }
-
       if (method === 'POST' && path === '/v1/vault/sign_x402') {
         const result = await this.client.signX402({
           network: body.network,
@@ -465,7 +450,6 @@ class DcpProxy {
           currency: body.currency,
           recipient: body.recipient,
           purpose: body.purpose,
-          typedData: body.typed_data,
         });
         this.sendJson(res, 200, {
           signature: result.signature,

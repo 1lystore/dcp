@@ -28,7 +28,6 @@ export const KNOWN_SERVICES: Record<string, KnownService> = {
     public_key: 'ed25519:7Kf9xPQzTm8wKvYR5gH3nJ4bL6cM2dF1qE8sW0tU9vA',
     default_scopes: [
       'sign:solana',
-      'sign:base',
       'read:credentials.api.1ly',
       'write:credentials.api.1ly',
     ],
@@ -42,9 +41,9 @@ export const KNOWN_SERVICES: Record<string, KnownService> = {
     connect_url: 'https://virtuals.io/api/dcp/connect',
     auth_url: 'https://virtuals.io/auth/dcp',
     public_key: 'ed25519:placeholder_virtuals_key',
-    default_scopes: ['sign:base', 'read:credentials.api.virtuals'],
+    default_scopes: ['sign:solana', 'read:credentials.api.virtuals'],
     verified: true,
-    description: 'AI agent ecosystem on Base',
+    description: 'AI agent ecosystem',
   },
   eliza: {
     service_id: 'eliza',
@@ -52,7 +51,7 @@ export const KNOWN_SERVICES: Record<string, KnownService> = {
     connect_url: 'https://eliza.ai/api/dcp/connect',
     auth_url: 'https://eliza.ai/auth/dcp',
     public_key: 'ed25519:placeholder_eliza_key',
-    default_scopes: ['sign:solana', 'sign:base', 'read:credentials.api.eliza'],
+    default_scopes: ['sign:solana', 'read:credentials.api.eliza'],
     verified: true,
     description: 'Open-source AI agent framework',
   },

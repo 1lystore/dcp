@@ -18,8 +18,6 @@ import type {
   SignTxResult,
   SignMessageInput,
   SignMessageResult,
-  SignTypedDataInput,
-  SignTypedDataResult,
   SignX402Input,
   SignX402Result,
   ReadCredentialResult,
@@ -224,64 +222,15 @@ export class LocalTransport implements Transport {
   }
 
   // --------------------------------------------------------------------------
-  // Sign Typed Data (EIP-712)
-  // --------------------------------------------------------------------------
-
-  async signTypedData(input: SignTypedDataInput): Promise<SignTypedDataResult> {
-    const walletScope = `crypto.wallet.${input.chain}`;
-    const sessionId = this.getSessionId(walletScope);
-
-    const body = this.signRequestBody({
-      chain: input.chain,
-      typed_data: input.typedData,
-      agent_name: this.config.agentName,
-      session_id: sessionId,
-      description: input.description,
-    });
-
-    const response = await this.fetch('/v1/vault/sign_typed_data', {
-      method: 'POST',
-      body: this.jsonStringify(body),
-    });
-
-    const data = await this.handleResponse<{
-      signature: string;
-      public_key: string;
-      chain: Chain;
-      session_id?: string;
-      requires_consent?: boolean;
-      consent_id?: string;
-      expires_at?: string;
-    }>(response);
-
-    // Handle consent required
-    if (data.requires_consent && data.consent_id) {
-      throw new DcpError('CONSENT_REQUIRED', 'User consent required for signing', {
-        consent_id: data.consent_id,
-        expires_at: data.expires_at,
-        approve_url: this.config.localUrl,
-      });
-    }
-
-    // Cache session if returned
-    if (data.session_id) {
-      this.cacheSession(walletScope, data.session_id);
-    }
-
-    return {
-      signature: data.signature,
-      publicKey: data.public_key,
-      chain: data.chain,
-      sessionId: data.session_id,
-    };
-  }
-
   // --------------------------------------------------------------------------
   // Sign x402 Payment
   // --------------------------------------------------------------------------
 
   async signX402(input: SignX402Input): Promise<SignX402Result> {
-    const chain = input.network === 'solana' ? 'solana' : 'base';
+    if (input.network !== 'solana') {
+      throw new DcpError('INVALID_CHAIN', 'Only solana network is supported');
+    }
+    const chain: Chain = 'solana';
     const walletScope = `crypto.wallet.${chain}`;
     const sessionId = this.getSessionId(walletScope);
 
@@ -292,7 +241,6 @@ export class LocalTransport implements Transport {
       currency: input.currency,
       recipient: input.recipient,
       purpose: input.purpose,
-      typed_data: input.typedData,
       agent_name: this.config.agentName,
       session_id: sessionId,
     });

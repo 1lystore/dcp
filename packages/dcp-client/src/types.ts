@@ -9,8 +9,8 @@
 // Chain Types
 // ============================================================================
 
-export type Chain = 'solana' | 'base' | 'ethereum';
-export type Network = 'solana' | 'base';
+export type Chain = 'solana';
+export type Network = 'solana';
 
 // ============================================================================
 // Client Configuration (protocol spec A3)
@@ -78,13 +78,13 @@ export interface ResolvedConfig {
 export interface SignTxInput {
   /** Blockchain to sign for */
   chain: Chain;
-  /** Unsigned transaction (base64 for Solana, JSON string for EVM) */
+  /** Unsigned transaction (base64 encoded) */
   unsignedTx: string;
   /** Human-readable description for consent UI */
   description?: string;
   /** Transaction amount in currency units */
   amount?: number;
-  /** Currency code (e.g., 'SOL', 'USDC', 'ETH') */
+  /** Currency code (e.g., 'SOL', 'USDC') */
   currency?: string;
   /** Destination address */
   destination?: string;
@@ -103,17 +103,9 @@ export interface SignMessageInput {
   description?: string;
 }
 
-export interface SignTypedDataInput {
-  /** Blockchain (must be 'base' or 'ethereum') */
-  chain: Chain;
-  /** EIP-712 typed data object */
-  typedData: Record<string, unknown>;
-  /** Human-readable description for consent UI */
-  description?: string;
-}
 
 export interface SignX402Input {
-  /** Network: 'solana' | 'base' */
+  /** Network: 'solana' */
   network: Network;
   /** x402 payload (base64) */
   payload: string;
@@ -125,8 +117,6 @@ export interface SignX402Input {
   recipient?: string;
   /** Purpose/description for consent UI */
   purpose?: string;
-  /** EIP-712 typed data for EVM (optional) */
-  typedData?: Record<string, unknown>;
 }
 
 export interface ReadCredentialInput {
@@ -196,16 +186,6 @@ export interface SignMessageResult {
   sessionId?: string;
 }
 
-export interface SignTypedDataResult {
-  /** Signature */
-  signature: string;
-  /** Public key that signed */
-  publicKey: string;
-  /** Blockchain */
-  chain: Chain;
-  /** Session ID */
-  sessionId?: string;
-}
 
 export interface SignX402Result {
   /** Signature */
@@ -295,9 +275,6 @@ export interface Transport {
 
   /** Sign a message */
   signMessage(input: SignMessageInput): Promise<SignMessageResult>;
-
-  /** Sign typed data (EIP-712) */
-  signTypedData(input: SignTypedDataInput): Promise<SignTypedDataResult>;
 
   /** Sign x402 payment */
   signX402(input: SignX402Input): Promise<SignX402Result>;
@@ -398,6 +375,4 @@ export const RELAY_VERSION = '1';
 // Chain to default currency mapping
 export const CHAIN_CURRENCY_MAP: Record<Chain, string> = {
   solana: 'SOL',
-  ethereum: 'ETH',
-  base: 'BASE_ETH',
 };

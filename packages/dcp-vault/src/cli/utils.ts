@@ -404,8 +404,6 @@ export function formatScope(scope: string): string {
 export function formatChain(chain: string): string {
   const colors: Record<string, typeof chalk.green> = {
     solana: chalk.magenta,
-    base: chalk.blue,
-    ethereum: chalk.blue,
   };
   return (colors[chain] || chalk.white)(chain);
 }

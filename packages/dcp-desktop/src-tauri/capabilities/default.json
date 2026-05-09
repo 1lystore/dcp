@@ -7,6 +7,16 @@
     "core:default",
     "notification:default",
     "autostart:default",
-    "shell:default"
+    "shell:default",
+    {
+      "identifier": "shell:allow-open",
+      "allow": [
+        { "url": "https://*" },
+        { "url": "http://*" },
+        { "url": "cursor://*" },
+        { "url": "vscode://*" },
+        { "url": "vscode:*" }
+      ]
+    }
   ]
 }

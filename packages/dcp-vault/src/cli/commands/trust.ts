@@ -8,7 +8,7 @@
  *
  * Usage:
  *   dcp trust 1ly                                    # Trust known service with defaults
- *   dcp trust 1ly --scopes sign:solana,sign:base   # Trust with specific scopes
+ *   dcp trust 1ly --scopes sign:solana             # Trust with specific scopes
  *   dcp trust my-bot --key=ed25519:... --scopes ... # Trust custom service
  *   dcp trust 1ly --budget 10usdc/day              # Set daily budget
  *   dcp trust 1ly --auto-approve-under 1usdc       # Auto-approve threshold
@@ -208,7 +208,7 @@ async function addTrustedService(
     if (!options.scopes) {
       error('Scopes are required for custom services');
       console.log();
-      console.log(dim('Usage: dcp trust <service> --key=ed25519:... --scopes=sign:solana,sign:base'));
+      console.log(dim('Usage: dcp trust <service> --key=ed25519:... --scopes=sign:solana'));
       console.log();
       process.exit(1);
     }

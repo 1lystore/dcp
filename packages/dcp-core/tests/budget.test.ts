@@ -99,9 +99,7 @@ describe('Budget Engine', () => {
       const currencies = budget.getSupportedCurrencies();
 
       expect(currencies).toContain('SOL');
-      expect(currencies).toContain('ETH');
       expect(currencies).toContain('USDC');
-      expect(currencies).toContain('BASE_ETH');
     });
 
     it('should return deep clone from getConfig to prevent external mutation', () => {
@@ -338,28 +336,17 @@ describe('Budget Engine', () => {
     it('should map solana to SOL', () => {
       expect(BudgetEngine.getCurrencyForChain('solana')).toBe('SOL');
     });
-
-    it('should map base to BASE_ETH', () => {
-      expect(BudgetEngine.getCurrencyForChain('base')).toBe('BASE_ETH');
-    });
-
-    it('should map ethereum to ETH', () => {
-      expect(BudgetEngine.getCurrencyForChain('ethereum')).toBe('ETH');
-    });
   });
 
   describe('Default Values', () => {
     it('should have correct default budget config', () => {
       expect(DEFAULT_BUDGET_CONFIG.daily_budget.SOL).toBe(20);
-      expect(DEFAULT_BUDGET_CONFIG.daily_budget.ETH).toBe(1);
       expect(DEFAULT_BUDGET_CONFIG.daily_budget.USDC).toBe(500);
 
       expect(DEFAULT_BUDGET_CONFIG.tx_limit.SOL).toBe(5);
-      expect(DEFAULT_BUDGET_CONFIG.tx_limit.ETH).toBe(0.5);
       expect(DEFAULT_BUDGET_CONFIG.tx_limit.USDC).toBe(200);
 
       expect(DEFAULT_BUDGET_CONFIG.approval_threshold.SOL).toBe(2);
-      expect(DEFAULT_BUDGET_CONFIG.approval_threshold.ETH).toBe(0.1);
       expect(DEFAULT_BUDGET_CONFIG.approval_threshold.USDC).toBe(100);
     });
 

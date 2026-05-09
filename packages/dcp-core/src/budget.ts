@@ -2,9 +2,9 @@
  * Budget & Policy Engine for DCP Vault
  *
  * Implements (from protocol spec section 3.1.7):
- * - Per-transaction limits (default: 5 SOL, 0.5 ETH, 200 USDC)
- * - Daily limits (default: 20 SOL, 1 ETH, 500 USDC)
- * - Approval thresholds (default: 2 SOL, 0.1 ETH, 100 USDC)
+ * - Per-transaction limits (default: 5 SOL, 200 USDC)
+ * - Daily limits (default: 20 SOL, 500 USDC)
+ * - Approval thresholds (default: 2 SOL, 100 USDC)
  * - Rate limiting (5 executions/minute)
  * - Idempotency key validation
  *
@@ -44,24 +44,21 @@ const CONFIG_FILE = 'config.json';
 export const DEFAULT_BUDGET_CONFIG: BudgetConfig = {
   daily_budget: {
     SOL: 20,
-    ETH: 1,
     USDC: 500,
     USDT: 500,
-    BASE_ETH: 0.5,
+    '1LY': 10000,
   },
   tx_limit: {
     SOL: 5,
-    ETH: 0.5,
     USDC: 200,
     USDT: 200,
-    BASE_ETH: 0.2,
+    '1LY': 2000,
   },
   approval_threshold: {
     SOL: 2,
-    ETH: 0.1,
     USDC: 100,
     USDT: 100,
-    BASE_ETH: 0.05,
+    '1LY': 500,
   },
 };
 
@@ -82,6 +79,9 @@ export interface DesktopOwner {
   registered_at: string;
 }
 
+/** Default currencies that cannot be removed */
+export const DEFAULT_CURRENCIES = ['SOL', 'USDC', 'USDT', '1LY'];
+
 export interface VaultConfig {
   version: string;
   server_port: number;
@@ -97,6 +97,8 @@ export interface VaultConfig {
   keychain_service: string;
   write_permissions?: Record<string, string[]>;
   desktop_owner?: DesktopOwner;
+  // Custom currencies added by user
+  custom_currencies?: string[];
   // Relay / pairing
   vault_id?: string;
   relay_url?: string;
@@ -137,6 +139,7 @@ function deepCloneConfig(config: VaultConfig): VaultConfig {
     trust_sources: [...config.trust_sources],
     write_permissions: config.write_permissions ? { ...config.write_permissions } : {},
     desktop_owner: config.desktop_owner ? { ...config.desktop_owner } : undefined,
+    custom_currencies: config.custom_currencies ? [...config.custom_currencies] : [],
     vault_id: config.vault_id,
     relay_url: config.relay_url,
     relay_hpke_public_key: config.relay_hpke_public_key,
@@ -289,7 +292,7 @@ export class BudgetEngine {
    * 5. All pass -> allowed
    *
    * @param amount - Proposed transaction amount
-   * @param currency - Currency code (SOL, ETH, USDC, etc.)
+   * @param currency - Currency code (SOL, USDC, etc.)
    * @param chain - Blockchain
    * @returns Budget check result
    */
@@ -477,23 +480,13 @@ export class BudgetEngine {
   // ==========================================================================
 
   /**
-   * Get the currency code for a chain
-   * Solana -> SOL
-   * Base -> BASE_ETH
-   * Ethereum -> ETH
+   * Get the native currency code for a chain
    */
   static getCurrencyForChain(chain: Chain): string {
-    switch (chain) {
-      case 'solana':
-        return 'SOL';
-      case 'base':
-        return 'BASE_ETH';
-      case 'ethereum':
-        return 'ETH';
-    }
-    // Exhaustive check - this should never be reached
-    const _exhaustiveCheck: never = chain;
-    return _exhaustiveCheck;
+    const currencyMap: Record<Chain, string> = {
+      solana: 'SOL',
+    };
+    return currencyMap[chain];
   }
 
   /**
@@ -505,6 +498,111 @@ export class BudgetEngine {
       ...Object.keys(this.config.tx_limit),
       ...Object.keys(this.config.approval_threshold),
     ].filter((v, i, a) => a.indexOf(v) === i); // unique
+  }
+
+  // ==========================================================================
+  // Custom Currency Management
+  // ==========================================================================
+
+  /**
+   * Get default currencies (cannot be removed)
+   */
+  getDefaultCurrencies(): string[] {
+    return [...DEFAULT_CURRENCIES];
+  }
+
+  /**
+   * Get custom currencies added by user
+   */
+  getCustomCurrencies(): string[] {
+    return this.config.custom_currencies ? [...this.config.custom_currencies] : [];
+  }
+
+  /**
+   * Get all currencies (default + custom)
+   */
+  getAllCurrencies(): { default: string[]; custom: string[] } {
+    return {
+      default: this.getDefaultCurrencies(),
+      custom: this.getCustomCurrencies(),
+    };
+  }
+
+  /**
+   * Add a custom currency
+   * @param code - Currency code (e.g., 'BONK', 'WIF')
+   * @throws VaultError if code is invalid or already exists
+   */
+  addCustomCurrency(code: string): void {
+    // Validate code format: 2-10 uppercase alphanumeric
+    const normalized = code.toUpperCase().trim();
+    if (!/^[A-Z0-9]{2,10}$/.test(normalized)) {
+      throw new VaultError('VALIDATION_ERROR', 'Currency code must be 2-10 uppercase alphanumeric characters');
+    }
+
+    // Check if already exists in defaults
+    if (DEFAULT_CURRENCIES.includes(normalized)) {
+      throw new VaultError('VALIDATION_ERROR', `${normalized} is a default currency`);
+    }
+
+    // Check if already exists in custom
+    const customCurrencies = this.config.custom_currencies || [];
+    if (customCurrencies.includes(normalized)) {
+      throw new VaultError('VALIDATION_ERROR', `${normalized} already exists`);
+    }
+
+    // Add to custom currencies
+    this.config.custom_currencies = [...customCurrencies, normalized];
+
+    // Initialize default budget values for the new currency
+    this.config.daily_budget[normalized] = 0;
+    this.config.tx_limit[normalized] = 0;
+    this.config.approval_threshold[normalized] = 0;
+
+    this.saveConfig();
+
+    // Log to audit
+    this.storage.logAudit('CONFIG', 'success', {
+      operation: 'add_currency',
+      details: JSON.stringify({ currency: normalized }),
+    });
+  }
+
+  /**
+   * Remove a custom currency
+   * @param code - Currency code to remove
+   * @throws VaultError if code is a default currency or doesn't exist
+   */
+  removeCustomCurrency(code: string): void {
+    const normalized = code.toUpperCase().trim();
+
+    // Check if it's a default currency
+    if (DEFAULT_CURRENCIES.includes(normalized)) {
+      throw new VaultError('VALIDATION_ERROR', `Cannot remove default currency ${normalized}`);
+    }
+
+    // Check if it exists in custom currencies
+    const customCurrencies = this.config.custom_currencies || [];
+    const index = customCurrencies.indexOf(normalized);
+    if (index === -1) {
+      throw new VaultError('VALIDATION_ERROR', `Currency ${normalized} not found`);
+    }
+
+    // Remove from custom currencies
+    this.config.custom_currencies = customCurrencies.filter((c) => c !== normalized);
+
+    // Remove budget entries for this currency
+    delete this.config.daily_budget[normalized];
+    delete this.config.tx_limit[normalized];
+    delete this.config.approval_threshold[normalized];
+
+    this.saveConfig();
+
+    // Log to audit
+    this.storage.logAudit('CONFIG', 'success', {
+      operation: 'remove_currency',
+      details: JSON.stringify({ currency: normalized }),
+    });
   }
 }
 

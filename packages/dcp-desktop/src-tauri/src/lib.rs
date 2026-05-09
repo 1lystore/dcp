@@ -852,7 +852,7 @@ async fn create_wallets(passphrase: String) -> Result<CreateWalletsResult, Strin
     let payload = json!({
         "action": "create_wallets",
         "passphrase": passphrase,
-        "chains": ["solana", "base"],
+        "chains": ["solana"],
         "vault_dir": std::env::var("VAULT_DIR").ok()
     });
     let result = run_node_helper(payload)?;

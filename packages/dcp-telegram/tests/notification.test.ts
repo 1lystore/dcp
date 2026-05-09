@@ -67,7 +67,6 @@ describe('categorizeRequest', () => {
 
   it('should categorize message signing', () => {
     expect(categorizeRequest('sign_message', 'any')).toBe('message_signing');
-    expect(categorizeRequest('sign_typed_data', 'any')).toBe('message_signing');
   });
 
   it('should categorize credential access', () => {
@@ -109,7 +108,7 @@ describe('formatConsentNotification', () => {
 
   it('should NEVER include amount or currency', () => {
     const result = formatConsentNotification(basePayload);
-    expect(result).not.toMatch(/\$|\d+\s*(USDC|SOL|ETH)/i);
+    expect(result).not.toMatch(/\$|\d+\s*(USDC|SOL)/i);
   });
 
   it('should NEVER include addresses', () => {
@@ -226,9 +225,7 @@ describe('formatStatusMessage', () => {
 describe('Privacy Compliance', () => {
   const sensitivePatterns = [
     // Amounts
-    /\b\d+\s*(USDC|SOL|ETH|USD)\b/i,
-    // Ethereum addresses
-    /0x[a-fA-F0-9]{40}/,
+    /\b\d+\s*(USDC|SOL|USD)\b/i,
     // Solana addresses
     /[1-9A-HJ-NP-Za-km-z]{32,44}/,
     // Private keys

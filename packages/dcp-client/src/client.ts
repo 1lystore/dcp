@@ -27,8 +27,6 @@ import type {
   SignTxResult,
   SignMessageInput,
   SignMessageResult,
-  SignTypedDataInput,
-  SignTypedDataResult,
   SignX402Input,
   SignX402Result,
   ReadCredentialResult,
@@ -229,7 +227,7 @@ export class DcpClient {
   /**
    * Get wallet address for a chain
    *
-   * @param chain - 'solana' | 'base' | 'ethereum'
+   * @param chain - 'solana'
    * @returns Address result with chain and public address
    */
   async getAddress(chain: Chain): Promise<GetAddressResult> {
@@ -259,18 +257,6 @@ export class DcpClient {
   async signMessage(input: SignMessageInput): Promise<SignMessageResult> {
     const transport = await this.getTransport();
     return transport.signMessage(input);
-  }
-
-  /**
-   * Sign EIP-712 typed data (EVM only)
-   *
-   * @param input - Typed data details including chain and EIP-712 data
-   * @returns Signature and public key
-   * @throws DcpError with CONSENT_REQUIRED if user approval needed
-   */
-  async signTypedData(input: SignTypedDataInput): Promise<SignTypedDataResult> {
-    const transport = await this.getTransport();
-    return transport.signTypedData(input);
   }
 
   /**

@@ -398,6 +398,24 @@ class ApiClient {
     });
   }
 
+  async getCurrencies(): Promise<{ default: string[]; custom: string[] }> {
+    return this.request('/v1/vault/currencies');
+  }
+
+  async addCurrency(code: string): Promise<{ success: boolean; default: string[]; custom: string[] }> {
+    return this.request('/v1/vault/currencies', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'add', code }),
+    });
+  }
+
+  async removeCurrency(code: string): Promise<{ success: boolean; default: string[]; custom: string[] }> {
+    return this.request('/v1/vault/currencies', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'remove', code }),
+    });
+  }
+
   async getTrustedServices(): Promise<{ services: TrustedService[] }> {
     return this.request('/v1/services');
   }

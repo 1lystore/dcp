@@ -117,7 +117,7 @@ export class AgentConnection {
   /**
    * Get wallet address
    */
-  async getAddress(chain: 'solana' | 'base' | 'ethereum'): Promise<{ chain: string; address: string }> {
+  async getAddress(chain: 'solana'): Promise<{ chain: string; address: string }> {
     this.ensureConnected();
     this.updateState();
     const result = await this.client!.getAddress(chain);
@@ -130,7 +130,7 @@ export class AgentConnection {
   async budgetCheck(params: {
     amount: number;
     currency: string;
-    chain?: 'solana' | 'base' | 'ethereum';
+    chain?: 'solana';
   }): Promise<{
     allowed: boolean;
     remaining_daily: number;
@@ -154,7 +154,7 @@ export class AgentConnection {
    * Sign a transaction
    */
   async signTx(params: {
-    chain: 'solana' | 'base' | 'ethereum';
+    chain: 'solana';
     unsignedTx: string;
     amount?: number;
     currency?: string;
@@ -182,7 +182,7 @@ export class AgentConnection {
    * Sign a message
    */
   async signMessage(params: {
-    chain: 'solana' | 'base' | 'ethereum';
+    chain: 'solana';
     message: string;
     encoding?: 'utf8' | 'base64';
     description?: string;
@@ -194,28 +194,6 @@ export class AgentConnection {
     this.ensureConnected();
     this.updateState();
     const result = await this.client!.signMessage(params);
-    return {
-      signature: result.signature,
-      public_key: result.publicKey,
-      chain: result.chain,
-    };
-  }
-
-  /**
-   * Sign typed data (EIP-712)
-   */
-  async signTypedData(params: {
-    chain: 'base' | 'ethereum';
-    typedData: Record<string, unknown>;
-    description?: string;
-  }): Promise<{
-    signature: string;
-    public_key: string;
-    chain: string;
-  }> {
-    this.ensureConnected();
-    this.updateState();
-    const result = await this.client!.signTypedData(params);
     return {
       signature: result.signature,
       public_key: result.publicKey,

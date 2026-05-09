@@ -65,12 +65,9 @@ export {
   // Transaction signing
   signTransaction,
   signSolanaTransaction,
-  signEvmTransaction,
 
   // Message signing
   signSolanaMessage,
-  signEvmMessage,
-  signEvmTypedData,
 
   // Wallet import
   importWallet,
@@ -96,6 +93,7 @@ export {
   DesktopOwner,
   DEFAULT_BUDGET_CONFIG,
   DEFAULT_VAULT_CONFIG,
+  DEFAULT_CURRENCIES,
   RATE_LIMIT_PER_MINUTE,
 } from './budget.js';
 

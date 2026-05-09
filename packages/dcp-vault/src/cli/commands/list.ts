@@ -27,7 +27,7 @@ import { VaultStorage } from '@dcprotocol/core';
 export const listCommand = new Command('list')
   .description('List all stored scopes (values not shown)')
   .option('-t, --type <type>', 'Filter by type: wallet, identity, address, preferences')
-  .option('-c, --chain <chain>', 'Filter by chain: solana, base, ethereum')
+  .option('-c, --chain <chain>', 'Filter by chain: solana')
   .option('-v, --verbose', 'Show additional details')
   .action(async (options) => {
     try {

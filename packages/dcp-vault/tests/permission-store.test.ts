@@ -76,7 +76,7 @@ describe('PermissionStore', () => {
         access_mode: 'reveal',
       }));
 
-      const result = await store.check(testAgentId, 'wallet.ethereum.primary', 'reveal');
+      const result = await store.check(testAgentId, 'wallet.bitcoin.primary', 'reveal');
       expect(result).toBeNull();
     });
 
@@ -135,7 +135,7 @@ describe('PermissionStore', () => {
     it('should match * in middle of pattern', async () => {
       await store.grant(createTestPermission({ resource_pattern: 'wallet.*.primary' }));
       expect(await store.check(testAgentId, 'wallet.solana.primary', 'reveal')).not.toBeNull();
-      expect(await store.check(testAgentId, 'wallet.ethereum.primary', 'reveal')).not.toBeNull();
+      expect(await store.check(testAgentId, 'wallet.bitcoin.primary', 'reveal')).not.toBeNull();
       expect(await store.check(testAgentId, 'wallet.solana.secondary', 'reveal')).toBeNull();
     });
 
@@ -200,7 +200,7 @@ describe('PermissionStore', () => {
         budget_currency: 'USD',
       }));
       await store.grant(createTestPermission({
-        resource_pattern: 'wallet.ethereum.*',
+        resource_pattern: 'wallet.solana.secondary.*',
         budget_daily: 500,
         budget_currency: 'USD',
       }));

@@ -3,11 +3,12 @@
  *
  * Implements:
  * - Solana (Ed25519) keypair generation
- * - Base/EVM (secp256k1) keypair generation
  * - Transaction signing (returns signed tx, NEVER the key)
  * - Message signing (returns signature, NEVER the key)
  * - Immediate encryption after key generation (~5ms plaintext window)
  * - Memory zeroization after every operation
+ *
+ * Architecture supports multiple chains. Currently Solana only.
  *
  * CRITICAL SECURITY RULES:
  * 1. Private key exists in plaintext for ~5ms during generation
@@ -17,7 +18,6 @@
  */
 
 import { Keypair, Transaction, VersionedTransaction } from '@solana/web3.js';
-import { Wallet, Transaction as EthTransaction, TypedDataField, TypedDataDomain } from 'ethers';
 import bs58 from 'bs58';
 import {
   Chain,
@@ -37,8 +37,6 @@ import { envelopeEncrypt, envelopeDecrypt, zeroize } from './crypto.js';
 /** Supported chains and their key types */
 const CHAIN_KEY_TYPES: Record<Chain, KeyType> = {
   solana: 'ed25519',
-  base: 'secp256k1',
-  ethereum: 'secp256k1',
 };
 
 // ============================================================================
@@ -61,11 +59,8 @@ export function generateWalletKeypair(chain: Chain): WalletKeyData {
     throw new VaultError('INVALID_CHAIN', `Unsupported chain: ${chain}`);
   }
 
-  if (keyType === 'ed25519') {
-    return generateSolanaKeypair(chain);
-  } else {
-    return generateEvmKeypair(chain);
-  }
+  // Currently only Solana supported
+  return generateSolanaKeypair(chain);
 }
 
 /**
@@ -83,25 +78,6 @@ function generateSolanaKeypair(chain: Chain): WalletKeyData {
     chain,
     public_address: publicAddress,
     key_type: 'ed25519',
-    private_key: privateKey,
-  };
-}
-
-/**
- * Generate EVM secp256k1 keypair
- */
-function generateEvmKeypair(chain: Chain): WalletKeyData {
-  const wallet = Wallet.createRandom();
-  const publicAddress = wallet.address;
-
-  // Extract private key (32 bytes, without 0x prefix)
-  const privateKeyHex = wallet.privateKey.slice(2); // Remove '0x'
-  const privateKey = Buffer.from(privateKeyHex, 'hex');
-
-  return {
-    chain,
-    public_address: publicAddress,
-    key_type: 'secp256k1',
     private_key: privateKey,
   };
 }
@@ -230,81 +206,12 @@ export function signSolanaTransaction(
 }
 
 /**
- * Sign an EVM transaction (Base, Ethereum)
- *
- * SECURITY: Private key is decrypted, used for signing, then immediately zeroized.
- * The signed transaction is returned, NEVER the private key.
- *
- * @param encryptedKey - Encrypted wallet from storage
- * @param masterKey - Master key from OS Keychain
- * @param unsignedTx - JSON string of unsigned transaction request
- * @param chain - The chain (base or ethereum)
- * @returns Signed transaction (serialized) and signature
- */
-export async function signEvmTransaction(
-  encryptedKey: EncryptedPayload,
-  masterKey: Buffer,
-  unsignedTx: string,
-  chain: Chain
-): Promise<SignResult> {
-  // Decrypt private key
-  const privateKey = envelopeDecrypt(encryptedKey, masterKey);
-
-  try {
-    // Create wallet from private key (ethers v6)
-    const privateKeyHex = '0x' + privateKey.toString('hex');
-    const wallet = new Wallet(privateKeyHex);
-
-    // Parse transaction request: accept JSON or raw RLP hex
-    let txRequest: Record<string, unknown>;
-    const trimmed = unsignedTx.trim();
-    if (trimmed.startsWith('{')) {
-      txRequest = JSON.parse(trimmed);
-    } else if (trimmed.startsWith('0x')) {
-      // Raw RLP hex: parse and convert to TransactionRequest
-      const parsed = EthTransaction.from(trimmed);
-      txRequest = {
-        to: parsed.to,
-        data: parsed.data,
-        value: parsed.value,
-        nonce: parsed.nonce,
-        chainId: parsed.chainId,
-        type: parsed.type,
-        gasLimit: parsed.gasLimit,
-        gasPrice: parsed.gasPrice,
-        maxFeePerGas: parsed.maxFeePerGas,
-        maxPriorityFeePerGas: parsed.maxPriorityFeePerGas,
-        accessList: parsed.accessList,
-      };
-    } else {
-      throw new VaultError('INVALID_TX', 'Invalid unsigned transaction format for EVM');
-    }
-
-    // Sign the transaction - this returns the fully serialized signed transaction
-    const signedTxSerialized = await wallet.signTransaction(txRequest as any);
-
-    // Parse the signed transaction to extract signature
-    const signedTx = EthTransaction.from(signedTxSerialized);
-    const signature = signedTx.signature;
-
-    return {
-      signed_tx: signedTxSerialized,
-      signature: signature ? signature.serialized : '',
-      chain,
-    };
-  } finally {
-    // CRITICAL: Zeroize private key from memory
-    zeroize(privateKey);
-  }
-}
-
-/**
  * Sign a transaction for any supported chain
  *
  * @param encryptedKey - Encrypted wallet from storage
  * @param masterKey - Master key from OS Keychain
  * @param chain - The blockchain
- * @param unsignedTx - Unsigned transaction (base64 for Solana, JSON for EVM)
+ * @param unsignedTx - Unsigned transaction (base64 encoded)
  * @returns Signed transaction and signature
  */
 export async function signTransaction(
@@ -313,17 +220,12 @@ export async function signTransaction(
   chain: Chain,
   unsignedTx: string
 ): Promise<SignResult> {
-  const keyType = CHAIN_KEY_TYPES[chain];
-
-  if (!keyType) {
+  if (!CHAIN_KEY_TYPES[chain]) {
     throw new VaultError('INVALID_CHAIN', `Unsupported chain: ${chain}`);
   }
 
-  if (chain === 'solana') {
-    return signSolanaTransaction(encryptedKey, masterKey, unsignedTx);
-  } else {
-    return signEvmTransaction(encryptedKey, masterKey, unsignedTx, chain);
-  }
+  // Currently only Solana supported
+  return signSolanaTransaction(encryptedKey, masterKey, unsignedTx);
 }
 
 // ============================================================================
@@ -366,80 +268,6 @@ export function signSolanaMessage(
   }
 }
 
-/**
- * Sign an arbitrary message (EVM)
- *
- * @param encryptedKey - Encrypted wallet from storage
- * @param masterKey - Master key from OS Keychain
- * @param message - Message to sign (utf8 string or raw bytes)
- * @returns Hex encoded signature
- */
-export async function signEvmMessage(
-  encryptedKey: EncryptedPayload,
-  masterKey: Buffer,
-  message: string | Uint8Array
-): Promise<string> {
-  const privateKey = envelopeDecrypt(encryptedKey, masterKey);
-
-  try {
-    const privateKeyHex = '0x' + privateKey.toString('hex');
-    const wallet = new Wallet(privateKeyHex);
-
-    const signature = await wallet.signMessage(message);
-    return signature;
-  } finally {
-    zeroize(privateKey);
-  }
-}
-
-/**
- * Sign typed data (EIP-712, EVM)
- *
- * @param encryptedKey - Encrypted wallet from storage
- * @param masterKey - Master key from OS Keychain
- * @param typedData - EIP-712 typed data object
- * @returns Hex encoded signature
- */
-export async function signEvmTypedData(
-  encryptedKey: EncryptedPayload,
-  masterKey: Buffer,
-  typedData: {
-    domain?: TypedDataDomain;
-    types?: Record<string, TypedDataField[]>;
-    message?: Record<string, unknown>;
-  }
-): Promise<string> {
-  if (!typedData || typeof typedData !== 'object') {
-    throw new VaultError('INTERNAL_ERROR', 'typed_data is required');
-  }
-
-  const { domain, types, message } = typedData;
-  if (!domain || !types || !message) {
-    throw new VaultError('INTERNAL_ERROR', 'typed_data must include domain, types, and message');
-  }
-
-  const privateKey = envelopeDecrypt(encryptedKey, masterKey);
-
-  try {
-    const privateKeyHex = '0x' + privateKey.toString('hex');
-    const wallet = new Wallet(privateKeyHex);
-
-    const typedTypes = { ...types } as Record<string, TypedDataField[]>;
-    if (typedTypes.EIP712Domain) {
-      delete typedTypes.EIP712Domain;
-    }
-
-    const signature = await wallet.signTypedData(
-      domain as Record<string, unknown>,
-      typedTypes,
-      message as Record<string, unknown>
-    );
-    return signature;
-  } finally {
-    zeroize(privateKey);
-  }
-}
-
 // ============================================================================
 // Import Wallet (from existing private key)
 // ============================================================================
@@ -451,7 +279,7 @@ export async function signEvmTypedData(
  * Caller should warn user to delete the original key source.
  *
  * @param chain - Blockchain the wallet is for
- * @param privateKeyInput - Private key (base58 for Solana, hex for EVM)
+ * @param privateKeyInput - Private key (base58 for Solana)
  * @param masterKey - Master key from OS Keychain
  * @returns Encrypted payload + wallet info
  */
@@ -460,20 +288,12 @@ export function importWallet(
   privateKeyInput: string,
   masterKey: Buffer
 ): { encrypted: EncryptedPayload; info: WalletInfo } {
-  const keyType = CHAIN_KEY_TYPES[chain];
-
-  if (!keyType) {
+  if (!CHAIN_KEY_TYPES[chain]) {
     throw new VaultError('INVALID_CHAIN', `Unsupported chain: ${chain}`);
   }
 
-  let walletData: WalletKeyData;
-
-  if (chain === 'solana') {
-    walletData = importSolanaWallet(chain, privateKeyInput);
-  } else {
-    walletData = importEvmWallet(chain, privateKeyInput);
-  }
-
+  // Currently only Solana supported
+  const walletData = importSolanaWallet(chain, privateKeyInput);
   return encryptWalletKey(walletData, masterKey);
 }
 
@@ -509,33 +329,6 @@ function importSolanaWallet(chain: Chain, privateKeyBase58: string): WalletKeyDa
   }
 }
 
-/**
- * Import EVM wallet from hex encoded private key
- */
-function importEvmWallet(chain: Chain, privateKeyHex: string): WalletKeyData {
-  try {
-    // Remove 0x prefix if present
-    const cleanHex = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
-    const privateKey = Buffer.from(cleanHex, 'hex');
-
-    if (privateKey.length !== 32) {
-      throw new VaultError('INTERNAL_ERROR', 'Invalid EVM private key length');
-    }
-
-    const wallet = new Wallet('0x' + cleanHex);
-
-    return {
-      chain,
-      public_address: wallet.address,
-      key_type: 'secp256k1',
-      private_key: privateKey,
-    };
-  } catch (error) {
-    if (error instanceof VaultError) throw error;
-    throw new VaultError('INTERNAL_ERROR', 'Failed to import EVM wallet: invalid key format');
-  }
-}
-
 // ============================================================================
 // Utility Functions
 // ============================================================================
@@ -554,8 +347,7 @@ export function getPublicAddress(walletInfo: WalletInfo): string {
  * Get supported operations for a chain
  */
 export function getSupportedOperations(chain: Chain): string[] {
-  const keyType = CHAIN_KEY_TYPES[chain];
-  if (!keyType) {
+  if (!CHAIN_KEY_TYPES[chain]) {
     throw new VaultError('INVALID_CHAIN', `Unsupported chain: ${chain}`);
   }
   return ['sign_tx', 'sign_message', 'get_address'];

@@ -14,7 +14,7 @@ npm install @dcprotocol/core
 
 ```text
 crypto      encryption, signatures, canonical JSON
-wallet      Solana and EVM wallet operations
+wallet      Solana wallet operations
 storage     SQLite vault storage and audit data
 budget      budget and policy helpers
 pairing     signed pairing grants and remote-agent invites
