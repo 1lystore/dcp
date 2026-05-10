@@ -140,6 +140,14 @@ Use the DCP MCP URL printed by the installer. The URL is environment-specific, s
 
 After changing OpenClaw MCP config, start a fresh OpenClaw chat/session so the new tools are loaded.
 
+If pairing works but your agent does not see DCP tools, check the remote-agent guide:
+
+```text
+packages/dcp-agent/README.md
+```
+
+It includes the exact health checks, OpenClaw config checks, Docker/UFW fix path, and manual MCP fallback.
+
 ## Developer Checks
 
 For contributors working from this repo:
