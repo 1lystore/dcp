@@ -160,3 +160,4 @@ jobs:
             - Cross-platform support (macOS, Windows, Linux)
           draft: false
           prerelease: ${{ github.event_name == 'workflow_dispatch' }}
+          overwrite_files: true
