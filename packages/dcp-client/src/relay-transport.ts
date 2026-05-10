@@ -30,6 +30,7 @@ import type {
   HealthCheckResult,
   PairServiceInput,
   PairServiceResult,
+  ConsentStatusResult,
   RelayEnvelope,
   RelayResponseEnvelope,
   DecryptedRelayPayload,
@@ -566,6 +567,29 @@ export class RelayTransport implements Transport {
     };
   }
 
+  async getConsentStatus(consentId: string): Promise<ConsentStatusResult> {
+    const response = await this.relayRequest('consent_status', {
+      consent_id: consentId,
+    });
+
+    const data = response as {
+      status?: ConsentStatusResult['status'];
+      session_id?: string;
+      expires_at?: string;
+      error?: { code?: string; message?: string };
+    };
+
+    if (data.error) {
+      throw parseErrorResponse({ error: data.error });
+    }
+
+    return {
+      status: data.status || 'not_found',
+      sessionId: data.session_id,
+      expiresAt: data.expires_at,
+    };
+  }
+
   // --------------------------------------------------------------------------
   // Session Management
   // --------------------------------------------------------------------------
@@ -874,6 +898,8 @@ export class RelayTransport implements Transport {
         return 'write';
       case 'vault_pair':
         return 'write';
+      case 'consent_status':
+        return 'read';
       case 'budget_check':
         return 'budget';
       case 'get_address':

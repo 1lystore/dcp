@@ -75,9 +75,9 @@ export default function Agents() {
     // Use || instead of ?? so 0 falls back to defaults (0 usually means "not configured")
     const agentBudget = agent.budget;
     const currency = agentBudget?.currency || 'USDC';
-    setEditBudgetDaily(agentBudget?.daily || defaultBudget?.daily_budget?.[currency] || 100);
+    setEditBudgetDaily(agentBudget?.daily || defaultBudget?.daily_budget?.[currency] || 5);
     setEditBudgetCurrency(currency);
-    setEditAutoApprove(agentBudget?.auto_approve_under || defaultBudget?.approval_threshold?.[currency] || 5);
+    setEditAutoApprove(agentBudget?.auto_approve_under || defaultBudget?.approval_threshold?.[currency] || 0.0001);
   };
 
   const handleSaveEdit = async () => {
@@ -134,6 +134,9 @@ export default function Agents() {
   };
 
   const getEnvironment = (agent: AgentConnection): { type: 'local' | 'vps' | 'sandbox'; icon: string; label: string } => {
+    if (agent.agent_id.startsWith('vps_')) {
+      return { type: 'vps', icon: '🌐', label: 'Remote' };
+    }
     if (agent.mode === 'mcp') {
       return { type: 'local', icon: '💻', label: 'Local AI' };
     }

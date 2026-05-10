@@ -39,7 +39,11 @@ import { runMcpServer } from './mcp.js';
 import { runHttpMcpServer } from './http-mcp.js';
 import { AgentError } from './types.js';
 import { processSecretsRequest, fetchSecret, fetchSecrets } from './secrets.js';
-import { installServiceCommand, uninstallServiceCommand } from './commands/install-service.js';
+import {
+  configureOpenClawCommand,
+  installServiceCommand,
+  uninstallServiceCommand,
+} from './commands/install-service.js';
 import type { PairOptions, RunOptions, StatusOptions } from './types.js';
 
 // ============================================================================
@@ -252,6 +256,9 @@ async function runCommand(options: RunOptions): Promise<void> {
 
     // Build args for child process (same args minus --daemon)
     const args: string[] = ['run', '--mode', mode, '--port', String(port)];
+    if (options.host) {
+      args.push('--host', options.host);
+    }
     if (options.debug) {
       args.push('--debug');
     }
@@ -286,7 +293,7 @@ async function runCommand(options: RunOptions): Promise<void> {
     console.log();
     console.log(`  ${dim('PID file:')}  ${pidFile}`);
     console.log(`  ${dim('Log file:')}  ${logFile}`);
-    console.log(`  ${dim('Endpoint:')}  http://127.0.0.1:${port}`);
+    console.log(`  ${dim('Endpoint:')}  http://${options.host || '127.0.0.1'}:${port}`);
     console.log();
     console.log(dim(`To stop: kill ${child.pid}`));
     console.log(dim(`To view logs: tail -f ${logFile}`));
@@ -317,7 +324,7 @@ async function runCommand(options: RunOptions): Promise<void> {
       console.log(dim('─'.repeat(50)));
       console.log();
       await runHttpMcpServer(config, {
-        host: '127.0.0.1',
+        host: options.host || '127.0.0.1',
         port,
         forceRelay: options.forceRelay,
       });
@@ -548,6 +555,7 @@ program
   .description('Run the agent')
   .option('-m, --mode <mode>', 'Run mode: proxy, mcp, http-mcp, or sdk (default: proxy)')
   .option('-p, --port <port>', 'Port for proxy mode (default: 8420)')
+  .option('--host <host>', 'Host for HTTP MCP/proxy mode (default: 127.0.0.1)')
   .option('-a, --agent <id>', 'Agent ID or name to use (default: first configured)')
   .option('-d, --debug', 'Enable debug logging')
   .option('--daemon', 'Run in background (survives SSH disconnect)')
@@ -611,6 +619,7 @@ program
 
 // VPS service installation commands
 program.addCommand(installServiceCommand);
+program.addCommand(configureOpenClawCommand);
 program.addCommand(uninstallServiceCommand);
 
 program.parse();

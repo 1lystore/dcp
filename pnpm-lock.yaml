@@ -11,10 +11,10 @@ importers:
   packages/dcp-agent:
     dependencies:
       '@dcprotocol/client':
-        specifier: workspace:^
+        specifier: ^2.0.1
         version: link:../dcp-client
       '@dcprotocol/core':
-        specifier: workspace:^
+        specifier: ^2.0.1
         version: link:../dcp-core
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.0
@@ -54,7 +54,7 @@ importers:
   packages/dcp-client:
     dependencies:
       '@dcprotocol/core':
-        specifier: workspace:^
+        specifier: ^2.0.0
         version: link:../dcp-core
       '@hpke/chacha20poly1305':
         specifier: ^1.6.0
@@ -244,7 +244,7 @@ importers:
   packages/dcp-relay-client:
     dependencies:
       '@dcprotocol/relay':
-        specifier: workspace:^
+        specifier: ^2.0.1
         version: link:../dcp-relay
       '@hpke/chacha20poly1305':
         specifier: ^1.6.0
@@ -321,13 +321,13 @@ importers:
   packages/dcp-vault:
     dependencies:
       '@dcprotocol/client':
-        specifier: workspace:^
+        specifier: ^2.0.1
         version: link:../dcp-client
       '@dcprotocol/core':
-        specifier: workspace:^
+        specifier: ^2.0.0
         version: link:../dcp-core
       '@dcprotocol/relay-client':
-        specifier: workspace:^
+        specifier: ^2.0.0
         version: link:../dcp-relay-client
       '@fastify/cors':
         specifier: ^10.0.2

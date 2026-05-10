@@ -5,6 +5,7 @@
  */
 
 import { DcpClient } from '@dcprotocol/client';
+import type { ConsentStatusResult } from '@dcprotocol/client';
 import { AgentConfig, AgentState, AgentError } from './types.js';
 
 // ============================================================================
@@ -244,6 +245,37 @@ export class AgentConnection {
       created: result.created,
       updated: result.updated,
       sensitivity: result.sensitivity ?? 'standard',
+    };
+  }
+
+  /**
+   * Get consent status. Local agents can query the local vault server; remote
+   * agents ask through the relay so the VPS does not need the desktop vault on
+   * localhost.
+   */
+  async getConsentStatus(consentId: string): Promise<ConsentStatusResult> {
+    this.ensureConnected();
+    this.updateState();
+
+    if (this.client!.getMode() === 'relay') {
+      return this.client!.getRelayConsentStatus(consentId);
+    }
+
+    const response = await fetch(`http://127.0.0.1:8421/consent/${consentId}/status`);
+    if (!response.ok) {
+      return { status: 'not_found' };
+    }
+
+    const data = (await response.json()) as {
+      status?: ConsentStatusResult['status'];
+      session_id?: string;
+      expires_at?: string;
+    };
+
+    return {
+      status: data.status || 'not_found',
+      sessionId: data.session_id,
+      expiresAt: data.expires_at,
     };
   }
 

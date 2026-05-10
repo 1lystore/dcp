@@ -36,6 +36,7 @@ import type {
   HealthCheckResult,
   PairServiceInput,
   PairServiceResult,
+  ConsentStatusResult,
 } from './types.js';
 import {
   DEFAULT_LOCAL_URL,
@@ -324,6 +325,20 @@ export class DcpClient {
       throw invalidConfig('pairService requires relay mode');
     }
     return transport.pairService(input);
+  }
+
+  /**
+   * Get consent status through the relay.
+   *
+   * This is used by remote sidecars after a vault returns CONSENT_REQUIRED.
+   * Local callers should use the vault REST consent endpoint directly.
+   */
+  async getRelayConsentStatus(consentId: string): Promise<ConsentStatusResult> {
+    const transport = await this.getTransport();
+    if (!(transport instanceof RelayTransport)) {
+      throw invalidConfig('getRelayConsentStatus requires relay mode');
+    }
+    return transport.getConsentStatus(consentId);
   }
 
   /**

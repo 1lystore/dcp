@@ -19,6 +19,7 @@ interface LocalMcpStatus {
 type Tab = 'local' | 'remote' | 'telegram';
 
 const TELEGRAM_BOT_USERNAME = 'dcpagentBot';
+const REMOTE_INVITE_STORAGE_KEY = 'dcp.latestRemoteInvite';
 
 interface TelegramConfig {
   configured: boolean;
@@ -42,6 +43,42 @@ const LOCAL_AGENT_TYPES: { id: LocalAgentType; label: string; configPath: string
   { id: 'other', label: 'Other MCP Client', configPath: 'Check your app documentation' },
 ];
 
+const isActiveInvite = (invite: VpsPairingInviteResponse | null): invite is VpsPairingInviteResponse => {
+  if (!invite?.token || !invite.expires_at) return false;
+  return new Date(invite.expires_at).getTime() > Date.now();
+};
+
+const loadStoredRemoteInvite = (): VpsPairingInviteResponse | null => {
+  try {
+    const raw = window.localStorage.getItem(REMOTE_INVITE_STORAGE_KEY);
+    if (!raw) return null;
+    const invite = JSON.parse(raw) as VpsPairingInviteResponse;
+    if (!isActiveInvite(invite)) {
+      window.localStorage.removeItem(REMOTE_INVITE_STORAGE_KEY);
+      return null;
+    }
+    return invite;
+  } catch {
+    return null;
+  }
+};
+
+const saveStoredRemoteInvite = (invite: VpsPairingInviteResponse): void => {
+  try {
+    window.localStorage.setItem(REMOTE_INVITE_STORAGE_KEY, JSON.stringify(invite));
+  } catch {
+    // If storage is unavailable, the current page state still works.
+  }
+};
+
+const clearStoredRemoteInvite = (): void => {
+  try {
+    window.localStorage.removeItem(REMOTE_INVITE_STORAGE_KEY);
+  } catch {
+    // Ignore storage failures.
+  }
+};
+
 export default function Connect() {
   const [activeTab, setActiveTab] = useState<Tab>('local');
 
@@ -58,7 +95,7 @@ export default function Connect() {
 
   // Remote Agent state
   const [agentName, setAgentName] = useState('');
-  const [pairResult, setPairResult] = useState<VpsPairingInviteResponse | null>(null);
+  const [pairResult, setPairResult] = useState<VpsPairingInviteResponse | null>(() => loadStoredRemoteInvite());
   const [pairingLoading, setPairingLoading] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
@@ -230,6 +267,7 @@ export default function Connect() {
         ttl_ms: 3600000, // 1 hour
       });
       setPairResult(res);
+      saveStoredRemoteInvite(res);
       setStatus(`VPS invite generated for "${res.agent_name}"`);
     } catch (err) {
       setStatus(err instanceof Error ? err.message : 'Failed to create VPS invite');
@@ -238,15 +276,53 @@ export default function Connect() {
     }
   };
 
-  const copyToken = async () => {
-    if (!pairResult?.token) return;
+  const remoteInstallCommand = useMemo(() => {
+    if (!pairResult?.token) return '';
+    return `curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- '${pairResult.token}'`;
+  }, [pairResult]);
+
+  const remoteNpxInstallCommand = useMemo(() => {
+    if (!pairResult?.token) return '';
+    return `sudo npx --yes @dcprotocol/agent@latest install-service '${pairResult.token}'`;
+  }, [pairResult]);
+
+  const openClawGatewayUserCommand =
+    'sudo npx --yes @dcprotocol/agent@latest configure-openclaw --user openclaw';
+
+  const openClawManualCommand =
+    'sudo npx --yes @dcprotocol/agent@latest configure-openclaw --manual';
+
+  const copyText = async (text: string, message: string) => {
     try {
-      await navigator.clipboard.writeText(pairResult.token);
-      setStatus('Token copied!');
+      await navigator.clipboard.writeText(text);
+      setStatus(message);
     } catch {
       setStatus('Failed to copy');
     }
   };
+
+  const copyToken = async () => {
+    if (!pairResult?.token) return;
+    await copyText(pairResult.token, 'Token copied!');
+  };
+
+  useEffect(() => {
+    if (!pairResult) return;
+    if (!isActiveInvite(pairResult)) {
+      setPairResult(null);
+      clearStoredRemoteInvite();
+      return;
+    }
+
+    const expiresInMs = new Date(pairResult.expires_at).getTime() - Date.now();
+    const timeout = window.setTimeout(() => {
+      setPairResult(null);
+      clearStoredRemoteInvite();
+      setStatus('Remote invite expired. Create a new one to continue.');
+    }, Math.max(0, expiresInMs));
+
+    return () => window.clearTimeout(timeout);
+  }, [pairResult]);
 
   // Agent ID mapping
   const agentIdMap: Record<LocalAgentType, string> = {
@@ -652,6 +728,9 @@ export default function Connect() {
                 <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
                   Expires: {new Date(pairResult.expires_at).toLocaleTimeString()}
                 </div>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                  This command stays available on this page until it expires.
+                </div>
               </div>
 
               <div style={{
@@ -672,7 +751,82 @@ export default function Connect() {
                   wordBreak: 'break-all',
                   margin: 0,
                 }}>
-{`sudo npx --yes @dcprotocol/agent install-service '${pairResult.token}'`}
+{remoteInstallCommand}
+                </pre>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '8px' }}>
+                  Installs and pairs the DCP service, then tries to configure OpenClaw automatically.
+                </div>
+              </div>
+
+              <div style={{
+                padding: '16px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+              }}>
+                <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>
+                  npm fallback:
+                </div>
+                <pre style={{
+                  background: 'var(--bg-secondary)',
+                  padding: '12px',
+                  borderRadius: '6px',
+                  fontSize: '11px',
+                  overflow: 'auto',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                  margin: 0,
+                }}>
+{remoteNpxInstallCommand}
+                </pre>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '8px' }}>
+                  Use this only if you prefer npm and the VPS already has a working Node/npm install.
+                </div>
+              </div>
+
+              <div style={{
+                padding: '16px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+              }}>
+                <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>
+                  If OpenClaw is not detected:
+                </div>
+                <pre style={{
+                  background: 'var(--bg-secondary)',
+                  padding: '12px',
+                  borderRadius: '6px',
+                  fontSize: '11px',
+                  overflow: 'auto',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                  margin: 0,
+                }}>
+{openClawGatewayUserCommand}
+                </pre>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '8px' }}>
+                  Use this after install if OpenClaw runs as the <strong>openclaw</strong> Linux user. It uses the DCP MCP URL saved by the installer.
+                </div>
+              </div>
+
+              <div style={{
+                padding: '16px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+              }}>
+                <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>
+                  Manual MCP config:
+                </div>
+                <pre style={{
+                  background: 'var(--bg-secondary)',
+                  padding: '12px',
+                  borderRadius: '6px',
+                  fontSize: '11px',
+                  overflow: 'auto',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                  margin: 0,
+                }}>
+{openClawManualCommand}
                 </pre>
               </div>
 
@@ -687,21 +841,47 @@ export default function Connect() {
                 ⏳ After running, a pairing request will appear on the <strong>Agents</strong> page. Verify the phrase matches before approving!
               </div>
 
+              <div style={{
+                padding: '12px 16px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+                fontSize: '13px',
+                color: 'var(--text-secondary)',
+              }}>
+                After OpenClaw config changes, start a fresh OpenClaw chat so new DCP tools are loaded.
+              </div>
+
               <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                 <button
                   className="btn btn-primary"
-                  onClick={async () => {
-                    await navigator.clipboard.writeText(`sudo npx --yes @dcprotocol/agent install-service '${pairResult.token}'`);
-                    setStatus('Command copied!');
-                  }}
+                  onClick={() => void copyText(remoteInstallCommand, 'Install command copied!')}
                 >
-                  Copy Command
+                  Copy Install
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => void copyText(remoteNpxInstallCommand, 'npm command copied!')}
+                >
+                  Copy npm
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => void copyText(openClawGatewayUserCommand, 'OpenClaw command copied!')}
+                >
+                  Copy OpenClaw
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => void copyText(openClawManualCommand, 'Manual config command copied!')}
+                >
+                  Copy Manual
                 </button>
                 <button className="btn btn-secondary" onClick={copyToken}>
                   Copy Token Only
                 </button>
                 <button className="btn btn-secondary" onClick={() => {
                   setPairResult(null);
+                  clearStoredRemoteInvite();
                   setAgentName('');
                 }}>
                   Create Another

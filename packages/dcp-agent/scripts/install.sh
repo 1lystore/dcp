@@ -1,174 +1,115 @@
-#!/bin/bash
-# DCP Agent Install Script
-# Usage: curl -fsSL https://dcp.1ly.store/install | sh
-# With pairing: curl -fsSL https://dcp.1ly.store/install | sh -s -- --pair <grant>
-#
-# This script:
-# 1. Checks for Node.js (installs via nvm if missing)
-# 2. Installs @dcprotocol/agent globally
-# 3. Optionally pairs with a vault if --pair is provided
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
+DCP_NODE_VERSION="${DCP_NODE_VERSION:-22.22.2}"
+DCP_ROOT="${DCP_ROOT:-/opt/dcp}"
+DCP_NODE_DIR="$DCP_ROOT/node-v$DCP_NODE_VERSION"
+DCP_NODE_BIN="$DCP_NODE_DIR/bin"
+DCP_NPM="$DCP_NODE_BIN/npm"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+service_npm_command() {
+  local node_bin="$1"
+  local npm_bin="$2"
+  local bin_dir
+  bin_dir="$(dirname "$node_bin")"
+  echo "/usr/bin/env PATH=$bin_dir:$PATH $node_bin $npm_bin --loglevel=error"
+}
 
-# Logging
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+usage() {
+  echo "Usage:"
+  echo "  curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- 'dcp_vps_v1_...'"
+}
 
-# Parse arguments
-PAIR_GRANT=""
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    --pair)
-      PAIR_GRANT="$2"
-      shift 2
-      ;;
-    *)
-      shift
-      ;;
+die() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
+as_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    die "Run with sudo. Example: curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- 'dcp_vps_v1_...'"
+  fi
+}
+
+detect_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo "x64" ;;
+    aarch64|arm64) echo "arm64" ;;
+    *) die "Unsupported CPU architecture: $(uname -m)" ;;
   esac
-done
-
-echo ""
-echo "╔══════════════════════════════════════════╗"
-echo "║       DCP Agent Installer                ║"
-echo "║       Secure secrets for AI agents       ║"
-echo "╚══════════════════════════════════════════╝"
-echo ""
-
-# Check OS
-OS="$(uname -s)"
-case "$OS" in
-  Linux*)   PLATFORM="linux" ;;
-  Darwin*)  PLATFORM="macos" ;;
-  *)        log_error "Unsupported OS: $OS"; exit 1 ;;
-esac
-log_info "Detected platform: $PLATFORM"
-
-# Check for Node.js
-check_node() {
-  if command -v node &> /dev/null; then
-    NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
-    if [ "$NODE_VERSION" -eq 22 ]; then
-      log_success "Node.js $(node -v) detected"
-      return 0
-    else
-      log_warn "Node.js $(node -v) found but DCP requires Node 22"
-      return 1
-    fi
-  fi
-  return 1
 }
 
-# Install Node.js via nvm
-install_node() {
-  log_info "Installing Node.js via nvm..."
-
-  # Install nvm if not present
-  if [ ! -d "$HOME/.nvm" ]; then
-    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-  fi
-
-  # Load nvm
-  export NVM_DIR="$HOME/.nvm"
-  [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-
-  # Install the DCP runtime Node version
-  nvm install 22.22.2
-  nvm use 22.22.2
-
-  log_success "Node.js $(node -v) installed"
+has_node_22() {
+  command -v node >/dev/null 2>&1 || return 1
+  local major
+  major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+  [ "$major" = "22" ]
 }
 
-# Main installation
+install_private_node() {
+  if [ -x "$DCP_NPM" ]; then
+    return 0
+  fi
+
+  need_cmd curl
+  need_cmd tar
+
+  local arch tarball url tmp
+  arch="$(detect_arch)"
+  tarball="node-v$DCP_NODE_VERSION-linux-$arch.tar.xz"
+  url="https://nodejs.org/dist/v$DCP_NODE_VERSION/$tarball"
+  tmp="$(mktemp -d)"
+
+  echo "Installing DCP runtime..."
+  mkdir -p "$DCP_ROOT"
+  curl -fsSL "$url" -o "$tmp/$tarball"
+  tar -xJf "$tmp/$tarball" -C "$tmp"
+  rm -rf "$DCP_NODE_DIR"
+  mv "$tmp/node-v$DCP_NODE_VERSION-linux-$arch" "$DCP_NODE_DIR"
+  rm -rf "$tmp"
+}
+
+stop_existing_service() {
+  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files dcp-agent.service >/dev/null 2>&1; then
+    echo "Stopping existing DCP agent service..."
+    systemctl stop dcp-agent >/dev/null 2>&1 || true
+  fi
+}
+
 main() {
-  # Check/install Node.js
-  if ! check_node; then
-    install_node
+  as_root
+
+  local invite="${1:-}"
+  if [ "$invite" = "--pair" ]; then
+    invite="${2:-}"
   fi
 
-  # Install dcp-agent
-  log_info "Installing @dcprotocol/agent..."
-  npm install -g @dcprotocol/agent
-  log_success "dcp-agent installed"
+  if [ -z "$invite" ]; then
+    usage
+    exit 1
+  fi
 
-  # Verify installation
-  if command -v dcp-agent &> /dev/null; then
-    log_success "Installation verified: $(dcp-agent --version)"
+  if [[ "$invite" != dcp_vps_v1_* ]]; then
+    die "Invalid DCP VPS invite. It must start with dcp_vps_v1_"
+  fi
+
+  stop_existing_service
+
+  if has_node_22 && command -v npm >/dev/null 2>&1; then
+    echo "Using system Node $(node -v) for install."
+    local node_bin npm_bin
+    node_bin="$(command -v node)"
+    npm_bin="$(command -v npm)"
+    PATH="$(dirname "$node_bin"):$PATH" DCP_SERVICE_NPM="$(service_npm_command "$node_bin" "$npm_bin")" "$node_bin" "$npm_bin" --loglevel=error exec --yes --package @dcprotocol/agent@latest -- dcp-agent install-service "$invite"
   else
-    # Try adding npm global bin to PATH
-    NPM_BIN=$(npm bin -g 2>/dev/null || echo "$HOME/.npm-global/bin")
-    if [ -x "$NPM_BIN/dcp-agent" ]; then
-      log_warn "dcp-agent installed but not in PATH"
-      log_info "Add to your shell profile: export PATH=\"$NPM_BIN:\$PATH\""
-      export PATH="$NPM_BIN:$PATH"
-    fi
+    install_private_node
+    echo "Using DCP runtime $("$DCP_NODE_BIN/node" -v) for install."
+    PATH="$DCP_NODE_BIN:$PATH" DCP_SERVICE_NPM="$(service_npm_command "$DCP_NODE_BIN/node" "$DCP_NPM")" "$DCP_NODE_BIN/node" "$DCP_NPM" --loglevel=error exec --yes --package @dcprotocol/agent@latest -- dcp-agent install-service "$invite"
   fi
-
-  # Pair if grant provided
-  if [ -n "$PAIR_GRANT" ]; then
-    echo ""
-    log_info "Pairing with vault..."
-    dcp-agent pair "$PAIR_GRANT"
-    log_success "Agent paired successfully"
-  fi
-
-  echo ""
-  echo "╔══════════════════════════════════════════╗"
-  echo "║       Installation Complete!             ║"
-  echo "╚══════════════════════════════════════════╝"
-  echo ""
-
-  if [ -z "$PAIR_GRANT" ]; then
-    echo "Next steps:"
-    echo "  1. Get a pairing grant from your DCP vault (Desktop app or CLI)"
-    echo "  2. Run: dcp-agent pair <your-grant-token>"
-    echo "  3. Configure OpenClaw to use DCP secrets provider"
-    echo ""
-    echo "OpenClaw config (openclaw.json5):"
-    echo '  {'
-    echo '    secrets: {'
-    echo '      providers: {'
-    echo '        dcp: {'
-    echo '          source: "exec",'
-    echo '          command: "dcp-agent",'
-    echo '          args: ["secrets"]'
-    echo '        }'
-    echo '      }'
-    echo '    }'
-    echo '  }'
-  else
-    echo "Your agent is ready!"
-    echo ""
-    echo "Check status: dcp-agent status"
-    echo ""
-    echo "OpenClaw config (openclaw.json5):"
-    echo '  {'
-    echo '    secrets: {'
-    echo '      providers: {'
-    echo '        dcp: {'
-    echo '          source: "exec",'
-    echo '          command: "dcp-agent",'
-    echo '          args: ["secrets"]'
-    echo '        }'
-    echo '      }'
-    echo '    },'
-    echo '    providers: {'
-    echo '      openai: {'
-    echo '        apiKey: { "$ref": "dcp:credentials.api.openai" }'
-    echo '      }'
-    echo '    }'
-    echo '  }'
-  fi
-  echo ""
 }
 
-main
+main "$@"

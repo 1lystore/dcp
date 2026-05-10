@@ -259,6 +259,12 @@ export interface PairServiceResult {
   serviceId?: string;
 }
 
+export interface ConsentStatusResult {
+  status: 'pending' | 'approved' | 'denied' | 'expired' | 'consumed' | 'not_found';
+  sessionId?: string;
+  expiresAt?: string;
+}
+
 // ============================================================================
 // Transport Interface (internal)
 // ============================================================================

@@ -113,10 +113,32 @@ DCP_TELEGRAM_BOT_TOKEN="123456:..." dcp-telegram --host 127.0.0.1 --port 8423
 For a VPS or remote agent, create an invite in DCP Desktop and run the generated command:
 
 ```bash
-npx -y @dcprotocol/agent install-service 'dcp_vps_v1_...'
+curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- 'dcp_vps_v1_...'
 ```
 
-The remote agent talks to a local sidecar. The sidecar talks to the user's vault through the encrypted relay.
+That command installs the DCP agent service, pairs it with Desktop, starts the local HTTP MCP endpoint, and tries to add DCP to OpenClaw. The installer uses the system Node.js when it is compatible; otherwise it installs a private DCP runtime without changing OpenClaw.
+
+If you prefer npm and the VPS already has a working Node/npm install:
+
+```bash
+sudo npx --yes @dcprotocol/agent@latest install-service 'dcp_vps_v1_...'
+```
+
+If OpenClaw setup is not verified and the OpenClaw gateway runs as the `openclaw` Linux user:
+
+```bash
+sudo npx --yes @dcprotocol/agent@latest configure-openclaw --user openclaw
+```
+
+For custom OpenClaw setups, print the manual MCP config:
+
+```bash
+sudo npx --yes @dcprotocol/agent@latest configure-openclaw --manual
+```
+
+Use the DCP MCP URL printed by the installer. The URL is environment-specific, so do not copy a Docker bridge IP from another machine.
+
+After changing OpenClaw MCP config, start a fresh OpenClaw chat/session so the new tools are loaded.
 
 ## Developer Checks
 

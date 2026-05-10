@@ -53,9 +53,9 @@ describe('Budget Engine', () => {
       expect(config.version).toBe('1.0.0');
       expect(config.server_port).toBe(8420);
       expect(config.default_chain).toBe('solana');
-      expect(config.daily_budget.SOL).toBe(20);
-      expect(config.tx_limit.SOL).toBe(5);
-      expect(config.approval_threshold.SOL).toBe(2);
+      expect(config.daily_budget.SOL).toBe(0.05);
+      expect(config.tx_limit.SOL).toBe(0.01);
+      expect(config.approval_threshold.SOL).toBe(0.0001);
     });
 
     it('should save and load configuration', () => {
@@ -118,24 +118,21 @@ describe('Budget Engine', () => {
 
   describe('Budget Check - Per-Transaction Limit (B1)', () => {
     it('should allow transactions within limit', () => {
-      // Default tx_limit.SOL = 5
-      const result = budget.checkBudget(3, 'SOL', 'solana');
+      const result = budget.checkBudget(0.003, 'SOL', 'solana');
 
       expect(result.allowed).toBe(true);
-      expect(result.remaining_tx).toBe(2); // 5 - 3
+      expect(result.remaining_tx).toBeCloseTo(0.007);
     });
 
     it('should reject transactions exceeding limit', () => {
-      // Default tx_limit.SOL = 5
-      const result = budget.checkBudget(10, 'SOL', 'solana');
+      const result = budget.checkBudget(0.02, 'SOL', 'solana');
 
       expect(result.allowed).toBe(false);
       expect(result.reason).toContain('BUDGET_EXCEEDED_TX');
     });
 
     it('should allow exactly at limit', () => {
-      // Default tx_limit.SOL = 5
-      const result = budget.checkBudget(5, 'SOL', 'solana');
+      const result = budget.checkBudget(0.01, 'SOL', 'solana');
 
       expect(result.allowed).toBe(true);
     });
@@ -154,11 +151,11 @@ describe('Budget Engine', () => {
 
     it('should enforce budget and throw on exceeded', () => {
       expect(() => {
-        budget.enforceBudget(10, 'SOL', 'solana');
+        budget.enforceBudget(0.02, 'SOL', 'solana');
       }).toThrow(VaultError);
 
       try {
-        budget.enforceBudget(10, 'SOL', 'solana');
+        budget.enforceBudget(0.02, 'SOL', 'solana');
       } catch (error) {
         expect(error).toBeInstanceOf(VaultError);
         expect((error as VaultError).code).toBe('BUDGET_EXCEEDED_TX');
@@ -177,14 +174,13 @@ describe('Budget Engine', () => {
       );
 
       // Record some spending
-      storage.recordSpend(session.id, 10, 'SOL', 'solana', 'sign_tx', 'committed');
-      storage.recordSpend(session.id, 5, 'SOL', 'solana', 'sign_tx', 'committed');
+      storage.recordSpend(session.id, 0.01, 'SOL', 'solana', 'sign_tx', 'committed');
+      storage.recordSpend(session.id, 0.02, 'SOL', 'solana', 'sign_tx', 'committed');
 
-      // Check budget - daily_budget.SOL = 20, spent = 15
-      const result = budget.checkBudget(3, 'SOL', 'solana');
+      const result = budget.checkBudget(0.005, 'SOL', 'solana');
 
       expect(result.allowed).toBe(true);
-      expect(result.remaining_daily).toBe(2); // 20 - 15 - 3
+      expect(result.remaining_daily).toBeCloseTo(0.015);
     });
 
     it('should reject when daily limit exceeded', async () => {
@@ -195,11 +191,9 @@ describe('Budget Engine', () => {
         new Date(Date.now() + 30 * 60 * 1000)
       );
 
-      // Spend up to limit: 18 SOL
-      storage.recordSpend(session.id, 18, 'SOL', 'solana', 'sign_tx', 'committed');
+      storage.recordSpend(session.id, 0.045, 'SOL', 'solana', 'sign_tx', 'committed');
 
-      // Try to spend 5 more (18 + 5 = 23 > 20)
-      const result = budget.checkBudget(5, 'SOL', 'solana');
+      const result = budget.checkBudget(0.006, 'SOL', 'solana');
 
       expect(result.allowed).toBe(false);
       expect(result.reason).toContain('BUDGET_EXCEEDED_DAILY');
@@ -214,26 +208,22 @@ describe('Budget Engine', () => {
       );
 
       // Record pending and failed spends - these should NOT count
-      storage.recordSpend(session.id, 10, 'SOL', 'solana', 'sign_tx', 'pending');
-      storage.recordSpend(session.id, 10, 'SOL', 'solana', 'sign_tx', 'failed');
+      storage.recordSpend(session.id, 0.01, 'SOL', 'solana', 'sign_tx', 'pending');
+      storage.recordSpend(session.id, 0.01, 'SOL', 'solana', 'sign_tx', 'failed');
 
       // Also record a committed spend to verify only committed counts
-      storage.recordSpend(session.id, 5, 'SOL', 'solana', 'sign_tx', 'committed');
+      storage.recordSpend(session.id, 0.005, 'SOL', 'solana', 'sign_tx', 'committed');
 
-      // Try to spend 4 SOL (within tx_limit of 5)
-      // Daily spent = 5 (only committed counts, not pending/failed)
-      // 5 + 4 = 9 <= 20 (daily_budget), so should be allowed
-      const result = budget.checkBudget(4, 'SOL', 'solana');
+      const result = budget.checkBudget(0.004, 'SOL', 'solana');
 
       expect(result.allowed).toBe(true);
-      expect(result.remaining_daily).toBe(11); // 20 - 5 - 4 = 11
+      expect(result.remaining_daily).toBeCloseTo(0.041);
     });
   });
 
   describe('Budget Check - Approval Threshold (B3)', () => {
     it('should require approval above threshold', () => {
-      // Default approval_threshold.SOL = 2
-      const result = budget.checkBudget(3, 'SOL', 'solana');
+      const result = budget.checkBudget(0.001, 'SOL', 'solana');
 
       expect(result.allowed).toBe(true);
       expect(result.requires_approval).toBe(true);
@@ -241,15 +231,14 @@ describe('Budget Engine', () => {
     });
 
     it('should not require approval at or below threshold', () => {
-      // Default approval_threshold.SOL = 2
-      const result = budget.checkBudget(2, 'SOL', 'solana');
+      const result = budget.checkBudget(0.0001, 'SOL', 'solana');
 
       expect(result.allowed).toBe(true);
       expect(result.requires_approval).toBe(false);
     });
 
     it('should not require approval for small amounts', () => {
-      const result = budget.checkBudget(0.5, 'SOL', 'solana');
+      const result = budget.checkBudget(0.00005, 'SOL', 'solana');
 
       expect(result.allowed).toBe(true);
       expect(result.requires_approval).toBe(false);
@@ -340,14 +329,16 @@ describe('Budget Engine', () => {
 
   describe('Default Values', () => {
     it('should have correct default budget config', () => {
-      expect(DEFAULT_BUDGET_CONFIG.daily_budget.SOL).toBe(20);
-      expect(DEFAULT_BUDGET_CONFIG.daily_budget.USDC).toBe(500);
+      expect(DEFAULT_BUDGET_CONFIG.daily_budget.SOL).toBe(0.05);
+      expect(DEFAULT_BUDGET_CONFIG.daily_budget.USDC).toBe(5);
 
-      expect(DEFAULT_BUDGET_CONFIG.tx_limit.SOL).toBe(5);
-      expect(DEFAULT_BUDGET_CONFIG.tx_limit.USDC).toBe(200);
+      expect(DEFAULT_BUDGET_CONFIG.tx_limit.SOL).toBe(0.01);
+      expect(DEFAULT_BUDGET_CONFIG.tx_limit.USDC).toBe(1);
 
-      expect(DEFAULT_BUDGET_CONFIG.approval_threshold.SOL).toBe(2);
-      expect(DEFAULT_BUDGET_CONFIG.approval_threshold.USDC).toBe(100);
+      expect(DEFAULT_BUDGET_CONFIG.approval_threshold.SOL).toBe(0.0001);
+      expect(DEFAULT_BUDGET_CONFIG.approval_threshold.USDC).toBe(0.0001);
+      expect(DEFAULT_BUDGET_CONFIG.approval_threshold.USDT).toBe(0.0001);
+      expect(DEFAULT_BUDGET_CONFIG.approval_threshold['1LY']).toBe(1000);
     });
 
     it('should have correct default vault config', () => {

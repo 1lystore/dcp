@@ -23,6 +23,17 @@ import {
 
 import { DcpError } from '@dcprotocol/client';
 import { AgentConnection } from './connection.js';
+import {
+  CANONICAL_SCOPE_GUIDE,
+  SCOPE_PROPERTY_DESCRIPTION,
+  VAULT_BUDGET_CHECK_DESCRIPTION,
+  VAULT_GET_ADDRESS_DESCRIPTION,
+  VAULT_READ_DESCRIPTION,
+  VAULT_SCOPE_GUIDE_DESCRIPTION,
+  VAULT_SIGN_MESSAGE_DESCRIPTION,
+  VAULT_SIGN_TX_DESCRIPTION,
+  VAULT_WRITE_DESCRIPTION,
+} from './scope-guide.js';
 import { AgentConfig, AgentError } from './types.js';
 import { randomUUID } from 'node:crypto';
 
@@ -59,6 +70,7 @@ function logError(message: string): void {
  * Poll consent status until resolved
  */
 async function pollConsentStatus(
+  getStatus: (consentId: string) => Promise<{ status: string; sessionId?: string }>,
   consentId: string,
   expiresAt?: string
 ): Promise<{ status: string; session_id?: string }> {
@@ -72,20 +84,17 @@ async function pollConsentStatus(
     await sleep(CONSENT_POLL_INTERVAL_MS);
 
     try {
-      const response = await fetch(`http://127.0.0.1:8421/consent/${consentId}/status`);
-      if (!response.ok) continue;
-
-      const data = (await response.json()) as { status: string; session_id?: string };
+      const data = await getStatus(consentId);
 
       if (data.status === 'approved') {
         log('Consent approved');
-        return data;
+        return { status: data.status, session_id: data.sessionId };
       } else if (data.status === 'denied') {
         log('Consent denied');
-        return data;
+        return { status: data.status, session_id: data.sessionId };
       } else if (data.status === 'expired' || data.status === 'not_found') {
         log('Consent expired or not found');
-        return data;
+        return { status: data.status, session_id: data.sessionId };
       }
     } catch {
       // Network error, keep trying
@@ -299,14 +308,14 @@ export class HttpMcpServer {
         tools: [
           {
             name: 'vault_get_address',
-            description: 'Get the public wallet address for a blockchain. No consent required.',
+            description: VAULT_GET_ADDRESS_DESCRIPTION,
             inputSchema: {
               type: 'object',
               properties: {
                 chain: {
                   type: 'string',
                   enum: ['solana'],
-                  description: 'The blockchain to get the address for',
+                  description: 'Use solana. DCP is currently exposed as a Solana wallet.',
                 },
               },
               required: ['chain'],
@@ -314,44 +323,44 @@ export class HttpMcpServer {
           },
           {
             name: 'vault_budget_check',
-            description:
-              'Check if a proposed transaction amount is within budget limits. Returns allowed status, limits, remaining budget, and whether approval is required. No consent required.',
+            description: VAULT_BUDGET_CHECK_DESCRIPTION,
             inputSchema: {
               type: 'object',
               properties: {
                 amount: {
                   type: 'number',
-                  description: 'The transaction amount to check',
+                  description: 'Transaction amount in the selected currency, for example 0.001 for SOL.',
                 },
                 currency: {
                   type: 'string',
-                  description: 'The currency code (SOL, USDC, USDT)',
+                  description: 'Currency code. Use SOL, USDC, USDT, or 1LY.',
                 },
                 chain: {
                   type: 'string',
                   enum: ['solana'],
-                  description: 'Optional: The blockchain for chain-specific budget limits',
+                  description: 'Use solana when checking a Solana transaction.',
                 },
               },
               required: ['amount', 'currency'],
             },
           },
           {
+            name: 'vault_scope_guide',
+            description: VAULT_SCOPE_GUIDE_DESCRIPTION,
+            inputSchema: {
+              type: 'object',
+              properties: {},
+            },
+          },
+          {
             name: 'vault_read',
-            description: `Read data from the user's vault. Only use when the user explicitly asks you to read their info. Requires user consent.
-
-Available scope patterns:
-- identity.* — User identity (identity.name, identity.email, identity.phone, identity.home_address, etc.)
-- credentials.api.* — API keys (credentials.api.openai, credentials.api.stripe, credentials.api.github, etc.)
-- address.* — Saved addresses (address.home, address.work, address.shipping, etc.)
-
-Example scopes: "identity.email", "credentials.api.openai", "address.home"`,
+            description: VAULT_READ_DESCRIPTION,
             inputSchema: {
               type: 'object',
               properties: {
                 scope: {
                   type: 'string',
-                  description: 'The scope to read. Patterns: identity.*, credentials.api.*, address.*',
+                  description: SCOPE_PROPERTY_DESCRIPTION,
                 },
                 fields: {
                   type: 'array',
@@ -364,39 +373,38 @@ Example scopes: "identity.email", "credentials.api.openai", "address.home"`,
           },
           {
             name: 'vault_sign_tx',
-            description:
-              'Sign a transaction using the vault wallet. Requires user consent. The private key never leaves the vault.',
+            description: VAULT_SIGN_TX_DESCRIPTION,
             inputSchema: {
               type: 'object',
               properties: {
                 chain: {
                   type: 'string',
                   enum: ['solana'],
-                  description: 'The blockchain for the transaction',
+                  description: 'Use solana. DCP signs Solana transactions.',
                 },
                 unsigned_tx: {
                   type: 'string',
-                  description: 'The unsigned transaction (base64 encoded)',
+                  description: 'Unsigned Solana transaction encoded as base64.',
                 },
                 description: {
                   type: 'string',
-                  description: 'Human-readable description of what the transaction does',
+                  description: 'Short human-readable explanation shown to the user for approval.',
                 },
                 amount: {
                   type: 'number',
-                  description: 'Transaction amount for budget tracking',
+                  description: 'Transaction amount for budget tracking and approval display.',
                 },
                 currency: {
                   type: 'string',
-                  description: 'Currency code for budget tracking',
+                  description: 'Currency code for budget tracking. Use 1LY for the SPL token mint Aih3sbAbu39Yn7jB2Qf4btZ5eWtDGQJH2gMfC4qdBAGS.',
                 },
                 destination: {
                   type: 'string',
-                  description: 'Destination address for the transaction',
+                  description: 'Recipient/destination Solana address when available.',
                 },
                 idempotency_key: {
                   type: 'string',
-                  description: 'Unique key to prevent duplicate transactions',
+                  description: 'Stable unique key for this intended transaction to prevent accidental duplicate signing.',
                 },
               },
               required: ['chain', 'unsigned_tx'],
@@ -404,27 +412,27 @@ Example scopes: "identity.email", "credentials.api.openai", "address.home"`,
           },
           {
             name: 'vault_sign_message',
-            description: 'Sign an arbitrary message using the vault wallet. Requires user consent.',
+            description: VAULT_SIGN_MESSAGE_DESCRIPTION,
             inputSchema: {
               type: 'object',
               properties: {
                 chain: {
                   type: 'string',
                   enum: ['solana'],
-                  description: 'The blockchain for the message signing',
+                  description: 'Use solana. DCP signs Solana wallet messages.',
                 },
                 message: {
                   type: 'string',
-                  description: 'The message to sign (utf8 or base64)',
+                  description: 'Exact message to sign. Do not rewrite user-provided challenge text.',
                 },
                 encoding: {
                   type: 'string',
                   enum: ['utf8', 'base64'],
-                  description: 'Message encoding (default: utf8)',
+                  description: 'Use utf8 unless the message is already base64.',
                 },
                 description: {
                   type: 'string',
-                  description: 'Human-readable description of what the message represents',
+                  description: 'Short human-readable explanation shown to the user for approval.',
                 },
               },
               required: ['chain', 'message'],
@@ -432,20 +440,13 @@ Example scopes: "identity.email", "credentials.api.openai", "address.home"`,
           },
           {
             name: 'vault_write',
-            description: `Store data in the user's vault. Only use when the user explicitly asks you to save/store something. Requires user consent.
-
-Available scope patterns:
-- identity.* — User identity (identity.name, identity.email, identity.phone, identity.home_address, etc.)
-- credentials.api.* — API keys (credentials.api.openai, credentials.api.stripe, credentials.api.github, etc.)
-- address.* — Saved addresses (address.home, address.work, address.shipping, etc.)
-
-Example: scope="credentials.api.openai", data={"key": "sk-xxx", "name": "My OpenAI Key"}`,
+            description: VAULT_WRITE_DESCRIPTION,
             inputSchema: {
               type: 'object',
               properties: {
                 scope: {
                   type: 'string',
-                  description: 'The scope to write. Patterns: identity.*, credentials.api.*, address.*',
+                  description: SCOPE_PROPERTY_DESCRIPTION,
                 },
                 data: {
                   type: 'object',
@@ -491,6 +492,12 @@ Example: scope="credentials.api.openai", data={"key": "sk-xxx", "name": "My Open
         });
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'vault_scope_guide': {
+        return {
+          content: [{ type: 'text', text: CANONICAL_SCOPE_GUIDE }],
         };
       }
 
@@ -590,7 +597,11 @@ Example: scope="credentials.api.openai", data={"key": "sk-xxx", "name": "My Open
             }
 
             // Poll consent status until resolved
-            const result = await pollConsentStatus(consentId, expiresAt);
+            const result = await pollConsentStatus(
+              (id) => this.connection.getConsentStatus(id),
+              consentId,
+              expiresAt
+            );
 
             if (result.status === 'approved') {
               // Retry the original request

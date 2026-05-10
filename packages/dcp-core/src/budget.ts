@@ -2,9 +2,9 @@
  * Budget & Policy Engine for DCP Vault
  *
  * Implements (from protocol spec section 3.1.7):
- * - Per-transaction limits (default: 5 SOL, 200 USDC)
- * - Daily limits (default: 20 SOL, 500 USDC)
- * - Approval thresholds (default: 2 SOL, 100 USDC)
+ * - Per-transaction limits (default: 0.01 SOL, 1 USDC)
+ * - Daily limits (default: 0.05 SOL, 5 USDC)
+ * - Approval thresholds (default: 0.0001 SOL, 0.0001 USDC)
  * - Rate limiting (5 executions/minute)
  * - Idempotency key validation
  *
@@ -43,22 +43,22 @@ const CONFIG_FILE = 'config.json';
 /** Default budget configuration (from protocol spec section 17) */
 export const DEFAULT_BUDGET_CONFIG: BudgetConfig = {
   daily_budget: {
-    SOL: 20,
-    USDC: 500,
-    USDT: 500,
-    '1LY': 10000,
+    SOL: 0.05,
+    USDC: 5,
+    USDT: 5,
+    '1LY': 100,
   },
   tx_limit: {
-    SOL: 5,
-    USDC: 200,
-    USDT: 200,
-    '1LY': 2000,
+    SOL: 0.01,
+    USDC: 1,
+    USDT: 1,
+    '1LY': 10,
   },
   approval_threshold: {
-    SOL: 2,
-    USDC: 100,
-    USDT: 100,
-    '1LY': 500,
+    SOL: 0.0001,
+    USDC: 0.0001,
+    USDT: 0.0001,
+    '1LY': 1000,
   },
 };
 

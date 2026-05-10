@@ -258,6 +258,7 @@ let relayConnected = false;
 
 // Pending VPS pairing claims from relay (awaiting user approval in Desktop)
 const pendingPairingClaims: Map<string, StoredPairingClaim> = new Map();
+const pendingVpsInviteNames: Map<string, { agentName: string; expiresAt: number }> = new Map();
 
 // Track which consents have been notified to avoid duplicates
 // This enables Telegram notifications for ALL MCP clients (Claude, Cursor, etc.)
@@ -460,6 +461,34 @@ function getApprovalBaseUrl(): string {
   return `http://127.0.0.1:${port}`;
 }
 
+function getAgentDisplayNameForRequest(body: Record<string, unknown>, fallbackAgentName: string): string | undefined {
+  const serviceId = typeof body.service_id === 'string' ? body.service_id : undefined;
+  if (!serviceId || (!serviceId.startsWith('agent_') && !serviceId.startsWith('vps_'))) {
+    return undefined;
+  }
+
+  const agent = storage.getAgentConnection(serviceId);
+  if (!agent || agent.status !== 'active' || !agent.name || agent.name === fallbackAgentName) {
+    return undefined;
+  }
+
+  return agent.name;
+}
+
+function consentDetailsWithDisplayName(
+  body: Record<string, unknown>,
+  fallbackAgentName: string,
+  details?: Record<string, unknown>
+): string | undefined {
+  const merged: Record<string, unknown> = { ...(details || {}) };
+  const displayAgentName = getAgentDisplayNameForRequest(body, fallbackAgentName);
+  if (displayAgentName) {
+    merged.display_agent_name = displayAgentName;
+  }
+
+  return Object.keys(merged).length > 0 ? JSON.stringify(merged) : undefined;
+}
+
 /**
  * Dispatch a Telegram notification via cloud service (Option B from the protocol spec).
  * Desktop calls cloud webhook, cloud service sends to user's Telegram.
@@ -504,6 +533,7 @@ async function dispatchTelegramNotification(consent: {
     let amount: number | undefined;
     let currency: string | undefined;
     let chain: string | undefined;
+    let displayAgentName = consent.agent_name;
     if (consent.details) {
       try {
         const details = typeof consent.details === 'string'
@@ -512,6 +542,9 @@ async function dispatchTelegramNotification(consent: {
         amount = typeof details.amount === 'number' ? details.amount : undefined;
         currency = typeof details.currency === 'string' ? details.currency : undefined;
         chain = typeof details.chain === 'string' ? details.chain : undefined;
+        displayAgentName = typeof details.display_agent_name === 'string'
+          ? details.display_agent_name
+          : displayAgentName;
       } catch {
         // Ignore JSON parse errors
       }
@@ -522,7 +555,7 @@ async function dispatchTelegramNotification(consent: {
       event: 'consent_created' as const,
       data: {
         consent_id: consent.id,
-        agent_name: consent.agent_name,
+        agent_name: displayAgentName,
         category,
         scope: consent.scope, // Include scope for better context (e.g., "identity.email", "sign:solana")
         created_at: consent.created_at || new Date().toISOString(),
@@ -2804,6 +2837,10 @@ async function buildServer(): Promise<FastifyInstance> {
 
     try {
       await registerVpsInviteWithRelay(relayUrl, parsedInvite.invite_id, identity.vaultId);
+      pendingVpsInviteNames.set(parsedInvite.invite_id, {
+        agentName: agent_name.trim(),
+        expiresAt: parsedInvite.expires_at,
+      });
     } catch (err) {
       return reply.status(502).send({
         error: {
@@ -2908,7 +2945,8 @@ async function buildServer(): Promise<FastifyInstance> {
 
     // Generate agent ID and register the agent
     const agentId = `vps_${crypto.randomUUID().slice(0, 8)}`;
-    const agentName = request.body?.agent_name || claim.claim.agent_hostname || 'VPS Agent';
+    const inviteName = pendingVpsInviteNames.get(claim.claim.invite_id);
+    const agentName = request.body?.agent_name || inviteName?.agentName || claim.claim.agent_hostname || 'VPS Agent';
     // Request-only by default: approving pairing only establishes the channel.
     // Permission scopes are optional policy, not part of the invite/claim authority.
     const permissionScopes = request.body?.permission_scopes || [];
@@ -2941,6 +2979,7 @@ async function buildServer(): Promise<FastifyInstance> {
     // Remove from pending after a short delay (let polling pick up the result)
     setTimeout(() => {
       pendingPairingClaims.delete(claim.claim_id);
+      pendingVpsInviteNames.delete(claim.claim.invite_id);
     }, 60_000);
 
     return {
@@ -2994,6 +3033,7 @@ async function buildServer(): Promise<FastifyInstance> {
     // Remove from pending after a short delay
     setTimeout(() => {
       pendingPairingClaims.delete(claim.claim_id);
+      pendingVpsInviteNames.delete(claim.claim.invite_id);
     }, 60_000);
 
     return { denied: true };
@@ -3395,24 +3435,40 @@ async function buildServer(): Promise<FastifyInstance> {
       }
     }
 
-    // If no valid session and not owner/verified agent, create pending consent
+    // If no valid session and not owner/verified agent, consume an approved
+    // once-consent or create a pending consent.
     if (!hasSession) {
-      const { consent, isNew } = storage.createPendingConsent(
-        agent_name,
-        'read',
-        scope,
-        description ? JSON.stringify({ description }) : undefined
-      );
+      const consumedConsent = storage.consumeApprovedConsent(agent_name, 'read', scope);
+      if (consumedConsent) {
+        hasSession = true;
+        storage.logAudit('READ', 'success', {
+          agentName: agent_name,
+          scope,
+          operation: 'consume_approval',
+          details: JSON.stringify({ consent_id: consumedConsent.id }),
+        });
+      } else {
+        const { consent, isNew } = storage.createPendingConsent(
+          agent_name,
+          'read',
+          scope,
+          consentDetailsWithDisplayName(
+            request.body as Record<string, unknown>,
+            agent_name,
+            description ? { description } : undefined
+          )
+        );
 
-      console.log('[CONSENT] Created consent:', consent.id, 'for agent:', agent_name, 'isNew:', isNew);
-      // Telegram notification handled by consent watcher (avoids duplicates)
+        console.log('[CONSENT] Created consent:', consent.id, 'for agent:', agent_name, 'isNew:', isNew);
+        // Telegram notification handled by consent watcher (avoids duplicates)
 
-      return {
-        requires_consent: true,
-        consent_id: consent.id,
-        expires_at: consent.expires_at,
-        message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
-      };
+        return {
+          requires_consent: true,
+          consent_id: consent.id,
+          expires_at: consent.expires_at,
+          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
+        };
+      }
     }
 
     // Get the record
@@ -3457,6 +3513,7 @@ async function buildServer(): Promise<FastifyInstance> {
     return {
       scope,
       data,
+      session_id: effectiveSessionId,
     };
   });
 
@@ -3529,22 +3586,35 @@ async function buildServer(): Promise<FastifyInstance> {
       }
     }
 
-    // If no valid session and not owner, create pending consent
+    // If no valid session and not owner, consume an approved once-consent or
+    // create a pending consent.
     if (!hasSession) {
-      const { consent, isNew } = storage.createPendingConsent(
-        agent_name,
-        'write',
-        scope
-      );
+      const consumedConsent = storage.consumeApprovedConsent(agent_name, 'write', scope);
+      if (consumedConsent) {
+        hasSession = true;
+        storage.logAudit('EXECUTE', 'success', {
+          agentName: agent_name,
+          scope,
+          operation: 'consume_approval',
+          details: JSON.stringify({ consent_id: consumedConsent.id }),
+        });
+      } else {
+        const { consent, isNew } = storage.createPendingConsent(
+          agent_name,
+          'write',
+          scope,
+          consentDetailsWithDisplayName(request.body as Record<string, unknown>, agent_name)
+        );
 
-      // Telegram notification handled by consent watcher (avoids duplicates)
+        // Telegram notification handled by consent watcher (avoids duplicates)
 
-      return {
-        requires_consent: true,
-        consent_id: consent.id,
-        expires_at: consent.expires_at,
-        message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
-      };
+        return {
+          requires_consent: true,
+          consent_id: consent.id,
+          expires_at: consent.expires_at,
+          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
+        };
+      }
     }
 
     const masterKey = storage.getMasterKey();
@@ -3573,6 +3643,7 @@ async function buildServer(): Promise<FastifyInstance> {
       created: !existing,
       updated: !!existing,
       sensitivity: existing?.sensitivity || inferSensitivity(scope),
+      session_id: effectiveSessionId,
     };
   });
 
@@ -3634,7 +3705,7 @@ async function buildServer(): Promise<FastifyInstance> {
         agent_name,
         'delete',
         scope,
-        JSON.stringify({ description })
+        consentDetailsWithDisplayName(request.body as Record<string, unknown>, agent_name, { description })
       );
 
       // Telegram notification handled by consent watcher (avoids duplicates)
@@ -3773,7 +3844,12 @@ async function buildServer(): Promise<FastifyInstance> {
             agent_name,
             'sign_tx',
             walletScope,
-            JSON.stringify({ description, amount, currency: txCurrency, chain })
+            consentDetailsWithDisplayName(request.body as Record<string, unknown>, agent_name, {
+              description,
+              amount,
+              currency: txCurrency,
+              chain,
+            })
           );
 
           // Telegram notification handled by consent watcher (avoids duplicates)
@@ -3833,7 +3909,12 @@ async function buildServer(): Promise<FastifyInstance> {
           agent_name,
           'sign_tx',
           walletScope,
-          JSON.stringify({ description, amount, currency: txCurrency, chain })
+          consentDetailsWithDisplayName(request.body as Record<string, unknown>, agent_name, {
+            description,
+            amount,
+            currency: txCurrency,
+            chain,
+          })
         );
 
         // Telegram notification handled by consent watcher (avoids duplicates)
@@ -3940,7 +4021,7 @@ async function buildServer(): Promise<FastifyInstance> {
         agent_name,
         'sign_message',
         walletScope,
-        JSON.stringify({
+        consentDetailsWithDisplayName(body as Record<string, unknown>, agent_name, {
           description,
           chain,
           message_length: message.length,
@@ -3998,6 +4079,10 @@ async function buildServer(): Promise<FastifyInstance> {
       agent_name: string;
       session_id?: string;
       description?: string;
+      service_id?: string;
+      service_signature?: string;
+      timestamp?: string;
+      nonce?: string;
     };
   }>('/v1/vault/sign-message', async (request) => {
     return handleSignMessage(request.body);
@@ -4011,6 +4096,10 @@ async function buildServer(): Promise<FastifyInstance> {
       agent_name: string;
       session_id?: string;
       description?: string;
+      service_id?: string;
+      service_signature?: string;
+      timestamp?: string;
+      nonce?: string;
     };
   }>('/v1/vault/sign_message', async (request) => {
     return handleSignMessage(request.body);
@@ -4030,6 +4119,10 @@ async function buildServer(): Promise<FastifyInstance> {
       purpose?: string;
       agent_name: string;
       session_id?: string;
+      service_id?: string;
+      service_signature?: string;
+      timestamp?: string;
+      nonce?: string;
     };
   }>('/v1/vault/sign_x402', async (request) => {
     const {
@@ -4115,10 +4208,10 @@ async function buildServer(): Promise<FastifyInstance> {
 
       if (budgetResult.requires_approval) {
         const { consent, isNew } = storage.createPendingConsent(
-          agent_name,
-          'sign_x402',
-          walletScope,
-          JSON.stringify({
+        agent_name,
+        'sign_x402',
+        walletScope,
+          consentDetailsWithDisplayName(request.body as Record<string, unknown>, agent_name, {
             amount: parsedAmount,
             currency,
             network,
@@ -4154,7 +4247,7 @@ async function buildServer(): Promise<FastifyInstance> {
         agent_name,
         'sign_x402',
         walletScope,
-        JSON.stringify({
+        consentDetailsWithDisplayName(request.body as Record<string, unknown>, agent_name, {
           amount: parsedAmount,
           currency,
           network,
@@ -4841,6 +4934,52 @@ function verifyServiceAuthorization(
   return { authorized: true, service };
 }
 
+function verifyRelayServiceIdentity(
+  serviceId: string | undefined,
+  signature: string | undefined,
+  payload: Record<string, unknown>
+): { authorized: boolean; service?: TrustedService; reason?: string } {
+  if (!serviceId) {
+    return { authorized: false, reason: 'service_id is required for relay requests' };
+  }
+
+  let service = storage.getTrustedService(serviceId);
+
+  if (!service && (serviceId.startsWith('agent_') || serviceId.startsWith('vps_'))) {
+    const agent = storage.getAgentConnection(serviceId);
+    if (agent && agent.status === 'active' && agent.service_public_key) {
+      service = {
+        service_id: agent.agent_id,
+        name: agent.name,
+        public_key: agent.service_public_key,
+        scopes: agent.permission_scopes,
+        budget: agent.budget,
+        verified: true,
+        trusted_at: agent.paired_at || agent.created_at,
+        enabled: true,
+      };
+    }
+  }
+
+  if (!service) {
+    return { authorized: false, reason: `Service '${serviceId}' is not trusted` };
+  }
+
+  if (!service.enabled) {
+    return { authorized: false, service, reason: `Service '${serviceId}' is disabled` };
+  }
+
+  if (!signature) {
+    return { authorized: false, service, reason: 'Service signature required' };
+  }
+
+  if (!verifyServiceSignature(payload, serviceId, signature, service.public_key)) {
+    return { authorized: false, service, reason: 'Invalid service signature' };
+  }
+
+  return { authorized: true, service };
+}
+
 /**
  * Verify a local agent request and check scope permissions.
  *
@@ -5018,6 +5157,8 @@ function getScopeForRelayMethod(method: string, params: Record<string, unknown>)
       return `sign:${params.network || 'solana'}`;
     case 'vault_pair':
       return 'config:pair';
+    case 'consent_status':
+      return 'consent:status';
     case 'budget_check':
       return `budget:check`;
     default:
@@ -5260,6 +5401,68 @@ async function handleRelayRequest(
       service_id: serviceId,
     });
     return { response: okResponse, replyPublicKey };
+  }
+
+  if (method === 'consent_status') {
+    const params = (parsed.params || {}) as { consent_id?: string };
+    const consentId = params.consent_id;
+
+    const identityResult = verifyRelayServiceIdentity(
+      parsed.service_id,
+      parsed.service_signature,
+      parsed as Record<string, unknown>
+    );
+
+    if (!identityResult.authorized) {
+      const errorResponse = JSON.stringify({
+        ok: false,
+        error: {
+          code: 'VAULT_UNTRUSTED_SERVICE',
+          message: identityResult.reason || 'Service is not authorized',
+          action: 'trust_service',
+        },
+      });
+      return { response: errorResponse, replyPublicKey };
+    }
+
+    if (!consentId) {
+      const errorResponse = JSON.stringify({
+        ok: false,
+        error: {
+          code: 'INVALID_REQUEST',
+          message: 'consent_id is required',
+        },
+      });
+      return { response: errorResponse, replyPublicKey };
+    }
+
+    const consent = storage.getPendingConsent(consentId);
+    if (!consent) {
+      return { response: JSON.stringify({ status: 'not_found' }), replyPublicKey };
+    }
+
+    if (parsed.agent_name && consent.agent_name !== parsed.agent_name) {
+      const errorResponse = JSON.stringify({
+        ok: false,
+        error: {
+          code: 'CONSENT_NOT_FOUND',
+          message: 'Consent does not belong to this agent',
+        },
+      });
+      return { response: errorResponse, replyPublicKey };
+    }
+
+    if (consent.status === 'pending' && new Date(consent.expires_at) < new Date()) {
+      storage.resolveConsent(consent.id, 'expired');
+      consent.status = 'expired';
+    }
+
+    const statusResponse = JSON.stringify({
+      status: consent.status,
+      session_id: consent.session_id,
+      expires_at: consent.expires_at,
+    });
+    return { response: statusResponse, replyPublicKey };
   }
 
   // Get the scope for this method to check authorization

@@ -145,6 +145,7 @@ export interface PairOptions {
 export interface RunOptions {
   mode?: string;
   port?: string;
+  host?: string;
   debug?: boolean;
   daemon?: boolean;
   forceRelay?: boolean;

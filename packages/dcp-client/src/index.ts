@@ -84,6 +84,7 @@ export type {
   WriteCredentialResult,
   BudgetCheckResult,
   PairServiceResult,
+  ConsentStatusResult,
   HealthCheckResult,
 
   // Session

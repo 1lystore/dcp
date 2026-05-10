@@ -89478,22 +89478,22 @@ var require_dist5 = __commonJS({
     var CONFIG_FILE = "config.json";
     var DEFAULT_BUDGET_CONFIG = {
       daily_budget: {
-        SOL: 20,
-        USDC: 500,
-        USDT: 500,
-        "1LY": 1e4
+        SOL: 0.05,
+        USDC: 5,
+        USDT: 5,
+        "1LY": 100
       },
       tx_limit: {
-        SOL: 5,
-        USDC: 200,
-        USDT: 200,
-        "1LY": 2e3
+        SOL: 0.01,
+        USDC: 1,
+        USDT: 1,
+        "1LY": 10
       },
       approval_threshold: {
-        SOL: 2,
-        USDC: 100,
-        USDT: 100,
-        "1LY": 500
+        SOL: 1e-4,
+        USDC: 1e-4,
+        USDT: 1e-4,
+        "1LY": 1e3
       }
     };
     var RATE_LIMIT_PER_MINUTE = 5;
@@ -98574,6 +98574,7 @@ var budget;
 var relayClient = null;
 var relayConnected = false;
 var pendingPairingClaims = /* @__PURE__ */ new Map();
+var pendingVpsInviteNames = /* @__PURE__ */ new Map();
 var notifiedConsentIds = /* @__PURE__ */ new Set();
 var CONSENT_POLL_INTERVAL_MS = 1500;
 var REMOTE_APPROVAL_POLL_INTERVAL_MS = parseInt(process.env.DCP_TELEGRAM_APPROVAL_POLL_MS || "5000", 10);
@@ -98738,6 +98739,25 @@ function getApprovalBaseUrl() {
   const port = process.env.VAULT_PORT || String(DEFAULT_PORT);
   return `http://127.0.0.1:${port}`;
 }
+function getAgentDisplayNameForRequest(body, fallbackAgentName) {
+  const serviceId = typeof body.service_id === "string" ? body.service_id : void 0;
+  if (!serviceId || !serviceId.startsWith("agent_") && !serviceId.startsWith("vps_")) {
+    return void 0;
+  }
+  const agent2 = storage.getAgentConnection(serviceId);
+  if (!agent2 || agent2.status !== "active" || !agent2.name || agent2.name === fallbackAgentName) {
+    return void 0;
+  }
+  return agent2.name;
+}
+function consentDetailsWithDisplayName(body, fallbackAgentName, details) {
+  const merged = { ...details || {} };
+  const displayAgentName = getAgentDisplayNameForRequest(body, fallbackAgentName);
+  if (displayAgentName) {
+    merged.display_agent_name = displayAgentName;
+  }
+  return Object.keys(merged).length > 0 ? JSON.stringify(merged) : void 0;
+}
 async function dispatchTelegramNotification(consent) {
   console.log("[TG] dispatchTelegramNotification called for consent:", consent.id);
   try {
@@ -98758,12 +98778,14 @@ async function dispatchTelegramNotification(consent) {
     let amount;
     let currency;
     let chain;
+    let displayAgentName = consent.agent_name;
     if (consent.details) {
       try {
         const details = typeof consent.details === "string" ? JSON.parse(consent.details) : consent.details;
         amount = typeof details.amount === "number" ? details.amount : void 0;
         currency = typeof details.currency === "string" ? details.currency : void 0;
         chain = typeof details.chain === "string" ? details.chain : void 0;
+        displayAgentName = typeof details.display_agent_name === "string" ? details.display_agent_name : displayAgentName;
       } catch {
       }
     }
@@ -98772,7 +98794,7 @@ async function dispatchTelegramNotification(consent) {
       event: "consent_created",
       data: {
         consent_id: consent.id,
-        agent_name: consent.agent_name,
+        agent_name: displayAgentName,
         category,
         scope: consent.scope,
         // Include scope for better context (e.g., "identity.email", "sign:solana")
@@ -100452,6 +100474,10 @@ async function buildServer() {
     }
     try {
       await registerVpsInviteWithRelay(relayUrl, parsedInvite.invite_id, identity.vaultId);
+      pendingVpsInviteNames.set(parsedInvite.invite_id, {
+        agentName: agent_name.trim(),
+        expiresAt: parsedInvite.expires_at
+      });
     } catch (err) {
       return reply.status(502).send({
         error: {
@@ -100527,7 +100553,8 @@ async function buildServer() {
       });
     }
     const agentId = `vps_${crypto5.randomUUID().slice(0, 8)}`;
-    const agentName = request.body?.agent_name || claim.claim.agent_hostname || "VPS Agent";
+    const inviteName = pendingVpsInviteNames.get(claim.claim.invite_id);
+    const agentName = request.body?.agent_name || inviteName?.agentName || claim.claim.agent_hostname || "VPS Agent";
     const permissionScopes = request.body?.permission_scopes || [];
     const vaultConfig = budget.getConfig();
     storage.createAgentConnection({
@@ -100548,6 +100575,7 @@ async function buildServer() {
     }
     setTimeout(() => {
       pendingPairingClaims.delete(claim.claim_id);
+      pendingVpsInviteNames.delete(claim.claim.invite_id);
     }, 6e4);
     return {
       approved: true,
@@ -100588,6 +100616,7 @@ async function buildServer() {
     }
     setTimeout(() => {
       pendingPairingClaims.delete(claim.claim_id);
+      pendingVpsInviteNames.delete(claim.claim.invite_id);
     }, 6e4);
     return { denied: true };
   });
@@ -100844,14 +100873,25 @@ async function buildServer() {
       }
     }
     if (!hasSession) {
-      const { consent, isNew } = storage.createPendingConsent(agent_name, "read", scope, description ? JSON.stringify({ description }) : void 0);
-      console.log("[CONSENT] Created consent:", consent.id, "for agent:", agent_name, "isNew:", isNew);
-      return {
-        requires_consent: true,
-        consent_id: consent.id,
-        expires_at: consent.expires_at,
-        message: `Consent required. Approve with: POST /consent/${consent.id}/approve`
-      };
+      const consumedConsent = storage.consumeApprovedConsent(agent_name, "read", scope);
+      if (consumedConsent) {
+        hasSession = true;
+        storage.logAudit("READ", "success", {
+          agentName: agent_name,
+          scope,
+          operation: "consume_approval",
+          details: JSON.stringify({ consent_id: consumedConsent.id })
+        });
+      } else {
+        const { consent, isNew } = storage.createPendingConsent(agent_name, "read", scope, consentDetailsWithDisplayName(request.body, agent_name, description ? { description } : void 0));
+        console.log("[CONSENT] Created consent:", consent.id, "for agent:", agent_name, "isNew:", isNew);
+        return {
+          requires_consent: true,
+          consent_id: consent.id,
+          expires_at: consent.expires_at,
+          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`
+        };
+      }
     }
     const record2 = storage.getRecord(scope);
     if (!record2) {
@@ -100884,7 +100924,8 @@ async function buildServer() {
     });
     return {
       scope,
-      data
+      data,
+      session_id: effectiveSessionId
     };
   });
   server.post("/v1/vault/write", async (request) => {
@@ -100922,13 +100963,24 @@ async function buildServer() {
       }
     }
     if (!hasSession) {
-      const { consent, isNew } = storage.createPendingConsent(agent_name, "write", scope);
-      return {
-        requires_consent: true,
-        consent_id: consent.id,
-        expires_at: consent.expires_at,
-        message: `Consent required. Approve with: POST /consent/${consent.id}/approve`
-      };
+      const consumedConsent = storage.consumeApprovedConsent(agent_name, "write", scope);
+      if (consumedConsent) {
+        hasSession = true;
+        storage.logAudit("EXECUTE", "success", {
+          agentName: agent_name,
+          scope,
+          operation: "consume_approval",
+          details: JSON.stringify({ consent_id: consumedConsent.id })
+        });
+      } else {
+        const { consent, isNew } = storage.createPendingConsent(agent_name, "write", scope, consentDetailsWithDisplayName(request.body, agent_name));
+        return {
+          requires_consent: true,
+          consent_id: consent.id,
+          expires_at: consent.expires_at,
+          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`
+        };
+      }
     }
     const masterKey = storage.getMasterKey();
     const existing = storage.getRecord(scope);
@@ -100952,7 +101004,8 @@ async function buildServer() {
       scope,
       created: !existing,
       updated: !!existing,
-      sensitivity: existing?.sensitivity || inferSensitivity(scope)
+      sensitivity: existing?.sensitivity || inferSensitivity(scope),
+      session_id: effectiveSessionId
     };
   });
   server.post("/v1/vault/delete", async (request) => {
@@ -100985,7 +101038,7 @@ async function buildServer() {
       }
     }
     if (!hasSession) {
-      const { consent, isNew } = storage.createPendingConsent(agent_name, "delete", scope, JSON.stringify({ description }));
+      const { consent, isNew } = storage.createPendingConsent(agent_name, "delete", scope, consentDetailsWithDisplayName(request.body, agent_name, { description }));
       return {
         requires_consent: true,
         consent_id: consent.id,
@@ -101065,7 +101118,12 @@ async function buildServer() {
             details: JSON.stringify({ consent_id: consumedConsent.id, amount, currency: txCurrency })
           });
         } else {
-          const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_tx", walletScope2, JSON.stringify({ description, amount, currency: txCurrency, chain }));
+          const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_tx", walletScope2, consentDetailsWithDisplayName(request.body, agent_name, {
+            description,
+            amount,
+            currency: txCurrency,
+            chain
+          }));
           return {
             requires_consent: true,
             consent_id: consent.id,
@@ -101104,7 +101162,12 @@ async function buildServer() {
     if (!hasSession && !budgetAutoApproved) {
       const consumedConsent = storage.consumeApprovedConsent(agent_name, "sign_tx", walletScope);
       if (!consumedConsent) {
-        const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_tx", walletScope, JSON.stringify({ description, amount, currency: txCurrency, chain }));
+        const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_tx", walletScope, consentDetailsWithDisplayName(request.body, agent_name, {
+          description,
+          amount,
+          currency: txCurrency,
+          chain
+        }));
         return {
           requires_consent: true,
           consent_id: consent.id,
@@ -101172,7 +101235,7 @@ async function buildServer() {
       }
     }
     if (!hasSession) {
-      const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_message", walletScope, JSON.stringify({
+      const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_message", walletScope, consentDetailsWithDisplayName(body, agent_name, {
         description,
         chain,
         message_length: message.length,
@@ -101273,7 +101336,7 @@ async function buildServer() {
         });
       }
       if (budgetResult.requires_approval) {
-        const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_x402", walletScope, JSON.stringify({
+        const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_x402", walletScope, consentDetailsWithDisplayName(request.body, agent_name, {
           amount: parsedAmount,
           currency,
           network,
@@ -101298,7 +101361,7 @@ async function buildServer() {
       }
     }
     if (!hasSession && !budgetAutoApproved) {
-      const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_x402", walletScope, JSON.stringify({
+      const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_x402", walletScope, consentDetailsWithDisplayName(request.body, agent_name, {
         amount: parsedAmount,
         currency,
         network,
@@ -101748,6 +101811,40 @@ function verifyServiceAuthorization(serviceId, signature2, payload, requestedSco
   }
   return { authorized: true, service };
 }
+function verifyRelayServiceIdentity(serviceId, signature2, payload) {
+  if (!serviceId) {
+    return { authorized: false, reason: "service_id is required for relay requests" };
+  }
+  let service = storage.getTrustedService(serviceId);
+  if (!service && (serviceId.startsWith("agent_") || serviceId.startsWith("vps_"))) {
+    const agent2 = storage.getAgentConnection(serviceId);
+    if (agent2 && agent2.status === "active" && agent2.service_public_key) {
+      service = {
+        service_id: agent2.agent_id,
+        name: agent2.name,
+        public_key: agent2.service_public_key,
+        scopes: agent2.permission_scopes,
+        budget: agent2.budget,
+        verified: true,
+        trusted_at: agent2.paired_at || agent2.created_at,
+        enabled: true
+      };
+    }
+  }
+  if (!service) {
+    return { authorized: false, reason: `Service '${serviceId}' is not trusted` };
+  }
+  if (!service.enabled) {
+    return { authorized: false, service, reason: `Service '${serviceId}' is disabled` };
+  }
+  if (!signature2) {
+    return { authorized: false, service, reason: "Service signature required" };
+  }
+  if (!verifyServiceSignature(payload, serviceId, signature2, service.public_key)) {
+    return { authorized: false, service, reason: "Invalid service signature" };
+  }
+  return { authorized: true, service };
+}
 function verifyLocalAgentRequest(body, requestedScope) {
   const serviceId = body.service_id;
   const serviceSignature = body.service_signature;
@@ -101860,6 +101957,8 @@ function getScopeForRelayMethod(method, params) {
       return `sign:${params.network || "solana"}`;
     case "vault_pair":
       return "config:pair";
+    case "consent_status":
+      return "consent:status";
     case "budget_check":
       return `budget:check`;
     default:
@@ -102039,6 +102138,56 @@ async function handleRelayRequest(server, decryptedPayload, meta) {
       service_id: serviceId
     });
     return { response: okResponse, replyPublicKey };
+  }
+  if (method === "consent_status") {
+    const params = parsed.params || {};
+    const consentId = params.consent_id;
+    const identityResult = verifyRelayServiceIdentity(parsed.service_id, parsed.service_signature, parsed);
+    if (!identityResult.authorized) {
+      const errorResponse = JSON.stringify({
+        ok: false,
+        error: {
+          code: "VAULT_UNTRUSTED_SERVICE",
+          message: identityResult.reason || "Service is not authorized",
+          action: "trust_service"
+        }
+      });
+      return { response: errorResponse, replyPublicKey };
+    }
+    if (!consentId) {
+      const errorResponse = JSON.stringify({
+        ok: false,
+        error: {
+          code: "INVALID_REQUEST",
+          message: "consent_id is required"
+        }
+      });
+      return { response: errorResponse, replyPublicKey };
+    }
+    const consent = storage.getPendingConsent(consentId);
+    if (!consent) {
+      return { response: JSON.stringify({ status: "not_found" }), replyPublicKey };
+    }
+    if (parsed.agent_name && consent.agent_name !== parsed.agent_name) {
+      const errorResponse = JSON.stringify({
+        ok: false,
+        error: {
+          code: "CONSENT_NOT_FOUND",
+          message: "Consent does not belong to this agent"
+        }
+      });
+      return { response: errorResponse, replyPublicKey };
+    }
+    if (consent.status === "pending" && new Date(consent.expires_at) < /* @__PURE__ */ new Date()) {
+      storage.resolveConsent(consent.id, "expired");
+      consent.status = "expired";
+    }
+    const statusResponse = JSON.stringify({
+      status: consent.status,
+      session_id: consent.session_id,
+      expires_at: consent.expires_at
+    });
+    return { response: statusResponse, replyPublicKey };
   }
   const requestedScope = getScopeForRelayMethod(method, parsed.params || {});
   if (!parsed.service_id) {
