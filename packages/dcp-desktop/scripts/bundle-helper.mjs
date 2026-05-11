@@ -78,6 +78,7 @@ const {
   deriveKeyFromMnemonic,
   zeroize,
   createWallet,
+  exportWalletPrivateKey,
   isChainSupported,
 } = require('@dcprotocol/core');
 
@@ -180,6 +181,111 @@ async function main() {
 
     reply({ ok: true, wallets });
     process.exit(0);
+  }
+
+  if (action === 'export_wallet_private_key') {
+    if (passphrase.length < 8) fail('Passphrase must be at least 8 characters');
+    if (input.confirmation !== 'EXPORT') fail('Type EXPORT to confirm');
+
+    const chain = String(input.chain || 'solana').toLowerCase();
+    if (!isChainSupported(chain)) fail(\`Unsupported chain: \${chain}\`);
+
+    const storage = new VaultStorage(vaultDir);
+    if (!(await storage.isProvisioned())) fail('Vault not initialized');
+
+    try {
+      await storage.unlock(passphrase);
+    } catch (err) {
+      fail(err?.message || 'Failed to unlock vault');
+    }
+
+    try {
+      const scope = \`crypto.wallet.\${chain}\`;
+      const record = storage.getRecord(scope);
+      const encrypted = storage.getEncryptedPayload(scope);
+      if (!record || !encrypted || record.item_type !== 'WALLET_KEY') {
+        fail(\`No \${chain} wallet found\`);
+      }
+
+      const masterKey = storage.getMasterKey();
+      const privateKey = exportWalletPrivateKey(encrypted, masterKey, chain);
+      storage.logAudit('EXECUTE', 'success', {
+        agentName: 'desktop-owner',
+        scope,
+        operation: 'wallet_export',
+        details: JSON.stringify({ chain, address: record.public_address }),
+      });
+      reply({
+        ok: true,
+        chain,
+        address: record.public_address,
+        private_key: privateKey,
+      });
+      process.exit(0);
+    } catch (err) {
+      fail(err?.message || 'Failed to export wallet');
+    } finally {
+      storage.lock();
+    }
+  }
+
+  if (action === 'replace_wallet') {
+    if (passphrase.length < 8) fail('Passphrase must be at least 8 characters');
+    if (input.confirmation !== 'REPLACE') fail('Type REPLACE to confirm');
+
+    const chain = String(input.chain || 'solana').toLowerCase();
+    if (!isChainSupported(chain)) fail(\`Unsupported chain: \${chain}\`);
+
+    const storage = new VaultStorage(vaultDir);
+    if (!(await storage.isProvisioned())) fail('Vault not initialized');
+
+    try {
+      await storage.unlock(passphrase);
+    } catch (err) {
+      fail(err?.message || 'Failed to unlock vault');
+    }
+
+    try {
+      const scope = \`crypto.wallet.\${chain}\`;
+      const existing = storage.getRecord(scope);
+      if (existing && existing.item_type !== 'WALLET_KEY') {
+        fail(\`Existing \${scope} record is not a wallet\`);
+      }
+      const oldAddress = existing?.public_address || null;
+      const masterKey = storage.getMasterKey();
+      const { encrypted, info } = createWallet(chain, masterKey);
+
+      if (existing) {
+        storage.updateWalletRecord(existing.id, encrypted, chain, info.public_address);
+      } else {
+        storage.createRecord({
+          scope,
+          item_type: 'WALLET_KEY',
+          sensitivity: 'critical',
+          data: encrypted,
+          chain,
+          public_address: info.public_address,
+        });
+      }
+
+      storage.logAudit('CONFIG', 'success', {
+        agentName: 'desktop-owner',
+        scope,
+        operation: 'wallet_replace',
+        details: JSON.stringify({ chain, old_address: oldAddress, new_address: info.public_address }),
+      });
+      reply({
+        ok: true,
+        chain,
+        old_address: oldAddress,
+        new_address: info.public_address,
+      });
+      process.exit(0);
+    } catch (err) {
+      fail(err?.message || 'Failed to replace wallet');
+    } finally {
+      storage.lock();
+    }
   }
 
   fail(\`Unknown action: \${action}\`);

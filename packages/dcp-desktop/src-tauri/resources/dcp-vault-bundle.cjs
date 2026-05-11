@@ -86943,6 +86943,8 @@ var require_dist5 = __commonJS({
       encryptWalletKey: () => encryptWalletKey,
       envelopeDecrypt: () => envelopeDecrypt2,
       envelopeEncrypt: () => envelopeEncrypt,
+      exportSolanaPrivateKey: () => exportSolanaPrivateKey,
+      exportWalletPrivateKey: () => exportWalletPrivateKey,
       generateKey: () => generateKey,
       generateNonce: () => generateNonce,
       generateRecoveryMnemonic: () => generateRecoveryMnemonic,
@@ -87251,6 +87253,27 @@ var require_dist5 = __commonJS({
     function createWallet(chain, masterKey) {
       const walletData = generateWalletKeypair(chain);
       return encryptWalletKey(walletData, masterKey);
+    }
+    function exportSolanaPrivateKey(encryptedKey, masterKey) {
+      const privateKey = envelopeDecrypt2(encryptedKey, masterKey);
+      try {
+        const keypair = import_web3.Keypair.fromSeed(privateKey);
+        const secretKey = Buffer.from(keypair.secretKey);
+        try {
+          return import_bs582.default.encode(secretKey);
+        } finally {
+          zeroize(secretKey);
+          keypair.secretKey.fill(0);
+        }
+      } finally {
+        zeroize(privateKey);
+      }
+    }
+    function exportWalletPrivateKey(encryptedKey, masterKey, chain) {
+      if (!CHAIN_KEY_TYPES[chain]) {
+        throw new VaultError2("INVALID_CHAIN", `Unsupported chain: ${chain}`);
+      }
+      return exportSolanaPrivateKey(encryptedKey, masterKey);
     }
     function signSolanaTransaction(encryptedKey, masterKey, unsignedTx) {
       const privateKey = envelopeDecrypt2(encryptedKey, masterKey);
@@ -88189,6 +88212,36 @@ var require_dist5 = __commonJS({
         } finally {
           zeroize(plaintext);
         }
+      }
+      /**
+       * Update an existing wallet record with an already encrypted private key.
+       *
+       * Used by owner-only wallet replacement flows. This keeps the stable record
+       * scope while updating both encrypted key material and public metadata.
+       */
+      updateWalletRecord(recordId, encrypted, chain, publicAddress) {
+        const now = (/* @__PURE__ */ new Date()).toISOString();
+        const stmt = this.db.prepare(`
+      UPDATE vault_records SET
+        ciphertext = ?,
+        nonce = ?,
+        dek_wrapped = ?,
+        dek_nonce = ?,
+        chain = ?,
+        public_address = ?,
+        updated_at = ?
+      WHERE id = ?
+    `);
+        stmt.run(
+          encrypted.ciphertext,
+          encrypted.nonce,
+          encrypted.dek_wrapped,
+          encrypted.dek_nonce,
+          chain,
+          publicAddress,
+          now,
+          recordId
+        );
       }
       // ==========================================================================
       // Agent Sessions CRUD

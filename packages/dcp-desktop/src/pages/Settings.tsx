@@ -1,6 +1,21 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { invoke } from '@tauri-apps/api/core';
 import { api, type Agent, type BudgetConfig, type AuditEvent } from '../api';
+
+type WalletAction = 'export' | 'replace' | null;
+
+interface ExportWalletResult {
+  chain: string;
+  address: string;
+  private_key: string;
+}
+
+interface ReplaceWalletResult {
+  chain: string;
+  old_address?: string | null;
+  new_address: string;
+}
 
 export default function Settings() {
   const navigate = useNavigate();
@@ -14,6 +29,15 @@ export default function Settings() {
   const [activity, setActivity] = useState<AuditEvent[]>([]);
   const [activityLoading, setActivityLoading] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [walletAction, setWalletAction] = useState<WalletAction>(null);
+  const [walletPassphrase, setWalletPassphrase] = useState('');
+  const [walletConfirmation, setWalletConfirmation] = useState('');
+  const [walletBusy, setWalletBusy] = useState(false);
+  const [walletError, setWalletError] = useState<string | null>(null);
+  const [exportResult, setExportResult] = useState<ExportWalletResult | null>(null);
+  const [replaceResult, setReplaceResult] = useState<ReplaceWalletResult | null>(null);
+  const [copiedPrivateKey, setCopiedPrivateKey] = useState(false);
+  const exportClearTimer = useRef<number | null>(null);
 
   // Dynamic currency management
   const [currencies, setCurrencies] = useState<{ default: string[]; custom: string[] }>({
@@ -32,6 +56,12 @@ export default function Settings() {
     loadBudgets();
     loadActivity();
     loadCurrencies();
+
+    return () => {
+      if (exportClearTimer.current !== null) {
+        window.clearTimeout(exportClearTimer.current);
+      }
+    };
   }, []);
 
   const loadAgents = async () => {
@@ -183,6 +213,82 @@ export default function Settings() {
     } finally {
       setRevoking(null);
     }
+  };
+
+  const clearWalletActionState = () => {
+    setWalletPassphrase('');
+    setWalletConfirmation('');
+    setWalletError(null);
+    setExportResult(null);
+    setReplaceResult(null);
+    setCopiedPrivateKey(false);
+    if (exportClearTimer.current !== null) {
+      window.clearTimeout(exportClearTimer.current);
+      exportClearTimer.current = null;
+    }
+  };
+
+  const openWalletAction = (action: WalletAction) => {
+    clearWalletActionState();
+    setWalletAction(action);
+  };
+
+  const handleExportWallet = async () => {
+    setWalletBusy(true);
+    setWalletError(null);
+    setExportResult(null);
+    setCopiedPrivateKey(false);
+
+    try {
+      const result = await invoke<ExportWalletResult>('export_wallet_private_key', {
+        passphrase: walletPassphrase,
+        confirmation: walletConfirmation,
+      });
+      setExportResult(result);
+      setWalletPassphrase('');
+      setWalletConfirmation('');
+
+      if (exportClearTimer.current !== null) {
+        window.clearTimeout(exportClearTimer.current);
+      }
+      exportClearTimer.current = window.setTimeout(() => {
+        setExportResult(null);
+        setCopiedPrivateKey(false);
+        exportClearTimer.current = null;
+      }, 60000);
+    } catch (err) {
+      setWalletError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWalletBusy(false);
+    }
+  };
+
+  const handleReplaceWallet = async () => {
+    setWalletBusy(true);
+    setWalletError(null);
+    setReplaceResult(null);
+
+    try {
+      const result = await invoke<ReplaceWalletResult>('replace_wallet', {
+        passphrase: walletPassphrase,
+        confirmation: walletConfirmation,
+      });
+      setReplaceResult(result);
+      setWalletPassphrase('');
+      setWalletConfirmation('');
+      await loadActivity();
+    } catch (err) {
+      setWalletError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWalletBusy(false);
+    }
+  };
+
+  const handleCopyPrivateKey = async () => {
+    if (!exportResult) return;
+    await navigator.clipboard.writeText(exportResult.private_key);
+    setCopiedPrivateKey(true);
+    window.setTimeout(() => setCopiedPrivateKey(false), 2000);
   };
 
   if (loading) {
@@ -566,9 +672,183 @@ export default function Settings() {
         {showAdvanced && (
           <div style={{ padding: '0 16px 16px' }}>
             <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-              For power users: relay configuration and manual overrides.
+              For power users: wallet recovery, relay configuration, and manual overrides.
             </div>
-            <div style={{ display: 'grid', gap: '8px' }}>
+            <div style={{ display: 'grid', gap: '12px' }}>
+              <div style={{
+                padding: '12px',
+                background: 'rgba(245, 158, 11, 0.08)',
+                border: '1px solid rgba(245, 158, 11, 0.35)',
+                borderRadius: '8px',
+                fontSize: '13px',
+              }}>
+                <strong>Wallet recovery actions</strong>
+                <div style={{ marginTop: '6px', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                  These actions run only inside DCP Desktop after you enter your vault passphrase.
+                  Agents, MCP tools, Telegram, and remote services cannot call them.
+                </div>
+                <div style={{ display: 'flex', gap: '8px', marginTop: '12px', flexWrap: 'wrap' }}>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => openWalletAction(walletAction === 'export' ? null : 'export')}
+                  >
+                    Export Private Key
+                  </button>
+                  <button
+                    className="btn btn-danger"
+                    onClick={() => openWalletAction(walletAction === 'replace' ? null : 'replace')}
+                  >
+                    Replace Wallet
+                  </button>
+                </div>
+
+                {walletAction && (
+                  <div style={{
+                    marginTop: '12px',
+                    padding: '12px',
+                    background: 'var(--bg-secondary)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '8px',
+                  }}>
+                    {walletAction === 'export' ? (
+                      <>
+                        <div style={{ fontWeight: 600, marginBottom: '6px' }}>
+                          Export Solana private key
+                        </div>
+                        <div style={{ color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: '12px' }}>
+                          Anyone with this key can control the wallet. Keep it offline, never paste it into an agent chat,
+                          and clear your clipboard after use.
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div style={{ fontWeight: 600, marginBottom: '6px' }}>
+                          Replace Solana wallet
+                        </div>
+                        <div style={{ color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: '12px' }}>
+                          This creates a new wallet for future signing. It does not move funds from the old address.
+                          Export the old key first if that wallet has any balance.
+                        </div>
+                      </>
+                    )}
+
+                    {walletError && (
+                      <div style={{
+                        padding: '10px 12px',
+                        background: 'rgba(239, 68, 68, 0.1)',
+                        border: '1px solid rgba(239, 68, 68, 0.3)',
+                        borderRadius: '8px',
+                        color: '#fca5a5',
+                        marginBottom: '12px',
+                      }}>
+                        {walletError}
+                      </div>
+                    )}
+
+                    {!exportResult && !replaceResult && (
+                      <div style={{ display: 'grid', gap: '10px' }}>
+                        <label style={{ display: 'grid', gap: '4px' }}>
+                          <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Vault passphrase</span>
+                          <input
+                            className="input"
+                            type="password"
+                            value={walletPassphrase}
+                            onChange={(e) => setWalletPassphrase(e.target.value)}
+                            placeholder="Enter vault passphrase"
+                          />
+                        </label>
+                        <label style={{ display: 'grid', gap: '4px' }}>
+                          <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                            Type {walletAction === 'export' ? 'EXPORT' : 'REPLACE'} to confirm
+                          </span>
+                          <input
+                            className="input"
+                            value={walletConfirmation}
+                            onChange={(e) => setWalletConfirmation(e.target.value.toUpperCase())}
+                            placeholder={walletAction === 'export' ? 'EXPORT' : 'REPLACE'}
+                          />
+                        </label>
+                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                          <button
+                            className={walletAction === 'export' ? 'btn btn-primary' : 'btn btn-danger'}
+                            disabled={
+                              walletBusy ||
+                              walletPassphrase.length < 8 ||
+                              walletConfirmation !== (walletAction === 'export' ? 'EXPORT' : 'REPLACE')
+                            }
+                            onClick={walletAction === 'export' ? handleExportWallet : handleReplaceWallet}
+                          >
+                            {walletBusy
+                              ? 'Working...'
+                              : walletAction === 'export'
+                                ? 'Export Key'
+                                : 'Create New Wallet'}
+                          </button>
+                          <button className="btn btn-secondary" onClick={() => openWalletAction(null)}>
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {exportResult && (
+                      <div style={{ display: 'grid', gap: '10px' }}>
+                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                          Address: <code>{exportResult.address}</code>
+                        </div>
+                        <textarea
+                          className="input"
+                          readOnly
+                          value={exportResult.private_key}
+                          rows={3}
+                          spellCheck={false}
+                          style={{ fontFamily: 'monospace', resize: 'vertical' }}
+                        />
+                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                          <button className="btn btn-primary" onClick={handleCopyPrivateKey}>
+                            {copiedPrivateKey ? 'Copied' : 'Copy Key'}
+                          </button>
+                          <button className="btn btn-secondary" onClick={() => openWalletAction(null)}>
+                            Hide Key
+                          </button>
+                        </div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                          This key will be hidden automatically in 60 seconds.
+                        </div>
+                      </div>
+                    )}
+
+                    {replaceResult && (
+                      <div style={{ display: 'grid', gap: '8px' }}>
+                        <div style={{
+                          padding: '10px 12px',
+                          background: 'rgba(34, 197, 94, 0.1)',
+                          border: '1px solid rgba(34, 197, 94, 0.3)',
+                          borderRadius: '8px',
+                        }}>
+                          New wallet created.
+                        </div>
+                        {replaceResult.old_address && (
+                          <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                            Old address: <code>{replaceResult.old_address}</code>
+                          </div>
+                        )}
+                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                          New address: <code>{replaceResult.new_address}</code>
+                        </div>
+                        <button
+                          className="btn btn-secondary"
+                          onClick={() => openWalletAction(null)}
+                          style={{ justifySelf: 'start' }}
+                        >
+                          Done
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <div style={{
                 padding: '12px',
                 background: 'var(--bg-tertiary)',

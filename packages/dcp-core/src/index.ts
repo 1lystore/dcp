@@ -61,6 +61,8 @@ export {
   generateWalletKeypair,
   encryptWalletKey,
   createWallet,
+  exportWalletPrivateKey,
+  exportSolanaPrivateKey,
 
   // Transaction signing
   signTransaction,

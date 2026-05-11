@@ -124,14 +124,18 @@ const DATA_TEMPLATES: Record<string, DataTemplate> = {
 
 type TemplateKey = string;
 
+const normalizeVaultScope = (scopeKey: string) =>
+  scopeKey.replace(/^(read|write|sign):/, '');
+
 // Helper to get template for a scope (supports prefix matching for API credentials)
 const getTemplateForScope = (scopeKey: string) => {
+  const normalizedScope = normalizeVaultScope(scopeKey);
   // Direct match first
-  if (DATA_TEMPLATES[scopeKey]) {
-    return DATA_TEMPLATES[scopeKey];
+  if (DATA_TEMPLATES[normalizedScope]) {
+    return DATA_TEMPLATES[normalizedScope];
   }
   // Check if it's an API credential (credentials.api.*)
-  if (scopeKey.startsWith('credentials.api.')) {
+  if (normalizedScope.startsWith('credentials.api.')) {
     return DATA_TEMPLATES['credentials.api'];
   }
   return null;
@@ -168,6 +172,7 @@ export default function Data() {
   const [formData, setFormData] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [visibleSecretFields, setVisibleSecretFields] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -187,10 +192,11 @@ export default function Data() {
   };
 
   const openEditor = async (scopeKey: string) => {
+    const vaultScope = normalizeVaultScope(scopeKey);
     try {
 
       // Set editing state FIRST to open modal immediately
-      setEditingScope(scopeKey);
+      setEditingScope(vaultScope);
       setShowAddMenu(false);
       setError(null);
       setSuccess(null);
@@ -198,12 +204,12 @@ export default function Data() {
 
 
       // If scope exists, try to load its data (but modal is already open)
-      const existingScope = scopes.find(s => s.scope === scopeKey);
+      const existingScope = scopes.find(s => normalizeVaultScope(s.scope) === vaultScope);
       if (existingScope) {
         try {
-          const res = await api.readData(scopeKey);
+          const res = await api.readData(vaultScope);
           if (res.data) {
-            const template = getTemplateForScope(scopeKey);
+            const template = getTemplateForScope(vaultScope);
             if (template) {
               const newFormData: Record<string, string> = {};
               template.fields.forEach(field => {
@@ -227,7 +233,7 @@ export default function Data() {
     } catch (err) {
       console.error('openEditor error:', err);
       // Still try to open modal even on error
-      setEditingScope(scopeKey);
+      setEditingScope(vaultScope);
       setFormData({});
     }
   };
@@ -238,6 +244,7 @@ export default function Data() {
     setError(null);
     setSuccess(null);
     setDeleting(false);
+    setVisibleSecretFields({});
   };
 
   const handleDelete = async () => {
@@ -314,6 +321,10 @@ export default function Data() {
     setFormData(prev => ({ ...prev, [key]: value }));
   };
 
+  const toggleSecretField = (key: string) => {
+    setVisibleSecretFields(prev => ({ ...prev, [key]: !prev[key] }));
+  };
+
   if (loading) {
     return (
       <div className="loading">
@@ -333,7 +344,8 @@ export default function Data() {
   };
 
   const groupedScopes = scopes.reduce((acc, scope) => {
-    const category = scope.scope.split('.')[0];
+    const normalizedScope = normalizeVaultScope(scope.scope);
+    const category = normalizedScope.split('.')[0];
     if (!acc[category]) acc[category] = [];
     acc[category].push(scope);
     return acc;
@@ -437,7 +449,7 @@ export default function Data() {
                 {categoryLabels[category] || category}
               </h3>
               {items.map((scope) => {
-                const templateKey = scope.scope as TemplateKey;
+                const templateKey = normalizeVaultScope(scope.scope) as TemplateKey;
                 const template = getTemplateForScope(templateKey);
                 const isWallet = scope.type === 'WALLET_KEY';
                 const canEdit = !isWallet && scope.sensitivity !== 'critical';
@@ -479,7 +491,7 @@ export default function Data() {
                       </span>
                       <div>
                         <div style={{ fontWeight: 500 }}>
-                          {template?.label || scope.scope}
+                          {template?.label || templateKey}
                         </div>
                         {scope.public_address && (
                           <div style={{ fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
@@ -612,6 +624,53 @@ export default function Data() {
                           Separate multiple items with commas
                         </div>
                       </>
+                    ) : field.type === 'password' ? (
+                      <div style={{ position: 'relative' }}>
+                        <input
+                          type={visibleSecretFields[field.key] ? 'text' : 'password'}
+                          className="input"
+                          placeholder={field.placeholder}
+                          value={formData[field.key] || ''}
+                          onChange={(e) => handleFieldChange(field.key, e.target.value)}
+                          style={{ paddingRight: '42px' }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => toggleSecretField(field.key)}
+                          title={visibleSecretFields[field.key] ? 'Hide value' : 'Show value'}
+                          aria-label={visibleSecretFields[field.key] ? 'Hide value' : 'Show value'}
+                          style={{
+                            position: 'absolute',
+                            right: '8px',
+                            top: '50%',
+                            transform: 'translateY(-50%)',
+                            width: '28px',
+                            height: '28px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'var(--text-muted)',
+                            cursor: 'pointer',
+                            padding: 0,
+                          }}
+                        >
+                          {visibleSecretFields[field.key] ? (
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20C7 20 2.73 16.89 1 12c.8-2.27 2.27-4.22 4.14-5.61" />
+                              <path d="M9.9 4.24A10.64 10.64 0 0 1 12 4c5 0 9.27 3.11 11 8a11.5 11.5 0 0 1-2.18 3.54" />
+                              <path d="M14.12 14.12A3 3 0 0 1 9.88 9.88" />
+                              <path d="M1 1l22 22" />
+                            </svg>
+                          ) : (
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                              <circle cx="12" cy="12" r="3" />
+                            </svg>
+                          )}
+                        </button>
+                      </div>
                     ) : (
                       <input
                         type={field.type}

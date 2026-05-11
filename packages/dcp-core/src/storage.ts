@@ -1102,6 +1102,43 @@ export class VaultStorage {
     }
   }
 
+  /**
+   * Update an existing wallet record with an already encrypted private key.
+   *
+   * Used by owner-only wallet replacement flows. This keeps the stable record
+   * scope while updating both encrypted key material and public metadata.
+   */
+  updateWalletRecord(
+    recordId: string,
+    encrypted: EncryptedPayload,
+    chain: Chain,
+    publicAddress: string
+  ): void {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      UPDATE vault_records SET
+        ciphertext = ?,
+        nonce = ?,
+        dek_wrapped = ?,
+        dek_nonce = ?,
+        chain = ?,
+        public_address = ?,
+        updated_at = ?
+      WHERE id = ?
+    `);
+
+    stmt.run(
+      encrypted.ciphertext,
+      encrypted.nonce,
+      encrypted.dek_wrapped,
+      encrypted.dek_nonce,
+      chain,
+      publicAddress,
+      now,
+      recordId
+    );
+  }
+
   // ==========================================================================
   // Agent Sessions CRUD
   // ==========================================================================

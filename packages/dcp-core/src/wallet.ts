@@ -12,8 +12,8 @@
  *
  * CRITICAL SECURITY RULES:
  * 1. Private key exists in plaintext for ~5ms during generation
- * 2. Private key is NEVER returned to any caller
- * 3. No export_key operation exists. Ever. Non-negotiable.
+ * 2. Private key is NEVER returned to agents, MCP tools, relay requests, or signing APIs
+ * 3. Owner-only Desktop export is explicit and passphrase-gated
  * 4. All plaintext key material is zeroized after use
  */
 
@@ -140,6 +140,56 @@ export function createWallet(
 ): { encrypted: EncryptedPayload; info: WalletInfo } {
   const walletData = generateWalletKeypair(chain);
   return encryptWalletKey(walletData, masterKey);
+}
+
+// ============================================================================
+// Owner-only Export
+// ============================================================================
+
+/**
+ * Export a Solana wallet private key for owner recovery.
+ *
+ * SECURITY: This is only for Desktop owner recovery flows. Do not expose this
+ * through agent, MCP, relay, or HTTP signing surfaces.
+ *
+ * @param encryptedKey - Encrypted wallet from storage
+ * @param masterKey - Master key from OS Keychain/passphrase unlock
+ * @returns Base58 encoded 64-byte Solana secret key
+ */
+export function exportSolanaPrivateKey(
+  encryptedKey: EncryptedPayload,
+  masterKey: Buffer
+): string {
+  const privateKey = envelopeDecrypt(encryptedKey, masterKey);
+
+  try {
+    const keypair = Keypair.fromSeed(privateKey);
+    const secretKey = Buffer.from(keypair.secretKey);
+
+    try {
+      return bs58.encode(secretKey);
+    } finally {
+      zeroize(secretKey);
+      keypair.secretKey.fill(0);
+    }
+  } finally {
+    zeroize(privateKey);
+  }
+}
+
+/**
+ * Export a wallet private key for any supported chain.
+ */
+export function exportWalletPrivateKey(
+  encryptedKey: EncryptedPayload,
+  masterKey: Buffer,
+  chain: Chain
+): string {
+  if (!CHAIN_KEY_TYPES[chain]) {
+    throw new VaultError('INVALID_CHAIN', `Unsupported chain: ${chain}`);
+  }
+
+  return exportSolanaPrivateKey(encryptedKey, masterKey);
 }
 
 // ============================================================================

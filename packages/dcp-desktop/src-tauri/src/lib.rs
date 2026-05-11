@@ -64,6 +64,20 @@ struct CreateWalletsResult {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct ExportWalletResult {
+    chain: String,
+    address: String,
+    private_key: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ReplaceWalletResult {
+    chain: String,
+    old_address: Option<String>,
+    new_address: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct HealthResponse {
     status: String,
     initialized: bool,
@@ -325,16 +339,23 @@ fn run_node_helper(payload: serde_json::Value) -> Result<serde_json::Value, Stri
         .wait_with_output()
         .map_err(|e| format!("Failed to wait for node: {}", e))?;
 
+    let stdout = String::from_utf8(output.stdout).map_err(|e| format!("Invalid stdout: {}", e))?;
+
     if !output.status.success() {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+            if let Some(msg) = parsed.get("error").and_then(|v| v.as_str()) {
+                return Err(friendly_helper_error(msg));
+            }
+        }
+
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(if stderr.trim().is_empty() {
             "Node helper failed".to_string()
         } else {
-            stderr.trim().to_string()
+            friendly_helper_error(stderr.trim())
         });
     }
 
-    let stdout = String::from_utf8(output.stdout).map_err(|e| format!("Invalid stdout: {}", e))?;
     let parsed: serde_json::Value =
         serde_json::from_str(stdout.trim()).map_err(|e| format!("Invalid JSON output: {}", e))?;
 
@@ -343,10 +364,22 @@ fn run_node_helper(payload: serde_json::Value) -> Result<serde_json::Value, Stri
             .get("error")
             .and_then(|v| v.as_str())
             .unwrap_or("Node helper error");
-        return Err(msg.to_string());
+        return Err(friendly_helper_error(msg));
     }
 
     Ok(parsed)
+}
+
+fn friendly_helper_error(message: &str) -> String {
+    if message.contains("Wrong passphrase")
+        || message.contains("Decryption failed")
+        || message.contains("invalid tag")
+        || message.contains("authentication")
+    {
+        return "Wrong passphrase. Please try again.".to_string();
+    }
+
+    message.to_string()
 }
 
 fn find_node_root() -> Option<std::path::PathBuf> {
@@ -871,6 +904,81 @@ async fn create_wallets(passphrase: String) -> Result<CreateWalletsResult, Strin
     Ok(CreateWalletsResult { wallets })
 }
 
+// Export the local Solana wallet private key. Desktop-only owner action.
+#[tauri::command]
+async fn export_wallet_private_key(
+    passphrase: String,
+    confirmation: String,
+) -> Result<ExportWalletResult, String> {
+    if confirmation != "EXPORT" {
+        return Err("Type EXPORT to confirm".to_string());
+    }
+
+    let payload = json!({
+        "action": "export_wallet_private_key",
+        "passphrase": passphrase,
+        "confirmation": confirmation,
+        "chain": "solana",
+        "vault_dir": std::env::var("VAULT_DIR").ok()
+    });
+    let result = run_node_helper(payload)?;
+
+    Ok(ExportWalletResult {
+        chain: result
+            .get("chain")
+            .and_then(|v| v.as_str())
+            .unwrap_or("solana")
+            .to_string(),
+        address: result
+            .get("address")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Invalid export response".to_string())?
+            .to_string(),
+        private_key: result
+            .get("private_key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Invalid export response".to_string())?
+            .to_string(),
+    })
+}
+
+// Replace the local Solana wallet with a newly generated wallet. Funds are not moved.
+#[tauri::command]
+async fn replace_wallet(
+    passphrase: String,
+    confirmation: String,
+) -> Result<ReplaceWalletResult, String> {
+    if confirmation != "REPLACE" {
+        return Err("Type REPLACE to confirm".to_string());
+    }
+
+    let payload = json!({
+        "action": "replace_wallet",
+        "passphrase": passphrase,
+        "confirmation": confirmation,
+        "chain": "solana",
+        "vault_dir": std::env::var("VAULT_DIR").ok()
+    });
+    let result = run_node_helper(payload)?;
+
+    Ok(ReplaceWalletResult {
+        chain: result
+            .get("chain")
+            .and_then(|v| v.as_str())
+            .unwrap_or("solana")
+            .to_string(),
+        old_address: result
+            .get("old_address")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        new_address: result
+            .get("new_address")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Invalid replace response".to_string())?
+            .to_string(),
+    })
+}
+
 // Show notification
 #[tauri::command]
 async fn show_notification(app: AppHandle, title: String, body: String) -> Result<(), String> {
@@ -1034,6 +1142,8 @@ pub fn run() {
             // Vault operations
             init_vault,
             create_wallets,
+            export_wallet_private_key,
+            replace_wallet,
             show_notification,
             // Owner trust model
             get_or_create_desktop_credentials,
