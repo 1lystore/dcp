@@ -5,13 +5,14 @@
  * through the relay connection. Unlike dcp-mcp which uses local VaultStorage,
  * this uses AgentConnection to proxy requests through the relay.
  *
- * MCP Tools (7 tools):
+ * MCP Tools (8 tools):
  * - vault_get_address(chain) - Get public address (no consent)
  * - vault_budget_check(amount, currency) - Check budget (no consent)
  * - vault_scope_guide() - Show canonical DCP scopes (no consent)
  * - vault_read(scope, fields?) - Read data (consent may be required)
  * - vault_sign_tx(chain, unsigned_tx, description?) - Sign transaction (consent required)
  * - vault_sign_message(chain, message, encoding?) - Sign message (consent required)
+ * - vault_sign_x402(network, payload, amount?) - Sign x402 payment payload (consent may be required)
  * - vault_write(scope, data) - Write data (consent required)
  */
 
@@ -35,6 +36,7 @@ import {
   VAULT_SCOPE_GUIDE_DESCRIPTION,
   VAULT_SIGN_MESSAGE_DESCRIPTION,
   VAULT_SIGN_TX_DESCRIPTION,
+  VAULT_SIGN_X402_DESCRIPTION,
   VAULT_WRITE_DESCRIPTION,
 } from './scope-guide.js';
 import { AgentConfig, AgentError } from './types.js';
@@ -281,6 +283,41 @@ export class AgentMcpServer {
             },
           },
           {
+            name: 'vault_sign_x402',
+            description: VAULT_SIGN_X402_DESCRIPTION,
+            inputSchema: {
+              type: 'object',
+              properties: {
+                network: {
+                  type: 'string',
+                  enum: ['solana'],
+                  description: 'Use solana. DCP signs Solana x402 payment payloads.',
+                },
+                payload: {
+                  type: 'string',
+                  description: 'Exact x402 payment payload encoded as base64. Do not rewrite it.',
+                },
+                amount: {
+                  oneOf: [{ type: 'number' }, { type: 'string' }],
+                  description: 'Payment amount for budget tracking and approval display.',
+                },
+                currency: {
+                  type: 'string',
+                  description: 'Currency code for budget tracking, for example SOL, USDC, USDT, or 1LY.',
+                },
+                recipient: {
+                  type: 'string',
+                  description: 'Payment recipient or merchant address when available.',
+                },
+                purpose: {
+                  type: 'string',
+                  description: 'Short human-readable purpose shown to the user for approval.',
+                },
+              },
+              required: ['network', 'payload'],
+            },
+          },
+          {
             name: 'vault_write',
             description: VAULT_WRITE_DESCRIPTION,
             inputSchema: {
@@ -393,6 +430,31 @@ export class AgentMcpServer {
           message: input.message,
           encoding: input.encoding,
           description: input.description,
+        });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'vault_sign_x402': {
+        const input = args as {
+          network: 'solana';
+          payload: string;
+          amount?: number | string;
+          currency?: string;
+          recipient?: string;
+          purpose?: string;
+        };
+        if (!input.network || !input.payload) {
+          throw new McpError(ErrorCode.InvalidParams, 'network and payload are required');
+        }
+        const result = await this.connection.signX402({
+          network: input.network,
+          payload: input.payload,
+          amount: input.amount,
+          currency: input.currency,
+          recipient: input.recipient,
+          purpose: input.purpose,
         });
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],

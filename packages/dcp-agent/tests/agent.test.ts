@@ -7,6 +7,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { AgentError } from '../src/types.js';
+import { VAULT_SIGN_X402_DESCRIPTION } from '../src/scope-guide.js';
 
 // ============================================================================
 // AgentError Tests
@@ -179,6 +180,21 @@ describe('JSON Output Redaction', () => {
     expect(redacted.mode).toBe('local');
     expect(redacted.relay_url).toBe('wss://relay.example.com');
     expect(redacted.permission_scopes).toEqual(['read:identity.*', 'sign:*']);
+  });
+});
+
+// ============================================================================
+// MCP Tool Description Tests
+// ============================================================================
+
+describe('MCP x402 tool description', () => {
+  it('should clearly describe Solana x402 signing inputs', () => {
+    expect(VAULT_SIGN_X402_DESCRIPTION).toContain('x402');
+    expect(VAULT_SIGN_X402_DESCRIPTION).toContain('network must be solana');
+    expect(VAULT_SIGN_X402_DESCRIPTION).toContain('payload must be');
+    expect(VAULT_SIGN_X402_DESCRIPTION).toContain('base64');
+    expect(VAULT_SIGN_X402_DESCRIPTION).toContain('amount');
+    expect(VAULT_SIGN_X402_DESCRIPTION).toContain('currency');
   });
 });
 

@@ -203,6 +203,31 @@ export class AgentConnection {
   }
 
   /**
+   * Sign an x402 payment payload
+   */
+  async signX402(params: {
+    network: 'solana';
+    payload: string;
+    amount?: number | string;
+    currency?: string;
+    recipient?: string;
+    purpose?: string;
+  }): Promise<{
+    signature: string;
+    public_key: string;
+    chain: string;
+  }> {
+    this.ensureConnected();
+    this.updateState();
+    const result = await this.client!.signX402(params);
+    return {
+      signature: result.signature,
+      public_key: result.publicKey,
+      chain: result.chain,
+    };
+  }
+
+  /**
    * Read credential from vault
    */
   async readCredential(

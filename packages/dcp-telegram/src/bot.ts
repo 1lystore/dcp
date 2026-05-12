@@ -430,12 +430,15 @@ export class DcpTelegramBot {
     }
 
     // protocol spec: Include pairing_id for command binding
-    this.store.approvals.createApprovalCommand(
+    const command = this.store.approvals.createApprovalCommand(
       pairing.vault_id,
       chatIdString,
       normalizedConsentId,
       action,
       pairing.vault_id // pairing_id is vault_id since each vault has one pairing
+    );
+    console.log(
+      `[APPROVAL] Queued ${action} command ${command.id} for vault ${pairing.vault_id}, consent ${normalizedConsentId}`
     );
     this.store.rateLimiter.record(chatIdString);
 
@@ -572,6 +575,10 @@ export class DcpTelegramBot {
       };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      console.error(
+        `[BOT] Failed to send approval processed notification to ${chatId}:`,
+        errorMessage
+      );
       return {
         success: false,
         error: errorMessage,

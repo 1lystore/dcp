@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "DCP",
-  "version": "0.2.0",
+  "version": "2.0.2",
   "identifier": "rg.dcp.vault",
   "build": {
     "beforeDevCommand": "corepack pnpm -r --filter @dcprotocol/core --filter @dcprotocol/client --filter @dcprotocol/relay --filter @dcprotocol/relay-client --filter @dcprotocol/vault run build && corepack pnpm --filter @dcprotocol/desktop run bundle:helper && corepack pnpm --filter @dcprotocol/desktop run dev",

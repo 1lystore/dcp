@@ -474,6 +474,12 @@ export class WebhookServer {
       created_at: command.created_at,
     }));
 
+    if (commands.length > 0) {
+      console.log(
+        `[APPROVAL] Returning ${commands.length} pending command(s) for vault ${vaultId}: ${commands.map((command) => command.id).join(', ')}`
+      );
+    }
+
     return reply.send({ commands });
   }
 
@@ -492,18 +498,28 @@ export class WebhookServer {
 
     const command = this.store.approvals.markApprovalProcessed(command_id, result);
     if (!command) {
+      console.warn(`[APPROVAL] Processed callback for missing command ${command_id}`);
       return reply.status(404).send({
         error: 'COMMAND_NOT_FOUND',
         message: 'Approval command not found',
       });
     }
 
-    await this.bot.sendApprovalProcessedNotification(
+    console.log(
+      `[APPROVAL] Processed command ${command.id} for vault ${command.vault_id}, consent ${command.consent_id}: ${result}`
+    );
+
+    const notification = await this.bot.sendApprovalProcessedNotification(
       command.chat_id,
       command.consent_id,
       command.action as ApprovalAction,
       result
     );
+    if (!notification.success) {
+      console.warn(
+        `[APPROVAL] Processed notification failed for command ${command.id}: ${notification.error || 'unknown error'}`
+      );
+    }
 
     return reply.send({
       processed: true,

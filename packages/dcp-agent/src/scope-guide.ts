@@ -94,3 +94,15 @@ Rules:
 - encoding is utf8 unless the message is already base64.
 - Include a clear description when available.
 - User approval is required.`;
+
+export const VAULT_SIGN_X402_DESCRIPTION = `Sign a Solana x402 payment payload using the user's DCP vault wallet.
+
+Use this when the user asks to pay an x402-protected API, authorize an x402 payment, or sign a pay.sh/x402 payment payload.
+
+Rules:
+- network must be solana.
+- payload must be the exact x402 payment payload encoded as base64. Do not rewrite or reformat it.
+- Include amount, currency, recipient, and purpose whenever available so DCP can show a useful approval request and enforce budgets.
+- For 1LY payments, use currency 1LY.
+- This signs only. It does not submit or settle the payment unless your client does that separately.
+- Manual approval is required when the amount is above the user's approval threshold.`;

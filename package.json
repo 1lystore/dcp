@@ -1,6 +1,6 @@
 {
   "name": "dcp",
-  "version": "0.2.0",
+  "version": "2.0.2",
   "description": "Delegated Custody Protocol (DCP) reference implementation",
   "private": true,
   "packageManager": "pnpm@9.15.0",

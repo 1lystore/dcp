@@ -129,9 +129,16 @@ jobs:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && format('dev-{0}', github.sha) || github.ref_name }}
           name: ${{ github.event_name == 'workflow_dispatch' && format('Development Build ({0})', github.sha) || github.ref_name }}
           body: |
-            ## DCP Desktop v0.2.0
+            ## DCP Desktop ${{ github.event_name == 'workflow_dispatch' && format('Development Build ({0})', github.sha) || github.ref_name }}
 
-            Cross-platform desktop application for DCP - securely manage your personal data with AI agents.
+            Cross-platform desktop application for DCP - connect AI agents to your Solana wallet and personal vault with local approval.
+
+            ### Release notes
+
+            - Fixed Telegram approval routing after unlinking and relinking Telegram.
+            - Improved remote approval reliability for Desktop and VPS agents.
+            - Added MCP support for x402 Solana payment signing.
+            - Updated the bundled vault runtime used by the Desktop app.
 
             ### Downloads
 

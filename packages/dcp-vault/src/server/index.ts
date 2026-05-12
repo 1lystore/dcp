@@ -268,12 +268,29 @@ const REMOTE_APPROVAL_POLL_INTERVAL_MS = parseInt(
   process.env.DCP_TELEGRAM_APPROVAL_POLL_MS || '5000',
   10
 );
+const REMOTE_APPROVAL_FETCH_TIMEOUT_MS = parseInt(
+  process.env.DCP_TELEGRAM_APPROVAL_FETCH_TIMEOUT_MS || '8000',
+  10
+);
 
 interface RemoteApprovalCommand {
   id: string;
   consent_id: string;
   action: 'approve' | 'deny';
   created_at: string;
+}
+
+async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REMOTE_APPROVAL_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function findActiveSessionForScope(agentName: string, scope: string): string | undefined {
@@ -798,22 +815,14 @@ function processRemoteApprovalCommand(command: RemoteApprovalCommand): string {
   }
 
   if (command.action === 'approve') {
-    // Create a 5-minute session (same as desktop "Approve Once")
-    // This allows the agent's retry to succeed without new consent
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
-    const session = storage.createSession(
-      consent.agent_name,
-      [consent.scope],
-      'once',
-      expiresAt
-    );
-
-    storage.resolveConsent(consent.id, 'approved', session.id);
+    // Match the Desktop "Approve Once" path exactly. The waiting request will
+    // retry and consume this approved consent once.
+    storage.resolveConsent(consent.id, 'approved');
     storage.logAudit('GRANT', 'success', {
       agentName: consent.agent_name,
       scope: consent.scope,
       operation: 'telegram_remote_grant',
-      details: JSON.stringify({ command_id: command.id, consent_mode: 'once', session_id: session.id }),
+      details: JSON.stringify({ command_id: command.id, consent_mode: 'once' }),
     });
     return 'success';
   }
@@ -833,7 +842,7 @@ function processRemoteApprovalCommand(command: RemoteApprovalCommand): string {
 }
 
 async function acknowledgeRemoteApproval(commandId: string, result: string): Promise<void> {
-  const response = await fetch(`${TELEGRAM_CLOUD_URL}/api/approvals/processed`, {
+  const response = await fetchWithTimeout(`${TELEGRAM_CLOUD_URL}/api/approvals/processed`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ command_id: commandId, result }),
@@ -853,7 +862,7 @@ async function pollRemoteApprovals(): Promise<void> {
 
   const identity = await ensureRelayIdentity();
   const vaultId = identity.vaultId;
-  const response = await fetch(`${TELEGRAM_CLOUD_URL}/api/approvals/${vaultId}`);
+  const response = await fetchWithTimeout(`${TELEGRAM_CLOUD_URL}/api/approvals/${vaultId}`);
 
   if (response.status === 404 || response.status === 403) {
     return;
@@ -866,6 +875,11 @@ async function pollRemoteApprovals(): Promise<void> {
 
   const payload = await response.json() as { commands?: RemoteApprovalCommand[] };
   const commands = payload.commands || [];
+  if (commands.length > 0) {
+    console.log(
+      `[TG-APPROVAL] Fetched ${commands.length} remote command(s) for vault ${vaultId}: ${commands.map((command) => command.id).join(', ')}`
+    );
+  }
 
   for (const command of commands) {
     let result = 'success';
@@ -877,6 +891,9 @@ async function pollRemoteApprovals(): Promise<void> {
 
     try {
       await acknowledgeRemoteApproval(command.id, result);
+      console.log(
+        `[TG-APPROVAL] Processed remote command ${command.id} (${command.action}) for consent ${command.consent_id}: ${result}`
+      );
     } catch (err) {
       console.log('[TG-APPROVAL] Ack error:', err);
     }

@@ -486,6 +486,14 @@ export class PairingStore {
   completePairing(vaultId: string, chatId: string): VaultPairing {
     const now = new Date().toISOString();
 
+    // A Telegram chat controls one active vault at a time. Without this, an
+    // unlink/relink can leave older vault rows for the same chat, and callback
+    // approvals may be queued under the wrong vault.
+    this.db.prepare(`
+      DELETE FROM vault_pairings
+      WHERE chat_id = ? AND vault_id != ?
+    `).run(chatId, vaultId);
+
     // Upsert pairing
     this.db.prepare(`
       INSERT INTO vault_pairings (vault_id, chat_id, paired_at, enabled)
@@ -542,7 +550,10 @@ export class PairingStore {
    */
   getPairingByChatId(chatId: string): VaultPairing | null {
     const row = this.db.prepare(`
-      SELECT * FROM vault_pairings WHERE chat_id = ?
+      SELECT * FROM vault_pairings
+      WHERE chat_id = ?
+      ORDER BY paired_at DESC
+      LIMIT 1
     `).get(chatId) as {
       vault_id: string;
       chat_id: string;

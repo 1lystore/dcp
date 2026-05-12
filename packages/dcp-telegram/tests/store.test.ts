@@ -204,6 +204,30 @@ describe('TelegramStore', () => {
   });
 });
 
+describe('PairingStore', () => {
+  let dataDir: string;
+  let store: TelegramStore;
+
+  beforeEach(() => {
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dcp-telegram-pairing-test-'));
+    store = new TelegramStore(dataDir);
+  });
+
+  afterEach(() => {
+    store.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('keeps one active vault per Telegram chat when relinking', () => {
+    store.pairings.completePairing('vault_old', 'chat_123');
+    store.pairings.completePairing('vault_new', 'chat_123');
+
+    expect(store.pairings.getPairingByChatId('chat_123')?.vault_id).toBe('vault_new');
+    expect(store.pairings.getPairingByVaultId('vault_old')).toBeNull();
+    expect(store.pairings.getPairingByVaultId('vault_new')?.chat_id).toBe('chat_123');
+  });
+});
+
 describe('ApprovalCommandStore', () => {
   let dataDir: string;
   let store: TelegramStore;

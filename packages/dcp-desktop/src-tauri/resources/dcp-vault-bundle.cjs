@@ -98631,6 +98631,19 @@ var pendingVpsInviteNames = /* @__PURE__ */ new Map();
 var notifiedConsentIds = /* @__PURE__ */ new Set();
 var CONSENT_POLL_INTERVAL_MS = 1500;
 var REMOTE_APPROVAL_POLL_INTERVAL_MS = parseInt(process.env.DCP_TELEGRAM_APPROVAL_POLL_MS || "5000", 10);
+var REMOTE_APPROVAL_FETCH_TIMEOUT_MS = parseInt(process.env.DCP_TELEGRAM_APPROVAL_FETCH_TIMEOUT_MS || "8000", 10);
+async function fetchWithTimeout(url, init) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REMOTE_APPROVAL_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 function findActiveSessionForScope(agentName, scope) {
   const sessions = storage.listActiveSessionsForAgent(agentName);
   for (const session of sessions) {
@@ -99016,14 +99029,12 @@ function processRemoteApprovalCommand(command) {
     return "consent expired";
   }
   if (command.action === "approve") {
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1e3);
-    const session = storage.createSession(consent.agent_name, [consent.scope], "once", expiresAt);
-    storage.resolveConsent(consent.id, "approved", session.id);
+    storage.resolveConsent(consent.id, "approved");
     storage.logAudit("GRANT", "success", {
       agentName: consent.agent_name,
       scope: consent.scope,
       operation: "telegram_remote_grant",
-      details: JSON.stringify({ command_id: command.id, consent_mode: "once", session_id: session.id })
+      details: JSON.stringify({ command_id: command.id, consent_mode: "once" })
     });
     return "success";
   }
@@ -99040,7 +99051,7 @@ function processRemoteApprovalCommand(command) {
   return `unknown action: ${command.action}`;
 }
 async function acknowledgeRemoteApproval(commandId, result) {
-  const response = await fetch(`${TELEGRAM_CLOUD_URL}/api/approvals/processed`, {
+  const response = await fetchWithTimeout(`${TELEGRAM_CLOUD_URL}/api/approvals/processed`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ command_id: commandId, result })
@@ -99057,7 +99068,7 @@ async function pollRemoteApprovals() {
   }
   const identity = await ensureRelayIdentity();
   const vaultId = identity.vaultId;
-  const response = await fetch(`${TELEGRAM_CLOUD_URL}/api/approvals/${vaultId}`);
+  const response = await fetchWithTimeout(`${TELEGRAM_CLOUD_URL}/api/approvals/${vaultId}`);
   if (response.status === 404 || response.status === 403) {
     return;
   }
@@ -99067,6 +99078,9 @@ async function pollRemoteApprovals() {
   }
   const payload = await response.json();
   const commands = payload.commands || [];
+  if (commands.length > 0) {
+    console.log(`[TG-APPROVAL] Fetched ${commands.length} remote command(s) for vault ${vaultId}: ${commands.map((command) => command.id).join(", ")}`);
+  }
   for (const command of commands) {
     let result = "success";
     try {
@@ -99076,6 +99090,7 @@ async function pollRemoteApprovals() {
     }
     try {
       await acknowledgeRemoteApproval(command.id, result);
+      console.log(`[TG-APPROVAL] Processed remote command ${command.id} (${command.action}) for consent ${command.consent_id}: ${result}`);
     } catch (err) {
       console.log("[TG-APPROVAL] Ack error:", err);
     }

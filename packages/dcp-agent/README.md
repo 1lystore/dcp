@@ -286,6 +286,7 @@ vault_get_address
 vault_budget_check
 vault_sign_tx
 vault_sign_message
+vault_sign_x402
 vault_scope_guide
 ```
 
@@ -298,6 +299,7 @@ What is my email from DCP?
 What is my Solana wallet address?
 Send 0.00001 SOL to <address>
 Send 1000 1LY to <address>
+Sign this x402 Solana payment payload: <base64_payload>
 ```
 
 For write/sign prompts, DCP should ask for approval in Desktop or Telegram unless the action is under the user's configured auto-approval threshold.

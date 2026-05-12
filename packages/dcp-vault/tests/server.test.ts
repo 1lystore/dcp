@@ -9,7 +9,14 @@ import { buildServer } from '../src/index.js';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { VaultStorage, resetStorage, generateRecoveryMnemonic, deriveKeyFromMnemonic, zeroize } from '@dcprotocol/core';
+import {
+  VaultStorage,
+  resetStorage,
+  generateRecoveryMnemonic,
+  deriveKeyFromMnemonic,
+  zeroize,
+  createWallet,
+} from '@dcprotocol/core';
 import type { FastifyInstance } from 'fastify';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -19,6 +26,8 @@ describe('REST Server', () => {
   let server: FastifyInstance;
   let testVaultDir: string;
   let storage: VaultStorage;
+  let x402SessionId: string;
+  let x402WalletAddress: string;
   const passphrase = 'test-passphrase-123';
 
   beforeAll(async () => {
@@ -38,6 +47,23 @@ describe('REST Server', () => {
     const masterKey = deriveKeyFromMnemonic(mnemonic);
     try {
       await storage.storeMasterKeyWithPassphrase(masterKey, passphrase);
+      const { encrypted, info } = createWallet('solana', masterKey);
+      storage.createRecord({
+        scope: 'crypto.wallet.solana',
+        item_type: 'WALLET_KEY',
+        sensitivity: 'critical',
+        data: encrypted,
+        chain: 'solana',
+        public_address: info.public_address,
+      });
+      x402WalletAddress = info.public_address;
+      const session = storage.createSession(
+        'x402-test-agent',
+        ['crypto.wallet.solana'],
+        'session',
+        new Date(Date.now() + 60 * 60 * 1000)
+      );
+      x402SessionId = session.id;
     } finally {
       zeroize(masterKey);
     }
@@ -94,6 +120,65 @@ describe('REST Server', () => {
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.body);
       expect(body.unlocked).toBe(true);
+    });
+  });
+
+  describe('x402 Signing', () => {
+    it('should sign a Solana x402 payload with an active wallet session', async () => {
+      await server.inject({
+        method: 'POST',
+        url: '/v1/vault/unlock',
+        payload: { passphrase },
+      });
+
+      const payload = Buffer.from(JSON.stringify({
+        x402Version: 1,
+        network: 'solana',
+        resource: 'https://api.example.test/paywalled',
+        nonce: 'test-nonce-1',
+      })).toString('base64');
+
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/vault/sign_x402',
+        payload: {
+          network: 'solana',
+          payload,
+          amount: 0.00001,
+          currency: 'SOL',
+          recipient: 'pay-sh-test-recipient',
+          purpose: 'x402 endpoint test',
+          agent_name: 'x402-test-agent',
+          session_id: x402SessionId,
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.signature).toMatch(/^[1-9A-HJ-NP-Za-km-z]+$/);
+      expect(body.public_key).toBe(x402WalletAddress);
+      expect(body.chain).toBe('solana');
+      expect(body.session_id).toBe(x402SessionId);
+    });
+
+    it('should require currency when x402 amount is provided', async () => {
+      const payload = Buffer.from('x402-test').toString('base64');
+
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/vault/sign_x402',
+        payload: {
+          network: 'solana',
+          payload,
+          amount: 0.00001,
+          agent_name: 'x402-test-agent',
+          session_id: x402SessionId,
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      const body = JSON.parse(response.body);
+      expect(body.error.message).toContain('currency is required');
     });
   });
 
