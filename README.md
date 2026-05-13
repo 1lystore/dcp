@@ -173,12 +173,14 @@ DCP is designed around least privilege.
 
 ## MCP Tools Exposed
 
-DCP exposes tools such as:
+DCP exposes these MCP tools:
 
 - `vault_get_address`
 - `vault_budget_check`
+- `vault_scope_guide`
 - `vault_sign_tx`
 - `vault_sign_message`
+- `vault_sign_x402`
 - `vault_read`
 - `vault_write`
 
