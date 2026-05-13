@@ -1,39 +1,84 @@
 # DCP
 
-DCP is a personal vault for AI agents.
+**Give agent permissions. Not keys.**
 
-It lets agents use identity, credentials, wallets, and approvals without taking possession of raw secrets. The vault stays with the user. Agents get scoped access and the user can approve, deny, budget, or revoke.
+Use DCP if your AI agent needs to use wallets, API keys, credentials, or user data, but you do not want those secrets sitting in agent configs or `.env` files.
 
-## Try It
+DCP sits between your agents and your sensitive actions.
 
-Install the vault CLI:
+Agents ask. You approve, deny, budget, or revoke.
 
-```bash
-npm install -g @dcprotocol/vault
+<video src="img/makeagentsafeforwork.mp4" controls muted loop playsinline width="100%"></video>
+
+[Watch the 15-second demo](img/makeagentsafeforwork.mp4)
+
+## Use DCP If
+
+- you run Claude, Cursor, OpenClaw, or custom MCP agents
+- your agent needs to sign Solana transactions without holding a private key
+- your agent needs API keys without reading `.env`
+- you want spending limits for agents
+- you want approval before sensitive actions
+- you run multiple agents and want one place to manage credentials, permissions, and activity logs
+
+## Why DCP?
+
+Agents are useful when they can do real work. Real work needs keys, wallets, credentials, and user data.
+
+The problem is giving an agent raw access is too much trust.
+
+DCP gives agents a permission boundary:
+
+- they ask for what they need
+- you approve sensitive actions
+- budgets limit damage
+- private keys stay in your vault
+- every action is logged
+
+## What It Does
+
+- stores wallets, API keys, and user data locally
+- lets agents request access through MCP
+- asks you before sensitive actions
+- signs transactions without exposing private keys
+- enforces per-agent budgets
+- logs what agents did
+
+DCP exposes vault permissions through MCP, so Claude Desktop, Cursor, OpenClaw, and custom agents can request approved actions without reading raw secrets directly.
+
+## 5-Minute Quickstart
+
+By the end, your agent can ask DCP for your Solana wallet address.
+
+### Option A: Desktop
+
+1. Download DCP Desktop from [dcpagent.com](https://dcpagent.com/).
+2. Create and unlock your vault.
+3. Create a Solana wallet.
+4. Open **Connect** and add Claude Desktop, Cursor, or another MCP agent.
+5. Restart your agent app.
+
+Then ask your agent:
+
+```text
+What is my Solana wallet address from DCP?
 ```
 
-Create a vault and add a little data:
+### Option B: CLI
+
+Use the CLI to create and manage vault data:
 
 ```bash
+npm install -g @dcprotocol/vault @dcprotocol/agent
 dcp init
 dcp create-wallet --chain solana
-dcp add identity.email
+dcp add credentials.api.openai
 dcp list
 ```
 
-Install the agent runtime:
+CLI-only Claude/Cursor setup is being simplified. Today, use Desktop to create the local MCP agent config, or pair an agent with a pairing grant before running `dcp-agent`.
 
-```bash
-npm install -g @dcprotocol/agent
-```
-
-Run it as a local MCP server:
-
-```bash
-dcp-agent run --mode mcp --agent claude_desktop
-```
-
-MCP config:
+Once an agent is configured, stdio MCP clients use:
 
 ```json
 {
@@ -42,44 +87,121 @@ MCP config:
 }
 ```
 
-For HTTP MCP clients:
-
-```bash
-dcp-agent run --mode http-mcp --agent openclaw_local --port 8420
-```
-
-Endpoint:
+## Try These Prompts
 
 ```text
-http://127.0.0.1:8420/mcp
+What is my Solana wallet address from DCP?
+
+Read my OpenAI credential from DCP.
+
+Check if sending 0.01 SOL is within my DCP budget.
+
+Request approval to sign a Solana transaction.
 ```
+
+## How It Works
+
+```text
+Claude / Cursor / OpenClaw
+        |
+        v
+    dcp-agent
+        |
+        v
+ Local DCP vault
+        |
+        v
+ approve / deny / budget / revoke
+        |
+        v
+ wallets, API keys, identity data
+```
+
+The agent asks for an action. The vault checks policy. If approval is needed, DCP creates a consent request. The agent gets only the result, not the raw private key.
+
+## What Approval Shows
+
+When an agent requests a sensitive action, DCP shows:
+
+- which agent is asking
+- what action it wants
+- amount, chain, and destination for payments
+- whether the request is within budget
+- approve or deny controls
+
+## Screenshots
+
+### Real-time approval
+
+![DCP real-time approval](img/dcp_realtime_approval.png)
+
+### MCP connection
+
+![DCP MCP connection](img/dcp_mcpconnect.png)
+
+### Multiple agents
+
+![DCP multiple agents](img/dcp_multiagents.png)
+
+## Security Model
+
+DCP is designed around least privilege.
+
+- private keys never leave the local vault
+- agents receive results, not raw private keys
+- sensitive actions can require explicit approval
+- budgets limit automated spending
+- scopes control which data an agent can request
+- access can be revoked per agent
+- sensitive activity is logged
+
+## Supported Today
+
+- Solana transaction signing
+- Solana message signing
+- scoped vault reads and writes
+- API credential storage
+- budget checks
+- stdio MCP for Claude Desktop, Cursor, and similar clients
+- HTTP MCP for local or custom agents
+- Desktop approvals
+- Telegram approvals
+- remote/VPS openclaw agents through relay
+
+## What Agents Can Request
+
+- wallet address
+- transaction signature
+- message signature
+- API credential access
+- identity or profile data
+- budget check
+
+## What Agents Cannot Do
+
+- read private keys
+- bypass approval
+- access scopes they were not granted
+- spend past configured limits
+- silently export the vault
 
 ## Desktop App
 
-Download the latest release from [GitHub Releases](https://github.com/1lystore/dcp/releases).
+Prefer a GUI? Download DCP Desktop from [dcpagent.com](https://dcpagent.com/).
 
-### macOS
-1. Download the DMG for your Mac (Apple Silicon or Intel)
-2. Open the DMG and drag DCP to Applications
-3. **Important:** The app is unsigned. Run this in Terminal before opening:
-   ```bash
-   xattr -cr /Applications/DCP.app
-   ```
-   Or: Right-click the app → "Open" → Click "Open" in the dialog
+The desktop app helps you create a vault, manage agents, approve requests, and create remote agent invites.
 
-### Windows
-Run the MSI or EXE installer.
+## Remote Agents
 
-### Linux
+For a VPS or remote agent, create an invite in DCP Desktop and run the generated command:
+
 ```bash
-# Debian/Ubuntu
-sudo dpkg -i DCP_0.2.0_amd64.deb
-
-# Fedora/RHEL
-sudo rpm -i DCP-0.2.0-1.x86_64.rpm
+curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- 'dcp_vps_v1_...'
 ```
 
-## What Is Inside
+That command installs the DCP agent service, pairs it with your vault, starts the local HTTP MCP endpoint, and tries to add DCP to OpenClaw.
+
+## Packages
 
 | Package | Purpose |
 |---|---|
@@ -90,67 +212,7 @@ sudo rpm -i DCP-0.2.0-1.x86_64.rpm
 | `@dcprotocol/telegram` | Telegram approval service |
 | `@dcprotocol/desktop` | Desktop vault app |
 
-## Telegram Approvals
-
-Telegram gives users a second approval surface:
-
-```text
-🔐 Approval Needed
-
-Claude Desktop wants to send 0.02 SOL on Solana.
-
-⏱️ Reply within 4m 58s
-```
-
-Run the Telegram service with a real bot token:
-
-```bash
-DCP_TELEGRAM_BOT_TOKEN="123456:..." dcp-telegram --host 127.0.0.1 --port 8423
-```
-
-## Remote Agents
-
-For a VPS or remote agent, create an invite in DCP Desktop and run the generated command:
-
-```bash
-curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- 'dcp_vps_v1_...'
-```
-
-That command installs the DCP agent service, pairs it with Desktop, starts the local HTTP MCP endpoint, and tries to add DCP to OpenClaw. The installer uses the system Node.js when it is compatible; otherwise it installs a private DCP runtime without changing OpenClaw.
-
-If you prefer npm and the VPS already has a working Node/npm install:
-
-```bash
-sudo npx --yes @dcprotocol/agent@latest install-service 'dcp_vps_v1_...'
-```
-
-If OpenClaw setup is not verified and the OpenClaw gateway runs as the `openclaw` Linux user:
-
-```bash
-sudo npx --yes @dcprotocol/agent@latest configure-openclaw --user openclaw
-```
-
-For custom OpenClaw setups, print the manual MCP config:
-
-```bash
-sudo npx --yes @dcprotocol/agent@latest configure-openclaw --manual
-```
-
-Use the DCP MCP URL printed by the installer. The URL is environment-specific, so do not copy a Docker bridge IP from another machine.
-
-After changing OpenClaw MCP config, start a fresh OpenClaw chat/session so the new tools are loaded.
-
-If pairing works but your agent does not see DCP tools, check the remote-agent guide:
-
-```text
-packages/dcp-agent/README.md
-```
-
-It includes the exact health checks, OpenClaw config checks, Docker/UFW fix path, and manual MCP fallback.
-
 ## Developer Checks
-
-For contributors working from this repo:
 
 ```bash
 pnpm install
