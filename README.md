@@ -205,7 +205,18 @@ DCP exposes these MCP tools:
 
 Prefer a GUI? Download DCP Desktop from [dcpagent.com](https://dcpagent.com/).
 
-The desktop app helps you create a vault, manage agents, approve requests, and create remote agent invites.
+## Desktop Flow
+
+DCP Desktop is the easiest way to get started.
+
+1. Download DCP Desktop for macOS, Windows, or Linux.
+2. Create a vault with a password/passphrase.
+3. Save your recovery phrase safely.
+4. DCP creates a Solana wallet for you.
+5. Add private data or credentials in the Data tab.
+6. Connect local agents like Claude, Cursor, VS Code, OpenClaw, or any MCP client.
+7. Set permissions per agent.
+8. Approve, deny, budget, revoke, and audit every action agents ask for.
 
 ## Remote Agents
 
