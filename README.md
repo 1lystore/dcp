@@ -1,6 +1,9 @@
 # DCP
 
-**Give agent permissions. Not keys.**
+[![npm agent](https://img.shields.io/npm/v/@dcprotocol/agent?label=@dcprotocol/agent)](https://www.npmjs.com/package/@dcprotocol/agent)
+[![License](https://img.shields.io/github/license/1lystore/dcp)](LICENSE)
+
+**Give AI agents permissions. Not your keys.**
 
 Use DCP if your AI agent needs to use wallets, API keys, credentials, or user data, but you do not want those secrets sitting in agent configs or `.env` files.
 
@@ -166,7 +169,18 @@ DCP is designed around least privilege.
 - HTTP MCP for local or custom agents
 - Desktop approvals
 - Telegram approvals
-- remote/VPS openclaw agents through relay
+- remote/VPS OpenClaw agents through relay
+
+## MCP Tools Exposed
+
+DCP exposes tools such as:
+
+- `vault_get_address`
+- `vault_budget_check`
+- `vault_sign_tx`
+- `vault_sign_message`
+- `vault_read`
+- `vault_write`
 
 ## What Agents Can Request
 
