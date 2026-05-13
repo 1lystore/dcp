@@ -8,9 +8,9 @@ DCP sits between your agents and your sensitive actions.
 
 Agents ask. You approve, deny, budget, or revoke.
 
-<video src="img/makeagentsafeforwork.mp4" controls muted loop playsinline width="100%"></video>
+<video src="https://dcpagent.com/makeagentsafeforwork.mp4" controls muted loop playsinline width="100%"></video>
 
-[Watch the 15-second demo](img/makeagentsafeforwork.mp4)
+[Watch the 15-second demo](https://dcpagent.com/makeagentsafeforwork.mp4)
 
 ## Use DCP If
 
