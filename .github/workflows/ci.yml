@@ -37,6 +37,9 @@ jobs:
       - name: Publish guard
         run: pnpm run publish-guard
 
+      - name: Build
+        run: pnpm run build
+
       - name: Typecheck
         run: pnpm -r run typecheck
 
@@ -45,9 +48,6 @@ jobs:
 
       - name: Security regression tests
         run: ./scripts/test-security.sh
-
-      - name: Build
-        run: pnpm run build
 
   gitleaks:
     name: Secret Scan
