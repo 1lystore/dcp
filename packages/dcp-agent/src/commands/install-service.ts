@@ -576,6 +576,8 @@ function getServiceNodeCommand(): string {
 
 function installServiceRuntime(version: string): void {
   const serviceNpm = getServiceNpmPath();
+  const serviceNode = getServiceNodeCommand();
+  const servicePath = `${path.dirname(serviceNode)}:${process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'}`;
   const packageSpec = `@dcprotocol/agent@${version}`;
 
   execFileSync(
@@ -585,6 +587,7 @@ function installServiceRuntime(version: string): void {
       DCP_USER,
       'env',
       `HOME=${DCP_DATA_DIR}`,
+      `PATH=${servicePath}`,
       `NPM_CONFIG_CACHE=${DCP_NPM_CACHE_DIR}`,
       'NPM_CONFIG_UPDATE_NOTIFIER=false',
       serviceNpm,
