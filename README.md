@@ -53,7 +53,7 @@ DCP exposes vault permissions through MCP, so Claude Desktop, Cursor, OpenClaw, 
 
 By the end, your agent can ask DCP for your Solana wallet address.
 
-### Option A: Desktop
+### Local Agent
 
 1. Download DCP Desktop from [dcpagent.com](https://dcpagent.com/).
 2. Create and unlock your vault.
@@ -67,7 +67,31 @@ Then ask your agent:
 What is my Solana wallet address from DCP?
 ```
 
-### Option B: CLI
+### Remote Agent
+
+For OpenClaw, Hermes, or any agent running on a VPS, create a remote invite in DCP Desktop and run the generated command on the VPS:
+
+```bash
+curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- 'dcp_vps_v1_...'
+```
+
+Approve the verification phrase in Desktop. The installer pairs the VPS, starts DCP as a systemd service, and configures OpenClaw or Hermes when either is detected.
+
+Good install output ends with:
+
+```text
+DCP service health: ok
+Hermes config written: yes
+Hermes config verified: yes
+```
+
+For OpenClaw, start a fresh chat/session. For Hermes, run:
+
+```text
+/reload-mcp
+```
+
+### CLI
 
 Use the CLI to create and manage vault data:
 
@@ -79,9 +103,7 @@ dcp add credentials.api.openai
 dcp list
 ```
 
-CLI-only Claude/Cursor setup is being simplified. Today, use Desktop to create the local MCP agent config, or pair an agent with a pairing grant before running `dcp-agent`.
-
-Once an agent is configured, stdio MCP clients use:
+Once a local stdio MCP client is configured, it runs:
 
 ```json
 {
@@ -226,7 +248,16 @@ For a VPS or remote agent, create an invite in DCP Desktop and run the generated
 curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- 'dcp_vps_v1_...'
 ```
 
-That command installs the DCP agent service, pairs it with your vault, starts the local HTTP MCP endpoint, and tries to add DCP to OpenClaw and Hermes when either is detected. For Docker Hermes, the installer uses a Docker-reachable DCP URL instead of `127.0.0.1`.
+That one command:
+
+- installs a private DCP Node runtime when the VPS does not already have compatible Node.js
+- installs `@dcprotocol/agent` under `/var/lib/dcp-agent`
+- creates and starts `dcp-agent.service`
+- pairs the VPS with your Desktop vault through the relay
+- starts HTTP MCP on the VPS
+- configures OpenClaw and Hermes when either is detected
+
+Host-native Hermes uses `~/.hermes/config.yaml`. Docker Hermes uses `/opt/data/config.yaml` inside the Hermes container and gets a Docker-reachable DCP URL instead of `127.0.0.1`.
 
 If Hermes is not detected or automatic config is not verified, run these on the remote host as the Hermes user:
 
@@ -238,6 +269,8 @@ hermes config set mcp_servers.dcp.tools.resources false
 ```
 
 Then run `/reload-mcp` in Hermes or restart Hermes.
+
+If OpenClaw and Hermes run on the same VPS, they can share the same DCP MCP endpoint. The installer preserves the OpenClaw config shape and only changes the DCP service runtime so systemd runs the installed package directly.
 
 ## Packages
 

@@ -18,7 +18,7 @@ npx -y @dcprotocol/agent --help
 
 ## Run As MCP
 
-For stdio MCP clients:
+For local stdio MCP clients:
 
 ```bash
 dcp-agent run --mode mcp --agent claude_desktop
@@ -33,11 +33,12 @@ MCP config:
 }
 ```
 
-Hermes reads MCP servers from `~/.hermes/config.yaml`:
+Hermes reads local MCP servers from `~/.hermes/config.yaml`:
 
 ```yaml
 mcp_servers:
   dcp:
+    enabled: true
     command: "dcp-agent"
     args:
       - "run"
@@ -54,7 +55,7 @@ After editing Hermes config, run `/reload-mcp` or restart Hermes.
 
 ## Run As HTTP MCP
 
-For agents that connect to a local HTTP MCP endpoint:
+For agents that connect to an HTTP MCP endpoint:
 
 ```bash
 dcp-agent run --mode http-mcp --agent openclaw_local --port 8420
@@ -71,6 +72,7 @@ Hermes can also connect to the HTTP MCP endpoint:
 ```yaml
 mcp_servers:
   dcp:
+    enabled: true
     url: "http://127.0.0.1:8420/mcp"
     tools:
       prompts: false
@@ -85,12 +87,21 @@ Create a remote invite in DCP Desktop, copy the command, and run it on the remot
 curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- 'dcp_vps_v1_...'
 ```
 
-That command installs and pairs the DCP service, installs the service runtime under `/var/lib/dcp-agent`, starts HTTP MCP, and tries to configure OpenClaw and Hermes when either is detected. It uses the system Node.js when it is compatible; otherwise it installs a private DCP runtime without changing OpenClaw or Hermes.
+That command is the recommended production path for VPS agents. It:
+
+- uses system Node.js 22 when available, otherwise installs a private DCP Node runtime under `/opt/dcp`
+- installs the service runtime under `/var/lib/dcp-agent`
+- pairs the VPS with the user's Desktop vault
+- writes `/etc/systemd/system/dcp-agent.service`
+- starts HTTP MCP on the VPS
+- configures OpenClaw and Hermes when either is detected
 
 Hermes is handled in two supported layouts:
 
-- host-native Hermes: DCP writes `mcp_servers.dcp` with `hermes config set` as the Hermes user
-- Docker Hermes: DCP detects the running Hermes container, binds MCP to a Docker-reachable host address, and writes config inside the container's `/opt/data/config.yaml`
+- host-native Hermes: DCP writes `mcp_servers.dcp` with `hermes config set` as the Hermes user and respects `HERMES_HOME` and active profiles
+- Docker Hermes: DCP detects the running Hermes container, binds MCP to a Docker-reachable host address, and writes config inside `/opt/data/config.yaml`
+
+Managed Hermes installs are not modified automatically. The installer prints manual config when Hermes config is locked by managed mode.
 
 Do not reuse old remote invite tokens. If an invite expired, pairing was revoked, or you cleaned/reinstalled the service, create a new invite in Desktop.
 
@@ -158,15 +169,12 @@ Good install output includes:
 
 ```text
 DCP service health: ok
-OpenClaw detected: yes
-OpenClaw can reach DCP: yes
-OpenClaw config written: yes
-OpenClaw config verified: yes
 Hermes detected: yes
-Hermes can reach DCP: yes
 Hermes config written: yes
 Hermes config verified: yes
 ```
+
+OpenClaw installs show the same pattern with `OpenClaw detected`, `OpenClaw config written`, and `OpenClaw config verified`.
 
 The normal path is one command from Desktop:
 
@@ -190,7 +198,13 @@ Active: active (running)
 [DCP HTTP-MCP] Started on http://...:8420
 ```
 
-If the service is restarting, check the log. Common causes are old global npm packages, bad Node versions, or npm cache permissions. The curl installer avoids most of this by using a private DCP Node runtime.
+If the service is restarting, check the log. The curl installer installs the runtime package into `/var/lib/dcp-agent` and systemd runs that installed entrypoint directly:
+
+```text
+/var/lib/dcp-agent/node_modules/@dcprotocol/agent/dist/index.js
+```
+
+That avoids long-running `npm exec` services and keeps OpenClaw and Hermes on the same stable DCP endpoint.
 
 ### 2. DCP health must answer
 
@@ -409,9 +423,9 @@ Sign this x402 Solana payment payload: <base64_payload>
 
 For write/sign prompts, DCP should ask for approval in Desktop or Telegram unless the action is under the user's configured auto-approval threshold.
 
-### 7. When to reinstall
+### 8. When to reinstall
 
-If you revoked the old agent in Desktop, create a new invite and run the new Desktop command. The installer stops the old service and writes the new paired config.
+If you revoked the old agent in Desktop, create a new invite and run the new Desktop command. The installer does not stop an existing working service until the new invite is validated and pairing has been approved.
 
 For a clean uninstall:
 
@@ -420,6 +434,26 @@ sudo npx --yes @dcprotocol/agent@latest uninstall-service
 ```
 
 Then create a fresh invite in Desktop and run the generated command again.
+
+## Release Checklist
+
+Use this before promoting a new agent package to `latest`:
+
+```bash
+pnpm --filter @dcprotocol/agent run typecheck
+pnpm --filter @dcprotocol/agent run test
+pnpm --filter @dcprotocol/agent run build
+pnpm --filter @dcprotocol/agent exec npm pack --dry-run
+```
+
+Publish as `next`, test a fresh VPS invite with Hermes or OpenClaw, then promote:
+
+```bash
+npm publish --access public --tag next
+npm dist-tag add @dcprotocol/agent@<version> latest
+```
+
+The hosted installer should use `@dcprotocol/agent@latest` for production and may be temporarily pointed at `@dcprotocol/agent@next` for a controlled VPS test.
 
 ### Support paste
 
