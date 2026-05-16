@@ -71,7 +71,7 @@ jobs:
 
       - name: Upload macOS Apple Silicon artifacts
         if: matrix.platform == 'macos-latest' && contains(matrix.args, 'aarch64')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-aarch64
           path: |
@@ -80,7 +80,7 @@ jobs:
 
       - name: Upload macOS Intel artifacts
         if: matrix.platform == 'macos-latest' && contains(matrix.args, 'x86_64')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-x86_64
           path: |
@@ -89,7 +89,7 @@ jobs:
 
       - name: Upload Linux artifacts
         if: matrix.platform == 'ubuntu-22.04'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
           path: |
@@ -98,7 +98,7 @@ jobs:
 
       - name: Upload Windows artifacts
         if: matrix.platform == 'windows-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64
           path: |
