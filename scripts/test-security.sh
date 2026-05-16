@@ -90,14 +90,21 @@ fi
 # =============================================================================
 echo "Test 6: Single canonicalJson implementation in src"
 # Exclude test files - test files can have their own helper implementations
-IMPL_MATCHES=$(rg -n "(export )?function canonicalJson" "${ROOT_DIR}/packages" \
-  -g "*.ts" \
-  -g "!**/*.d.ts" \
-  -g "!**/node_modules/**" \
-  -g "!**/dist/**" \
-  -g "!**/build/**" \
-  -g "!**/target/**" \
-  2>/dev/null | grep "/src/" || true)
+if command -v rg >/dev/null 2>&1; then
+  IMPL_MATCHES=$(rg -n "(export )?function canonicalJson" "${ROOT_DIR}/packages" \
+    -g "*.ts" \
+    -g "!**/*.d.ts" \
+    -g "!**/node_modules/**" \
+    -g "!**/dist/**" \
+    -g "!**/build/**" \
+    -g "!**/target/**" \
+    2>/dev/null | grep "/src/" || true)
+else
+  IMPL_MATCHES=$(find "${ROOT_DIR}/packages" \
+    \( -path "*/node_modules/*" -o -path "*/dist/*" -o -path "*/build/*" -o -path "*/target/*" \) -prune -o \
+    -path "*/src/*.ts" ! -name "*.d.ts" -type f -print0 \
+    | xargs -0 grep -nE "(export )?function canonicalJson" 2>/dev/null || true)
+fi
 IMPL_COUNT=$(printf "%s\n" "${IMPL_MATCHES}" | sed '/^$/d' | wc -l | tr -d ' ')
 if [[ "${IMPL_COUNT}" -eq 1 ]]; then
   pass "Single canonicalJson implementation in src"
