@@ -35,7 +35,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "httpx>=0.25.0",
+    "httpx>=0.28.1",
     "pynacl>=1.5.0",
 ]
 
