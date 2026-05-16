@@ -57,16 +57,24 @@ interface OpenClawConfigResult {
 }
 
 interface HermesTarget {
+  kind: 'host' | 'docker';
   user: string;
   command: string;
   configPath?: string;
   home?: string;
+  host?: string;
+  url?: string;
+  containerId?: string;
+  containerName?: string;
+  network?: string;
+  candidateHosts?: string[];
 }
 
 interface HermesConfigResult {
   detected: boolean;
   written: boolean;
   verified: boolean;
+  reachable?: boolean;
   target?: HermesTarget;
   error?: string;
 }
@@ -257,6 +265,7 @@ function detectHermesTarget(preferredUser?: string): HermesTarget | null {
     const configPath = runAsUser(user, [command, 'config', 'path']);
     const home = runAsUser(user, ['bash', '-lc', 'printf "%s" "$HOME"']);
     return {
+      kind: 'host',
       user,
       command,
       configPath: configPath || undefined,
@@ -265,6 +274,56 @@ function detectHermesTarget(preferredUser?: string): HermesTarget | null {
   }
 
   return null;
+}
+
+function getDockerGatewayCandidates(networks?: string): string[] {
+  const candidateHosts: string[] = [];
+  for (const network of (networks || '').split(',')) {
+    const trimmed = network.trim();
+    if (!trimmed) continue;
+    const gateway = execQuiet(
+      `docker network inspect ${trimmed} --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null`
+    );
+    if (gateway) {
+      candidateHosts.push(gateway);
+    }
+  }
+
+  candidateHosts.push('172.17.0.1', 'host.docker.internal');
+  return [...new Set(candidateHosts)];
+}
+
+function detectHermesDockerTarget(port: number): HermesTarget | null {
+  const dockerRows = execQuiet(
+    "docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.Networks}}' 2>/dev/null"
+  );
+  if (!dockerRows) return null;
+
+  const row = dockerRows
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => {
+      const lower = line.toLowerCase();
+      return lower.includes('hermes') || lower.includes('nousresearch/hermes-agent');
+    });
+  if (!row) return null;
+
+  const [containerId, containerName, , networks] = row.split('|');
+  const candidateHosts = getDockerGatewayCandidates(networks);
+  const host = candidateHosts[0] || '172.17.0.1';
+
+  return {
+    kind: 'docker',
+    user: 'hermes',
+    command: '/opt/hermes/.venv/bin/hermes',
+    configPath: '/opt/data/config.yaml',
+    host,
+    url: `http://${host}:${port}/mcp`,
+    containerId,
+    containerName,
+    network: networks?.split(',')[0]?.trim(),
+    candidateHosts,
+  };
 }
 
 function detectOpenClawTarget(port: number): OpenClawTarget | null {
@@ -284,17 +343,7 @@ function detectOpenClawTarget(port: number): OpenClawTarget | null {
     if (row) {
       const [containerId, containerName, , networks] = row.split('|');
       const network = networks?.split(',')[0]?.trim();
-      const candidateHosts: string[] = [];
-      if (network) {
-        const gateway = execQuiet(
-          `docker network inspect ${network} --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null`
-        );
-        if (gateway) {
-          candidateHosts.push(gateway);
-        }
-      }
-
-      candidateHosts.push('172.17.0.1', 'host.docker.internal');
+      const candidateHosts = getDockerGatewayCandidates(networks);
 
       if (candidateHosts.length > 0) {
         const host = candidateHosts[0];
@@ -548,7 +597,46 @@ function dockerExecOk(containerId: string, args: string[]): boolean {
   }
 }
 
-function canOpenClawContainerReach(containerId: string, url: string): boolean {
+function dockerExecOutput(containerId: string, args: string[], timeout = 10000): string | null {
+  try {
+    return execFileSync('docker', ['exec', containerId, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout,
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function dockerExecOutputAsUser(containerId: string, user: string, args: string[], timeout = 10000): string | null {
+  try {
+    return execFileSync('docker', ['exec', '-u', user, containerId, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout,
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function dockerExecHermes(containerId: string, args: string[], timeout = 15000): string | null {
+  const commandCandidates = [
+    ['/opt/hermes/.venv/bin/hermes', ...args],
+    ['hermes', ...args],
+  ];
+
+  for (const command of commandCandidates) {
+    const output = dockerExecOutputAsUser(containerId, 'hermes', command, timeout) ||
+      dockerExecOutput(containerId, command, timeout);
+    if (output !== null) return output;
+  }
+
+  return null;
+}
+
+function canContainerReach(containerId: string, url: string): boolean {
   const nodeScript = `
 const url = process.argv[1];
 const timeout = setTimeout(() => process.exit(3), 8000);
@@ -570,6 +658,10 @@ fetch(url)
     return true;
   }
   return false;
+}
+
+function canOpenClawContainerReach(containerId: string, url: string): boolean {
+  return canContainerReach(containerId, url);
 }
 
 function verifyOpenClawConfig(target: OpenClawTarget): boolean {
@@ -683,7 +775,7 @@ function printManualOpenClawInstructions(url: string, port: number): void {
 }
 
 function printManualHermesInstructions(url: string, user?: string): void {
-  const prefix = user && isSafeLinuxUser(user) ? `sudo -H -u ${user} ` : '';
+  const prefix = user && isSafeLinuxUser(user) && user !== 'root' ? `sudo -H -u ${user} ` : '';
   console.log();
   console.log(chalk.bold('Manual Hermes MCP config'));
   console.log(chalk.dim('Use this if automatic Hermes setup is not verified.'));
@@ -696,7 +788,74 @@ function printManualHermesInstructions(url: string, user?: string): void {
   console.log();
 }
 
+function printManualHermesDockerInstructions(url: string, containerName?: string): void {
+  const container = containerName || '<hermes-container>';
+  console.log();
+  console.log(chalk.bold('Manual Hermes Docker MCP config'));
+  console.log(chalk.dim('Use this if automatic Hermes Docker setup is not verified.'));
+  console.log();
+  console.log(`docker exec ${container} /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.url ${url}`);
+  console.log(`docker exec ${container} /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.tools.prompts false`);
+  console.log(`docker exec ${container} /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.tools.resources false`);
+  console.log();
+  console.log(chalk.dim('Then run /reload-mcp in Hermes or restart the Hermes container.'));
+  console.log();
+}
+
+function verifyHostHermesConfig(target: HermesTarget, url: string): boolean {
+  const configPath = target.configPath;
+  if (configPath && fs.existsSync(configPath)) {
+    try {
+      const raw = fs.readFileSync(configPath, 'utf8');
+      return raw.includes('mcp_servers') && raw.includes('dcp') && raw.includes(url);
+    } catch {
+      // Fall back to CLI output.
+    }
+  }
+
+  const config = runAsUser(target.user, [target.command, 'config', 'show'], 15000);
+  return Boolean(config && config.includes('mcp_servers') && config.includes('dcp') && config.includes(url));
+}
+
+function configureHermesDocker(target: HermesTarget, url: string): HermesConfigResult {
+  if (!target.containerId) {
+    return {
+      detected: true,
+      written: false,
+      verified: false,
+      reachable: false,
+      target,
+      error: 'missing Hermes container id',
+    };
+  }
+
+  const writes = [
+    ['config', 'set', 'mcp_servers.dcp.url', url],
+    ['config', 'set', 'mcp_servers.dcp.tools.prompts', 'false'],
+    ['config', 'set', 'mcp_servers.dcp.tools.resources', 'false'],
+  ].map((args) => dockerExecHermes(target.containerId!, args));
+
+  const written = writes.every((output) => output !== null);
+  const config = dockerExecOutput(target.containerId, ['cat', '/opt/data/config.yaml']);
+  const verified = Boolean(config && config.includes('mcp_servers') && config.includes('dcp') && config.includes(url));
+  const parsedUrl = new URL(url);
+  const reachable = canContainerReach(target.containerId, `http://${parsedUrl.hostname}:${parsedUrl.port || MCP_PORT}/health`);
+
+  return {
+    detected: true,
+    written,
+    verified,
+    reachable,
+    target,
+    error: written ? undefined : 'docker exec hermes config set failed',
+  };
+}
+
 function configureHermes(target: HermesTarget, url: string): HermesConfigResult {
+  if (target.kind === 'docker') {
+    return configureHermesDocker(target, url);
+  }
+
   try {
     const writes = [
       ['config', 'set', 'mcp_servers.dcp.url', url],
@@ -715,18 +874,13 @@ function configureHermes(target: HermesTarget, url: string): HermesConfigResult 
       };
     }
 
-    const config = runAsUser(target.user, [target.command, 'config', 'show'], 15000);
-    const verified = Boolean(
-      config &&
-      config.includes('mcp_servers') &&
-      config.includes('dcp') &&
-      config.includes(url)
-    );
+    const verified = verifyHostHermesConfig(target, url);
 
     return {
       detected: true,
       written: true,
       verified,
+      reachable: true,
       target,
     };
   } catch (err) {
@@ -734,6 +888,7 @@ function configureHermes(target: HermesTarget, url: string): HermesConfigResult 
       detected: true,
       written: false,
       verified: false,
+      reachable: false,
       target,
       error: err instanceof Error ? err.message : 'unknown error',
     };
@@ -898,14 +1053,20 @@ export const installServiceCommand = new Command('install-service')
     console.log(chalk.dim(`    Agent ID: ${approvalResult.agent_id}`));
     console.log();
 
-    // 10a. Detect OpenClaw/Docker before writing the service. If OpenClaw runs
-    // in Docker bridge mode, bind HTTP MCP to the private Docker gateway so the
-    // container can reach it without exposing the port publicly.
+    // 10a. Detect local agent runtimes before writing the service. If an MCP
+    // client runs in Docker bridge mode, bind HTTP MCP to a private Docker
+    // gateway so the container can reach it without exposing the port publicly.
     let openClawTarget = detectOpenClawTarget(port);
-    let mcpHost = openClawTarget?.host || '127.0.0.1';
+    let hermesTarget = detectHermesDockerTarget(port) || detectHermesTarget();
+    let mcpHost = openClawTarget?.host || (hermesTarget?.kind === 'docker' ? hermesTarget.host : undefined) || '127.0.0.1';
     if (openClawTarget?.containerName) {
       console.log(chalk.dim(`    OpenClaw detected: ${openClawTarget.containerName} on ${openClawTarget.network}`));
       console.log(chalk.dim(`    Private MCP URL: ${openClawTarget.url}`));
+      console.log();
+    }
+    if (hermesTarget?.kind === 'docker') {
+      console.log(chalk.dim(`    Hermes Docker detected: ${hermesTarget.containerName || hermesTarget.containerId} on ${hermesTarget.network}`));
+      console.log(chalk.dim(`    Private MCP URL: ${hermesTarget.url}`));
       console.log();
     }
 
@@ -979,6 +1140,7 @@ export const installServiceCommand = new Command('install-service')
     let openClawReachable = false;
     let openClawConfigWritten = false;
     let openClawConfigVerified = false;
+    let hermesReachable = hermesTarget?.kind === 'host' ? true : false;
     let hermesConfig: HermesConfigResult = {
       detected: false,
       written: false,
@@ -1086,6 +1248,70 @@ export const installServiceCommand = new Command('install-service')
       }
     }
 
+    if (options.start && hermesTarget?.kind === 'docker' && hermesTarget.containerId) {
+      console.log('  Checking Hermes container reachability...');
+      hermesReachable = canContainerReach(
+        hermesTarget.containerId,
+        `http://${mcpHost}:${port}/health`
+      );
+
+      if (!hermesReachable && !openClawReachable) {
+        const originalMcpHost = mcpHost;
+        let testedServiceHost = originalMcpHost;
+        const testedHosts = new Set([mcpHost]);
+        for (const host of hermesTarget.candidateHosts || []) {
+          if (!host || testedHosts.has(host)) continue;
+          if (!isIpv4Host(host)) continue;
+          testedHosts.add(host);
+
+          console.log(chalk.dim(`    Trying Docker host ${host} for Hermes...`));
+          fs.writeFileSync(SYSTEMD_SERVICE, buildSystemdService(version, host, port));
+          testedServiceHost = host;
+          execSync('systemctl daemon-reload');
+          try {
+            execSync('systemctl restart dcp-agent');
+          } catch {
+            continue;
+          }
+
+          const candidateHealthy = await waitForHealth(host, port, 15000);
+          if (!candidateHealthy) continue;
+
+          if (canContainerReach(hermesTarget.containerId, `http://${host}:${port}/health`)) {
+            mcpHost = host;
+            hermesTarget = {
+              ...hermesTarget,
+              host,
+              url: `http://${host}:${port}/mcp`,
+            };
+            serviceHealthy = true;
+            hermesReachable = true;
+            break;
+          }
+        }
+
+        if (!hermesReachable && testedServiceHost !== originalMcpHost) {
+          fs.writeFileSync(SYSTEMD_SERVICE, buildSystemdService(version, originalMcpHost, port));
+          execSync('systemctl daemon-reload');
+          try {
+            execSync('systemctl restart dcp-agent');
+            serviceHealthy = await waitForHealth(originalMcpHost, port, 15000);
+          } catch {
+            serviceHealthy = false;
+          }
+        }
+      }
+
+      if (hermesReachable) {
+        serviceHealthy = true;
+        success(`Hermes can reach DCP: http://${mcpHost}:${port}/health`);
+      } else if (openClawReachable) {
+        warn('Hermes container could not reach DCP without changing the OpenClaw-reachable MCP host');
+      } else {
+        warn('Hermes container could not reach DCP from tested Docker host addresses');
+      }
+    }
+
     if (config.mcp_host !== mcpHost) {
       config.mcp_host = mcpHost;
       fs.writeFileSync(
@@ -1117,14 +1343,19 @@ export const installServiceCommand = new Command('install-service')
       }
     }
 
-    const hermesTarget = detectHermesTarget();
     if (hermesTarget) {
-      const hermesUrl = `http://${mcpHost}:${port}/mcp`;
+      const hermesUrl = hermesTarget.kind === 'docker'
+        ? (hermesTarget.url || `http://${mcpHost}:${port}/mcp`)
+        : `http://${mcpHost}:${port}/mcp`;
       console.log('  Configuring Hermes MCP...');
       hermesConfig = configureHermes(hermesTarget, hermesUrl);
       if (hermesConfig.written) {
         success(`Hermes MCP configured: dcp -> ${hermesUrl}`);
-        console.log(chalk.dim(`    User: ${hermesTarget.user}`));
+        if (hermesTarget.kind === 'docker') {
+          console.log(chalk.dim(`    Container: ${hermesTarget.containerName || hermesTarget.containerId}`));
+        } else {
+          console.log(chalk.dim(`    User: ${hermesTarget.user}`));
+        }
         if (hermesTarget.configPath) {
           console.log(chalk.dim(`    Config: ${hermesTarget.configPath}`));
         }
@@ -1170,6 +1401,9 @@ export const installServiceCommand = new Command('install-service')
     }
     if (hermesConfig.detected) {
       console.log(`    Hermes detected: ${chalk.green('yes')}`);
+      if (hermesConfig.target?.kind === 'docker') {
+        console.log(`    Hermes can reach DCP: ${hermesConfig.reachable ? chalk.green('yes') : chalk.yellow(options.start ? 'no' : 'not checked')}`);
+      }
       console.log(`    Hermes config written: ${hermesConfig.written ? chalk.green('yes') : chalk.yellow('no')}`);
       console.log(`    Hermes config verified: ${hermesConfig.verified ? chalk.green('yes') : chalk.yellow('no')}`);
     } else {
@@ -1180,7 +1414,9 @@ export const installServiceCommand = new Command('install-service')
     if (!openClawTarget || !openClawConfigVerified) {
       printManualOpenClawInstructions(`http://${mcpHost}:${port}/mcp`, port);
     }
-    if (!hermesConfig.detected || !hermesConfig.verified) {
+    if (hermesConfig.target?.kind === 'docker' && (!hermesConfig.verified || !hermesConfig.reachable)) {
+      printManualHermesDockerInstructions(`http://${mcpHost}:${port}/mcp`, hermesConfig.target.containerName);
+    } else if (!hermesConfig.detected || !hermesConfig.verified) {
       printManualHermesInstructions(`http://${mcpHost}:${port}/mcp`, hermesConfig.target?.user);
     } else {
       console.log(chalk.dim('After changing Hermes MCP config, run /reload-mcp in Hermes or restart Hermes.'));

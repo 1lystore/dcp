@@ -85,7 +85,12 @@ Create a remote invite in DCP Desktop, copy the command, and run it on the remot
 curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- 'dcp_vps_v1_...'
 ```
 
-That command installs and pairs the DCP service, starts HTTP MCP, and tries to configure OpenClaw and Hermes when either is detected. It uses the system Node.js when it is compatible; otherwise it installs a private DCP runtime without changing OpenClaw or Hermes.
+That command installs and pairs the DCP service, installs the service runtime under `/var/lib/dcp-agent`, starts HTTP MCP, and tries to configure OpenClaw and Hermes when either is detected. It uses the system Node.js when it is compatible; otherwise it installs a private DCP runtime without changing OpenClaw or Hermes.
+
+Hermes is handled in two supported layouts:
+
+- host-native Hermes: DCP writes `mcp_servers.dcp` with `hermes config set` as the Hermes user
+- Docker Hermes: DCP detects the running Hermes container, binds MCP to a Docker-reachable host address, and writes config inside the container's `/opt/data/config.yaml`
 
 Do not reuse old remote invite tokens. If an invite expired, pairing was revoked, or you cleaned/reinstalled the service, create a new invite in Desktop.
 
@@ -111,7 +116,7 @@ Use the DCP MCP URL printed by `install-service`. Do not hardcode `172.17.0.1`; 
 
 After changing OpenClaw MCP config, start a fresh OpenClaw chat/session so the new tools are loaded.
 
-If Hermes is not verified, run these as the Linux user that runs Hermes:
+If host-native Hermes is not verified, run these as the Linux user that runs Hermes:
 
 ```bash
 hermes config set mcp_servers.dcp.url http://127.0.0.1:8420/mcp
@@ -120,6 +125,16 @@ hermes config set mcp_servers.dcp.tools.resources false
 ```
 
 After changing Hermes MCP config, run `/reload-mcp` in Hermes or restart Hermes.
+
+If Docker Hermes is not verified, use the MCP URL printed by the installer:
+
+```bash
+docker exec hermes /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.url http://172.17.0.1:8420/mcp
+docker exec hermes /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.tools.prompts false
+docker exec hermes /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.tools.resources false
+```
+
+Then run `/reload-mcp` in Hermes or restart the Hermes container.
 
 ## Remote VPS Debug Path
 
@@ -130,8 +145,8 @@ After changing Hermes MCP config, run `/reload-mcp` in Hermes or restart Hermes.
 3. Run the generated command on the VPS.
 4. Confirm the verification phrase in Desktop.
 5. Approve pairing.
-6. Start a fresh OpenClaw chat/session.
-7. Ask OpenClaw:
+6. Start a fresh OpenClaw chat/session or run `/reload-mcp` in Hermes.
+7. Ask the agent:
 
 ```text
 What is my email from DCP?
@@ -146,6 +161,7 @@ OpenClaw can reach DCP: yes
 OpenClaw config written: yes
 OpenClaw config verified: yes
 Hermes detected: yes
+Hermes can reach DCP: yes
 Hermes config written: yes
 Hermes config verified: yes
 ```
@@ -302,7 +318,7 @@ mcp_servers:
       resources: false
 ```
 
-The `url` may be a Docker bridge URL such as `http://172.17.0.1:8420/mcp` when DCP had to bind to a Docker-reachable host address for OpenClaw. That is fine if the health check works from the Hermes host.
+The `url` may be a Docker bridge URL such as `http://172.17.0.1:8420/mcp` when DCP had to bind to a Docker-reachable host address. That is expected for Hermes running inside Docker because `127.0.0.1` would refer to the Hermes container itself.
 
 If the installer could not configure Hermes automatically, run:
 
@@ -313,6 +329,16 @@ hermes config set mcp_servers.dcp.tools.resources false
 ```
 
 Then run `/reload-mcp` in Hermes or restart Hermes.
+
+For Docker Hermes, check and repair from the host:
+
+```bash
+docker exec hermes cat /opt/data/config.yaml | grep -A 8 mcp_servers
+docker exec hermes curl -s http://172.17.0.1:8420/health
+docker exec hermes /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.url http://172.17.0.1:8420/mcp
+```
+
+Use the exact MCP URL printed by the installer.
 
 ### 7. Verify DCP MCP directly
 

@@ -226,7 +226,7 @@ For a VPS or remote agent, create an invite in DCP Desktop and run the generated
 curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- 'dcp_vps_v1_...'
 ```
 
-That command installs the DCP agent service, pairs it with your vault, starts the local HTTP MCP endpoint, and tries to add DCP to OpenClaw and Hermes when either is detected.
+That command installs the DCP agent service, pairs it with your vault, starts the local HTTP MCP endpoint, and tries to add DCP to OpenClaw and Hermes when either is detected. For Docker Hermes, the installer uses a Docker-reachable DCP URL instead of `127.0.0.1`.
 
 If Hermes is not detected or automatic config is not verified, run these on the remote host as the Hermes user:
 
