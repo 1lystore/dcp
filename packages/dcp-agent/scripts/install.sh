@@ -104,11 +104,11 @@ main() {
     local node_bin npm_bin
     node_bin="$(command -v node)"
     npm_bin="$(command -v npm)"
-    PATH="$(dirname "$node_bin"):$PATH" DCP_SERVICE_NPM="$(service_npm_command "$node_bin" "$npm_bin")" "$node_bin" "$npm_bin" --loglevel=error exec --yes --package @dcprotocol/agent@latest -- dcp-agent install-service "$invite"
+    PATH="$(dirname "$node_bin"):$PATH" DCP_SERVICE_NODE="$node_bin" DCP_SERVICE_NPM="$(service_npm_command "$node_bin" "$npm_bin")" "$node_bin" "$npm_bin" --loglevel=error exec --yes --package @dcprotocol/agent@latest -- dcp-agent install-service "$invite"
   else
     install_private_node
     echo "Using DCP runtime $("$DCP_NODE_BIN/node" -v) for install."
-    PATH="$DCP_NODE_BIN:$PATH" DCP_SERVICE_NPM="$(service_npm_command "$DCP_NODE_BIN/node" "$DCP_NPM")" "$DCP_NODE_BIN/node" "$DCP_NPM" --loglevel=error exec --yes --package @dcprotocol/agent@latest -- dcp-agent install-service "$invite"
+    PATH="$DCP_NODE_BIN:$PATH" DCP_SERVICE_NODE="$DCP_NODE_BIN/node" DCP_SERVICE_NPM="$(service_npm_command "$DCP_NODE_BIN/node" "$DCP_NPM")" "$DCP_NODE_BIN/node" "$DCP_NPM" --loglevel=error exec --yes --package @dcprotocol/agent@latest -- dcp-agent install-service "$invite"
   fi
 }
 

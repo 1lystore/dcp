@@ -36,6 +36,7 @@ const DCP_DATA_DIR = '/var/lib/dcp-agent';
 const DCP_KEY_FILE = `${DCP_DATA_DIR}/service.key`;
 const DCP_CONFIG_FILE = `${DCP_DATA_DIR}/config.json`;
 const DCP_NPM_CACHE_DIR = `${DCP_DATA_DIR}/.npm`;
+const DCP_AGENT_ENTRY = path.join(DCP_DATA_DIR, 'node_modules', '@dcprotocol', 'agent', 'dist', 'index.js');
 const SYSTEMD_SERVICE = '/etc/systemd/system/dcp-agent.service';
 const MCP_PORT = 8420;
 const SERVICE_HEALTH_TIMEOUT_MS = 90000;
@@ -415,8 +416,47 @@ function getServiceNpmCommand(): string {
   return process.env.DCP_SERVICE_NPM || '/usr/bin/env npm';
 }
 
-function buildSystemdService(version: string, mcpHost: string, port: number): string {
+function getServiceNodeCommand(): string {
+  return process.env.DCP_SERVICE_NODE || process.execPath;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function installServiceRuntime(version: string): void {
   const serviceNpm = getServiceNpmCommand();
+  const packageSpec = `@dcprotocol/agent@${version}`;
+
+  execSync(
+    [
+      serviceNpm,
+      'install',
+      '--omit=dev',
+      '--no-audit',
+      '--no-fund',
+      '--prefix',
+      shellQuote(DCP_DATA_DIR),
+      shellQuote(packageSpec),
+    ].join(' '),
+    {
+      env: {
+        ...process.env,
+        HOME: DCP_DATA_DIR,
+        NPM_CONFIG_CACHE: DCP_NPM_CACHE_DIR,
+        NPM_CONFIG_UPDATE_NOTIFIER: 'false',
+      },
+      stdio: 'inherit',
+    }
+  );
+
+  if (!fs.existsSync(DCP_AGENT_ENTRY)) {
+    throw new Error(`Installed DCP agent entrypoint not found: ${DCP_AGENT_ENTRY}`);
+  }
+}
+
+function buildSystemdService(version: string, mcpHost: string, port: number): string {
+  const serviceNode = getServiceNodeCommand();
   return `[Unit]
 Description=DCP Agent Service
 Wants=network-online.target
@@ -427,7 +467,7 @@ Type=simple
 User=${DCP_USER}
 Group=${DCP_USER}
 WorkingDirectory=${DCP_DATA_DIR}
-ExecStart=${serviceNpm} exec --yes --package @dcprotocol/agent@${version} -- dcp-agent run --mode http-mcp --host ${mcpHost} --port ${port} --force-relay
+ExecStart=${serviceNode} ${DCP_AGENT_ENTRY} run --mode http-mcp --host ${mcpHost} --port ${port} --force-relay
 Restart=always
 RestartSec=10
 
@@ -904,6 +944,16 @@ export const installServiceCommand = new Command('install-service')
     success(`Config stored: ${DCP_CONFIG_FILE}`);
 
     // 12. Create systemd service
+    console.log('  Installing service runtime...');
+    try {
+      installServiceRuntime(version);
+      execSync(`chown -R ${DCP_USER}:${DCP_USER} ${DCP_DATA_DIR}`);
+      success(`Installed @dcprotocol/agent@${version} into ${DCP_DATA_DIR}`);
+    } catch (err) {
+      error(`Failed to install service runtime: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      process.exit(1);
+    }
+
     console.log('  Creating systemd service...');
     fs.writeFileSync(SYSTEMD_SERVICE, buildSystemdService(version, mcpHost, port));
     success(`Service created: ${SYSTEMD_SERVICE}`);
