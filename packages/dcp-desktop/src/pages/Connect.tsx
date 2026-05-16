@@ -34,12 +34,13 @@ const isTelegramPaired = (config: TelegramConfig | null): boolean => {
 };
 
 // Local AI agent types with their config instructions
-type LocalAgentType = 'claude-desktop' | 'cursor' | 'vscode' | 'openclaw' | 'other';
+type LocalAgentType = 'claude-desktop' | 'cursor' | 'vscode' | 'openclaw' | 'hermes' | 'other';
 const LOCAL_AGENT_TYPES: { id: LocalAgentType; label: string; configPath: string }[] = [
   { id: 'claude-desktop', label: 'Claude Desktop', configPath: 'Settings → Developer → Add MCP Server' },
   { id: 'cursor', label: 'Cursor', configPath: 'Cursor Settings → MCP → Add new global MCP server' },
   { id: 'vscode', label: 'VS Code', configPath: 'Cmd+Shift+P → "MCP: Add Server"' },
   { id: 'openclaw', label: 'OpenClaw', configPath: '~/.openclaw/openclaw.json' },
+  { id: 'hermes', label: 'Hermes', configPath: '~/.hermes/config.yaml → mcp_servers' },
   { id: 'other', label: 'Other MCP Client', configPath: 'Check your app documentation' },
 ];
 
@@ -330,6 +331,7 @@ export default function Connect() {
     'cursor': 'agent_cursor',
     'vscode': 'agent_vscode',
     'openclaw': 'agent_openclaw_local',
+    'hermes': 'agent_hermes_local',
     'other': 'agent_local_mcp',
   };
 
@@ -342,6 +344,19 @@ export default function Connect() {
 
     if (selectedAgentType === 'openclaw') {
       return `openclaw mcp set dcp '${JSON.stringify(serverConfig)}'`;
+    }
+
+    if (selectedAgentType === 'hermes') {
+      return [
+        'mcp_servers:',
+        '  dcp:',
+        `    command: "${serverConfig.command}"`,
+        '    args:',
+        ...serverConfig.args.map((arg) => `      - "${arg}"`),
+        '    tools:',
+        '      prompts: false',
+        '      resources: false',
+      ].join('\n');
     }
 
     return JSON.stringify({
@@ -674,7 +689,7 @@ export default function Connect() {
         <div className="card">
           <div className="card-header">
             <div>
-              <h3 className="card-title">Remote Agent - VPS / OpenClaw</h3>
+              <h3 className="card-title">Remote Agent - VPS / OpenClaw / Hermes</h3>
               <p className="card-subtitle">Generate an invite token for remote VPS agents</p>
             </div>
           </div>
@@ -754,7 +769,7 @@ export default function Connect() {
 {remoteInstallCommand}
                 </pre>
                 <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '8px' }}>
-                  Installs and pairs the DCP service, then tries to configure OpenClaw automatically.
+                  Installs and pairs the DCP service, starts HTTP MCP, then tries to configure OpenClaw and Hermes automatically.
                 </div>
               </div>
 
@@ -805,6 +820,36 @@ export default function Connect() {
                 </pre>
                 <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '8px' }}>
                   Use this after install if OpenClaw runs as the <strong>openclaw</strong> Linux user. It uses the DCP MCP URL saved by the installer.
+                </div>
+              </div>
+
+              <div style={{
+                padding: '16px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '8px',
+              }}>
+                <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>
+                  Hermes remote config:
+                </div>
+                <pre style={{
+                  background: 'var(--bg-secondary)',
+                  padding: '12px',
+                  borderRadius: '6px',
+                  fontSize: '11px',
+                  overflow: 'auto',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                  margin: 0,
+                }}>
+{`mcp_servers:
+  dcp:
+    url: "http://127.0.0.1:8420/mcp"
+    tools:
+      prompts: false
+      resources: false`}
+                </pre>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '8px' }}>
+                  Add this to <code>~/.hermes/config.yaml</code> on the VPS after install, then run <code>/reload-mcp</code> or restart Hermes.
                 </div>
               </div>
 

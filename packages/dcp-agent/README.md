@@ -33,6 +33,25 @@ MCP config:
 }
 ```
 
+Hermes reads MCP servers from `~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  dcp:
+    command: "dcp-agent"
+    args:
+      - "run"
+      - "--mode"
+      - "mcp"
+      - "--agent"
+      - "agent_hermes_local"
+    tools:
+      prompts: false
+      resources: false
+```
+
+After editing Hermes config, run `/reload-mcp` or restart Hermes.
+
 ## Run As HTTP MCP
 
 For agents that connect to a local HTTP MCP endpoint:
@@ -47,6 +66,17 @@ Endpoint:
 http://127.0.0.1:8420/mcp
 ```
 
+Hermes can also connect to the HTTP MCP endpoint:
+
+```yaml
+mcp_servers:
+  dcp:
+    url: "http://127.0.0.1:8420/mcp"
+    tools:
+      prompts: false
+      resources: false
+```
+
 ## Pair A Remote Agent
 
 Create a remote invite in DCP Desktop, copy the command, and run it on the remote machine:
@@ -55,7 +85,7 @@ Create a remote invite in DCP Desktop, copy the command, and run it on the remot
 curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- 'dcp_vps_v1_...'
 ```
 
-That command installs and pairs the DCP service, starts HTTP MCP, and tries to configure OpenClaw. It uses the system Node.js when it is compatible; otherwise it installs a private DCP runtime without changing OpenClaw.
+That command installs and pairs the DCP service, starts HTTP MCP, and tries to configure OpenClaw and Hermes when either is detected. It uses the system Node.js when it is compatible; otherwise it installs a private DCP runtime without changing OpenClaw or Hermes.
 
 Do not reuse old remote invite tokens. If an invite expired, pairing was revoked, or you cleaned/reinstalled the service, create a new invite in Desktop.
 
@@ -81,6 +111,16 @@ Use the DCP MCP URL printed by `install-service`. Do not hardcode `172.17.0.1`; 
 
 After changing OpenClaw MCP config, start a fresh OpenClaw chat/session so the new tools are loaded.
 
+If Hermes is not verified, run these as the Linux user that runs Hermes:
+
+```bash
+hermes config set mcp_servers.dcp.url http://127.0.0.1:8420/mcp
+hermes config set mcp_servers.dcp.tools.prompts false
+hermes config set mcp_servers.dcp.tools.resources false
+```
+
+After changing Hermes MCP config, run `/reload-mcp` in Hermes or restart Hermes.
+
 ## Remote VPS Debug Path
 
 ### Known good path
@@ -105,6 +145,9 @@ OpenClaw detected: yes
 OpenClaw can reach DCP: yes
 OpenClaw config written: yes
 OpenClaw config verified: yes
+Hermes detected: yes
+Hermes config written: yes
+Hermes config verified: yes
 ```
 
 The normal path is one command from Desktop:
@@ -240,7 +283,38 @@ Add the printed server under OpenClaw's MCP config:
 
 Use your printed URL, not this sample URL.
 
-### 6. Verify DCP MCP directly
+### 6. If Hermes cannot see DCP
+
+First check what Hermes has saved:
+
+```bash
+hermes config show | grep -A 8 mcp_servers
+```
+
+Expected shape:
+
+```yaml
+mcp_servers:
+  dcp:
+    url: http://127.0.0.1:8420/mcp
+    tools:
+      prompts: false
+      resources: false
+```
+
+The `url` may be a Docker bridge URL such as `http://172.17.0.1:8420/mcp` when DCP had to bind to a Docker-reachable host address for OpenClaw. That is fine if the health check works from the Hermes host.
+
+If the installer could not configure Hermes automatically, run:
+
+```bash
+hermes config set mcp_servers.dcp.url http://127.0.0.1:8420/mcp
+hermes config set mcp_servers.dcp.tools.prompts false
+hermes config set mcp_servers.dcp.tools.resources false
+```
+
+Then run `/reload-mcp` in Hermes or restart Hermes.
+
+### 7. Verify DCP MCP directly
 
 This checks DCP itself, independent of OpenClaw:
 
@@ -292,7 +366,7 @@ vault_scope_guide
 
 ### Test prompts
 
-After pairing and starting a fresh OpenClaw session, use simple prompts first:
+After pairing and starting a fresh OpenClaw or Hermes session, use simple prompts first:
 
 ```text
 What is my email from DCP?

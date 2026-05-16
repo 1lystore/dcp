@@ -622,7 +622,7 @@ class ApiClient {
   }
 
   // Local MCP agent setup methods
-  async setupLocalMcp(agentType: 'claude-desktop' | 'cursor' | 'vscode' | 'openclaw' | 'other' = 'claude-desktop', customName?: string): Promise<{
+  async setupLocalMcp(agentType: 'claude-desktop' | 'cursor' | 'vscode' | 'openclaw' | 'hermes' | 'other' = 'claude-desktop', customName?: string): Promise<{
     success: boolean;
     agent_id: string;
     agent_name: string;

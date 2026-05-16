@@ -58,7 +58,7 @@ There is no separate `dcp-cli`, `dcp-server`, or `dcp-mcp` package in the curren
 Agents connect through `dcp-agent`.
 
 ```text
-Claude/Cursor/VS Code
+Claude/Cursor/VS Code/Hermes
       │ stdio MCP
       ▼
   dcp-agent run --mode mcp
@@ -68,7 +68,7 @@ Claude/Cursor/VS Code
 ```
 
 ```text
-OpenClaw/custom agent
+OpenClaw/Hermes/custom agent
       │ HTTP MCP
       ▼
   dcp-agent run --mode http-mcp --port 8420

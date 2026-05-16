@@ -55,6 +55,21 @@ interface OpenClawConfigResult {
   method?: string;
 }
 
+interface HermesTarget {
+  user: string;
+  command: string;
+  configPath?: string;
+  home?: string;
+}
+
+interface HermesConfigResult {
+  detected: boolean;
+  written: boolean;
+  verified: boolean;
+  target?: HermesTarget;
+  error?: string;
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -117,6 +132,27 @@ function isSafeLinuxUser(user: string): boolean {
   return /^[a-z_][a-z0-9_-]*[$]?$/.test(user);
 }
 
+function runAsUser(user: string, args: string[], timeout = 10000): string | null {
+  if (!isSafeLinuxUser(user)) return null;
+  try {
+    if (user === 'root' && isRoot()) {
+      return execFileSync(args[0], args.slice(1), {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: '/root' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout,
+      }).trim();
+    }
+    return execFileSync('sudo', ['-H', '-u', user, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout,
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
 function getOpenClawGatewayUsers(): string[] {
   const users = new Set<string>();
   const psRows = execQuiet('ps -eo user=,comm=,args= 2>/dev/null');
@@ -147,6 +183,87 @@ function getOpenClawGatewayUsers(): string[] {
   }
 
   return [...users];
+}
+
+function getHermesCandidateUsers(): string[] {
+  const users = new Set<string>();
+  const sudoUser = process.env.SUDO_USER;
+  if (sudoUser && sudoUser !== 'root' && isSafeLinuxUser(sudoUser)) {
+    users.add(sudoUser);
+  }
+
+  const psRows = execQuiet('ps -eo user=,comm=,args= 2>/dev/null');
+  if (psRows) {
+    for (const row of psRows.split('\n')) {
+      const trimmed = row.trim();
+      if (!trimmed || !trimmed.toLowerCase().includes('hermes')) continue;
+      if (trimmed.includes(' dcp-agent ') || trimmed.includes(' npx ')) continue;
+
+      const parts = trimmed.split(/\s+/);
+      const user = parts[0];
+      const command = parts[1] || '';
+      const args = parts.slice(2).join(' ');
+
+      if (
+        user &&
+        isSafeLinuxUser(user) &&
+        (command === 'hermes' || args === 'hermes' || args.startsWith('hermes ') || args.includes('/hermes '))
+      ) {
+        users.add(user);
+      }
+    }
+  }
+
+  const passwdRows = execQuiet('getent passwd 2>/dev/null');
+  if (passwdRows) {
+    for (const row of passwdRows.split('\n')) {
+      const [user, , uidRaw, , , home] = row.split(':');
+      const uid = Number(uidRaw);
+      if (!user || !home || !isSafeLinuxUser(user)) continue;
+      if (user !== 'root' && (!Number.isFinite(uid) || uid < 1000)) continue;
+      if (fs.existsSync(path.join(home, '.hermes', 'config.yaml'))) {
+        users.add(user);
+      }
+    }
+  }
+
+  if (fs.existsSync('/root/.hermes/config.yaml')) {
+    users.add('root');
+  }
+
+  return [...users];
+}
+
+function findHermesCommandForUser(user: string): string | null {
+  const script = [
+    'command -v hermes',
+    'test -x "$HOME/.local/bin/hermes" && printf "%s\\n" "$HOME/.local/bin/hermes"',
+    'test -x "$HOME/.hermes/hermes-agent/venv/bin/hermes" && printf "%s\\n" "$HOME/.hermes/hermes-agent/venv/bin/hermes"',
+  ].join(' || ');
+  const output = runAsUser(user, ['bash', '-lc', script]);
+  return output?.split('\n').map((line) => line.trim()).find(Boolean) || null;
+}
+
+function detectHermesTarget(preferredUser?: string): HermesTarget | null {
+  const candidates = preferredUser && isSafeLinuxUser(preferredUser)
+    ? [preferredUser, ...getHermesCandidateUsers().filter((user) => user !== preferredUser)]
+    : getHermesCandidateUsers();
+
+  for (const user of candidates) {
+    const command = findHermesCommandForUser(user);
+    if (!command) continue;
+
+    const configPath = runAsUser(user, [command, 'config', 'path']);
+    const home = runAsUser(user, ['bash', '-lc', 'printf "%s" "$HOME"']);
+    return {
+      user,
+      command,
+      configPath: configPath || undefined,
+      home: home || undefined,
+    };
+  }
+
+  return null;
 }
 
 function detectOpenClawTarget(port: number): OpenClawTarget | null {
@@ -525,6 +642,64 @@ function printManualOpenClawInstructions(url: string, port: number): void {
   console.log();
 }
 
+function printManualHermesInstructions(url: string, user?: string): void {
+  const prefix = user && isSafeLinuxUser(user) ? `sudo -H -u ${user} ` : '';
+  console.log();
+  console.log(chalk.bold('Manual Hermes MCP config'));
+  console.log(chalk.dim('Use this if automatic Hermes setup is not verified.'));
+  console.log();
+  console.log(`${prefix}hermes config set mcp_servers.dcp.url ${url}`);
+  console.log(`${prefix}hermes config set mcp_servers.dcp.tools.prompts false`);
+  console.log(`${prefix}hermes config set mcp_servers.dcp.tools.resources false`);
+  console.log();
+  console.log(chalk.dim('Then run /reload-mcp in Hermes or restart Hermes.'));
+  console.log();
+}
+
+function configureHermes(target: HermesTarget, url: string): HermesConfigResult {
+  try {
+    const writes = [
+      ['config', 'set', 'mcp_servers.dcp.url', url],
+      ['config', 'set', 'mcp_servers.dcp.tools.prompts', 'false'],
+      ['config', 'set', 'mcp_servers.dcp.tools.resources', 'false'],
+    ].map((args) => runAsUser(target.user, [target.command, ...args], 15000));
+
+    const written = writes.every((output) => output !== null);
+    if (!written) {
+      return {
+        detected: true,
+        written: false,
+        verified: false,
+        target,
+        error: 'hermes config set failed',
+      };
+    }
+
+    const config = runAsUser(target.user, [target.command, 'config', 'show'], 15000);
+    const verified = Boolean(
+      config &&
+      config.includes('mcp_servers') &&
+      config.includes('dcp') &&
+      config.includes(url)
+    );
+
+    return {
+      detected: true,
+      written: true,
+      verified,
+      target,
+    };
+  } catch (err) {
+    return {
+      detected: true,
+      written: false,
+      verified: false,
+      target,
+      error: err instanceof Error ? err.message : 'unknown error',
+    };
+  }
+}
+
 // ============================================================================
 // Command Implementation
 // ============================================================================
@@ -754,6 +929,11 @@ export const installServiceCommand = new Command('install-service')
     let openClawReachable = false;
     let openClawConfigWritten = false;
     let openClawConfigVerified = false;
+    let hermesConfig: HermesConfigResult = {
+      detected: false,
+      written: false,
+      verified: false,
+    };
 
     if (options.start) {
       console.log('  Checking DCP service health...');
@@ -887,6 +1067,27 @@ export const installServiceCommand = new Command('install-service')
       }
     }
 
+    const hermesTarget = detectHermesTarget();
+    if (hermesTarget) {
+      const hermesUrl = `http://${mcpHost}:${port}/mcp`;
+      console.log('  Configuring Hermes MCP...');
+      hermesConfig = configureHermes(hermesTarget, hermesUrl);
+      if (hermesConfig.written) {
+        success(`Hermes MCP configured: dcp -> ${hermesUrl}`);
+        console.log(chalk.dim(`    User: ${hermesTarget.user}`));
+        if (hermesTarget.configPath) {
+          console.log(chalk.dim(`    Config: ${hermesTarget.configPath}`));
+        }
+        if (hermesConfig.verified) {
+          success('Hermes MCP config verified');
+        } else {
+          warn('Hermes MCP config was written, but verification failed');
+        }
+      } else {
+        warn(`Hermes was detected, but automatic MCP configuration failed${hermesConfig.error ? `: ${hermesConfig.error}` : ''}`);
+      }
+    }
+
     if (options.start && !serviceHealthy) {
       const finalHealthyHost = await waitForEitherHealth([mcpHost, '127.0.0.1'], port, 10000);
       serviceHealthy = Boolean(finalHealthyHost);
@@ -917,10 +1118,23 @@ export const installServiceCommand = new Command('install-service')
     } else {
       console.log(`    OpenClaw detected: ${chalk.yellow('no')}`);
     }
+    if (hermesConfig.detected) {
+      console.log(`    Hermes detected: ${chalk.green('yes')}`);
+      console.log(`    Hermes config written: ${hermesConfig.written ? chalk.green('yes') : chalk.yellow('no')}`);
+      console.log(`    Hermes config verified: ${hermesConfig.verified ? chalk.green('yes') : chalk.yellow('no')}`);
+    } else {
+      console.log(`    Hermes detected: ${chalk.yellow('no')}`);
+    }
     console.log();
 
     if (!openClawTarget || !openClawConfigVerified) {
       printManualOpenClawInstructions(`http://${mcpHost}:${port}/mcp`, port);
+    }
+    if (!hermesConfig.detected || !hermesConfig.verified) {
+      printManualHermesInstructions(`http://${mcpHost}:${port}/mcp`, hermesConfig.target?.user);
+    } else {
+      console.log(chalk.dim('After changing Hermes MCP config, run /reload-mcp in Hermes or restart Hermes.'));
+      console.log();
     }
 
     // 14. Show service status

@@ -17,7 +17,7 @@ Agents ask. You approve, deny, budget, or revoke.
 
 ## Use DCP If
 
-- you run Claude, Cursor, OpenClaw, or custom MCP agents
+- you run Claude, Cursor, OpenClaw, Hermes, or custom MCP agents
 - your agent needs to sign Solana transactions without holding a private key
 - your agent needs API keys without reading `.env`
 - you want spending limits for agents
@@ -47,7 +47,7 @@ DCP gives agents a permission boundary:
 - enforces per-agent budgets
 - logs what agents did
 
-DCP exposes vault permissions through MCP, so Claude Desktop, Cursor, OpenClaw, and custom agents can request approved actions without reading raw secrets directly.
+DCP exposes vault permissions through MCP, so Claude Desktop, Cursor, OpenClaw, Hermes, and custom agents can request approved actions without reading raw secrets directly.
 
 ## 5-Minute Quickstart
 
@@ -58,7 +58,7 @@ By the end, your agent can ask DCP for your Solana wallet address.
 1. Download DCP Desktop from [dcpagent.com](https://dcpagent.com/).
 2. Create and unlock your vault.
 3. Create a Solana wallet.
-4. Open **Connect** and add Claude Desktop, Cursor, or another MCP agent.
+4. Open **Connect** and add Claude Desktop, Cursor, Hermes, or another MCP agent.
 5. Restart your agent app.
 
 Then ask your agent:
@@ -105,7 +105,7 @@ Request approval to sign a Solana transaction.
 ## How It Works
 
 ```text
-Claude / Cursor / OpenClaw
+Claude / Cursor / OpenClaw / Hermes
         |
         v
     dcp-agent
@@ -165,11 +165,11 @@ DCP is designed around least privilege.
 - scoped vault reads and writes
 - API credential storage
 - budget checks
-- stdio MCP for Claude Desktop, Cursor, and similar clients
+- stdio MCP for Claude Desktop, Cursor, Hermes, and similar clients
 - HTTP MCP for local or custom agents
 - Desktop approvals
 - Telegram approvals
-- remote/VPS OpenClaw agents through relay
+- remote/VPS OpenClaw and Hermes agents through relay
 
 ## MCP Tools Exposed
 
@@ -214,7 +214,7 @@ DCP Desktop is the easiest way to get started.
 3. Save your recovery phrase safely.
 4. DCP creates a Solana wallet for you.
 5. Add private data or credentials in the Data tab.
-6. Connect local agents like Claude, Cursor, VS Code, OpenClaw, or any MCP client.
+6. Connect local agents like Claude, Cursor, VS Code, OpenClaw, Hermes, or any MCP client.
 7. Set permissions per agent.
 8. Approve, deny, budget, revoke, and audit every action agents ask for.
 
@@ -226,7 +226,17 @@ For a VPS or remote agent, create an invite in DCP Desktop and run the generated
 curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- 'dcp_vps_v1_...'
 ```
 
-That command installs the DCP agent service, pairs it with your vault, starts the local HTTP MCP endpoint, and tries to add DCP to OpenClaw.
+That command installs the DCP agent service, pairs it with your vault, starts the local HTTP MCP endpoint, and tries to add DCP to OpenClaw and Hermes when either is detected.
+
+If Hermes is not detected or automatic config is not verified, run these on the remote host as the Hermes user:
+
+```bash
+hermes config set mcp_servers.dcp.url http://127.0.0.1:8420/mcp
+hermes config set mcp_servers.dcp.tools.prompts false
+hermes config set mcp_servers.dcp.tools.resources false
+```
+
+Then run `/reload-mcp` in Hermes or restart Hermes.
 
 ## Packages
 

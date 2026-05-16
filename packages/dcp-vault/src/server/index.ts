@@ -1590,7 +1590,7 @@ async function buildServer(): Promise<FastifyInstance> {
   // ============================================================================
 
   /**
-   * Setup local MCP agent for Claude Desktop / Cursor / VS Code / etc.
+   * Setup local MCP agent for Claude Desktop / Cursor / VS Code / Hermes / etc.
    *
    * This endpoint creates a pre-configured local MCP agent so users don't need
    * to manually pair. The agent is created with full local permissions and the
@@ -1600,7 +1600,7 @@ async function buildServer(): Promise<FastifyInstance> {
    */
   server.post<{
     Body: {
-      agent_type?: 'claude-desktop' | 'cursor' | 'vscode' | 'openclaw' | 'other';
+      agent_type?: 'claude-desktop' | 'cursor' | 'vscode' | 'openclaw' | 'hermes' | 'other';
       custom_name?: string;
     };
   }>('/v1/vault/setup-local-mcp', async (request) => {
@@ -1616,6 +1616,7 @@ async function buildServer(): Promise<FastifyInstance> {
       'cursor': { id: 'agent_cursor', name: 'Cursor' },
       'vscode': { id: 'agent_vscode', name: 'VS Code' },
       'openclaw': { id: 'agent_openclaw_local', name: 'OpenClaw' },
+      'hermes': { id: 'agent_hermes_local', name: 'Hermes' },
       'other': { id: 'agent_local_mcp', name: body.custom_name || 'Local MCP' },
     };
 
@@ -1744,6 +1745,7 @@ async function buildServer(): Promise<FastifyInstance> {
       'agent_cursor',
       'agent_vscode',
       'agent_openclaw_local',
+      'agent_hermes_local',
       'agent_local_mcp',
     ];
 
@@ -1754,6 +1756,7 @@ async function buildServer(): Promise<FastifyInstance> {
         'cursor': 'agent_cursor',
         'vscode': 'agent_vscode',
         'openclaw': 'agent_openclaw_local',
+        'hermes': 'agent_hermes_local',
         'other': 'agent_local_mcp',
       };
       const agentId = agentIdMap[agentType];
