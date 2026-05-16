@@ -135,9 +135,10 @@ jobs:
 
             ### Release notes
 
-            - Fixed Telegram approval routing after unlinking and relinking Telegram.
-            - Improved remote approval reliability for Desktop and VPS agents.
-            - Added MCP support for x402 Solana payment signing.
+            - Added Hermes support in DCP Desktop Connect.
+            - Added one-command VPS pairing for host-native Hermes and Docker Hermes.
+            - Hardened the VPS service installer so systemd runs the installed DCP agent runtime directly.
+            - Preserved OpenClaw MCP setup while allowing OpenClaw and Hermes to share the same DCP endpoint on a VPS.
             - Updated the bundled vault runtime used by the Desktop app.
 
             ### Downloads
