@@ -232,6 +232,7 @@ If Hermes is not detected or automatic config is not verified, run these on the 
 
 ```bash
 hermes config set mcp_servers.dcp.url http://127.0.0.1:8420/mcp
+hermes config set mcp_servers.dcp.enabled true
 hermes config set mcp_servers.dcp.tools.prompts false
 hermes config set mcp_servers.dcp.tools.resources false
 ```

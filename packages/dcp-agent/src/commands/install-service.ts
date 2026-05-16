@@ -62,6 +62,7 @@ interface HermesTarget {
   command: string;
   configPath?: string;
   home?: string;
+  hermesHome?: string;
   host?: string;
   url?: string;
   containerId?: string;
@@ -133,6 +134,10 @@ function commandExists(command: string): boolean {
   return Boolean(execQuiet(`command -v ${command} 2>/dev/null`));
 }
 
+function isAbsoluteExecutable(filePath: string): boolean {
+  return path.isAbsolute(filePath) && fs.existsSync(filePath) && Boolean(fs.statSync(filePath).mode & 0o111);
+}
+
 function isIpv4Host(host: string): boolean {
   return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host);
 }
@@ -160,6 +165,23 @@ function runAsUser(user: string, args: string[], timeout = 10000): string | null
   } catch {
     return null;
   }
+}
+
+function runAsUserWithEnv(user: string, env: Record<string, string>, args: string[], timeout = 10000): string | null {
+  const envArgs = Object.entries(env).map(([key, value]) => `${key}=${value}`);
+  if (user === 'root' && isRoot()) {
+    try {
+      return execFileSync('/usr/bin/env', [...envArgs, ...args], {
+        encoding: 'utf8',
+        env: { ...process.env, ...env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout,
+      }).trim();
+    } catch {
+      return null;
+    }
+  }
+  return runAsUser(user, ['env', ...envArgs, ...args], timeout);
 }
 
 function getOpenClawGatewayUsers(): string[] {
@@ -243,6 +265,62 @@ function getHermesCandidateUsers(): string[] {
   return [...users];
 }
 
+function getProcessEnviron(pid: string): Record<string, string> {
+  try {
+    const raw = fs.readFileSync(`/proc/${pid}/environ`, 'utf8');
+    const env: Record<string, string> = {};
+    for (const entry of raw.split('\0')) {
+      if (!entry) continue;
+      const index = entry.indexOf('=');
+      if (index <= 0) continue;
+      env[entry.slice(0, index)] = entry.slice(index + 1);
+    }
+    return env;
+  } catch {
+    return {};
+  }
+}
+
+function getHermesProcessHomes(): Map<string, string> {
+  const homes = new Map<string, string>();
+  const psRows = execQuiet('ps -eo pid=,user=,comm=,args= 2>/dev/null');
+  if (!psRows) return homes;
+
+  for (const row of psRows.split('\n')) {
+    const trimmed = row.trim();
+    if (!trimmed || !trimmed.toLowerCase().includes('hermes')) continue;
+    const parts = trimmed.split(/\s+/);
+    const pid = parts[0];
+    const user = parts[1];
+    if (!pid || !user || !isSafeLinuxUser(user)) continue;
+    const env = getProcessEnviron(pid);
+    if (env.HERMES_HOME) {
+      homes.set(user, env.HERMES_HOME);
+    }
+  }
+
+  return homes;
+}
+
+function getHermesActiveProfileHome(user: string): string | undefined {
+  const home = runAsUser(user, ['bash', '-lc', 'printf "%s" "$HOME"']);
+  if (!home) return undefined;
+
+  const activeProfilePath = path.join(home, '.hermes', 'active_profile');
+  try {
+    const activeProfile = fs.readFileSync(activeProfilePath, 'utf8').trim();
+    if (!activeProfile || activeProfile === 'default') return undefined;
+    const profileHome = path.join(home, '.hermes', 'profiles', activeProfile);
+    if (fs.existsSync(profileHome)) {
+      return profileHome;
+    }
+  } catch {
+    // Default profile.
+  }
+
+  return undefined;
+}
+
 function findHermesCommandForUser(user: string): string | null {
   const script = [
     'command -v hermes',
@@ -254,6 +332,7 @@ function findHermesCommandForUser(user: string): string | null {
 }
 
 function detectHermesTarget(preferredUser?: string): HermesTarget | null {
+  const processHomes = getHermesProcessHomes();
   const candidates = preferredUser && isSafeLinuxUser(preferredUser)
     ? [preferredUser, ...getHermesCandidateUsers().filter((user) => user !== preferredUser)]
     : getHermesCandidateUsers();
@@ -262,7 +341,9 @@ function detectHermesTarget(preferredUser?: string): HermesTarget | null {
     const command = findHermesCommandForUser(user);
     if (!command) continue;
 
-    const configPath = runAsUser(user, [command, 'config', 'path']);
+    const hermesHome = processHomes.get(user) || getHermesActiveProfileHome(user);
+    const configEnv: Record<string, string> = hermesHome ? { HERMES_HOME: hermesHome } : {};
+    const configPath = runAsUserWithEnv(user, configEnv, [command, 'config', 'path']);
     const home = runAsUser(user, ['bash', '-lc', 'printf "%s" "$HOME"']);
     return {
       kind: 'host',
@@ -270,6 +351,7 @@ function detectHermesTarget(preferredUser?: string): HermesTarget | null {
       command,
       configPath: configPath || undefined,
       home: home || undefined,
+      hermesHome,
     };
   }
 
@@ -277,15 +359,30 @@ function detectHermesTarget(preferredUser?: string): HermesTarget | null {
 }
 
 function getDockerGatewayCandidates(networks?: string): string[] {
+  if ((networks || '').split(',').map((network) => network.trim()).includes('host')) {
+    return ['127.0.0.1'];
+  }
+
   const candidateHosts: string[] = [];
   for (const network of (networks || '').split(',')) {
     const trimmed = network.trim();
     if (!trimmed) continue;
-    const gateway = execQuiet(
-      `docker network inspect ${trimmed} --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null`
-    );
-    if (gateway) {
-      candidateHosts.push(gateway);
+    try {
+      const raw = execFileSync('docker', ['network', 'inspect', trimmed], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 10000,
+      });
+      const parsed = JSON.parse(raw) as Array<{ IPAM?: { Config?: Array<{ Gateway?: string }> } }>;
+      for (const item of parsed) {
+        for (const config of item.IPAM?.Config || []) {
+          if (config.Gateway && isIpv4Host(config.Gateway)) {
+            candidateHosts.push(config.Gateway);
+          }
+        }
+      }
+    } catch {
+      // Fall back to common Docker host aliases below.
     }
   }
 
@@ -461,40 +558,45 @@ function configureOpenClaw(target: OpenClawTarget, preferredUser?: string): Open
   return { written: false, verified: false };
 }
 
-function getServiceNpmCommand(): string {
-  return process.env.DCP_SERVICE_NPM || '/usr/bin/env npm';
+function getServiceNpmPath(): string {
+  const npmPath = process.env.DCP_SERVICE_NPM || '/usr/bin/npm';
+  if (!isAbsoluteExecutable(npmPath)) {
+    throw new Error(`DCP_SERVICE_NPM must be an absolute executable path: ${npmPath}`);
+  }
+  return npmPath;
 }
 
 function getServiceNodeCommand(): string {
-  return process.env.DCP_SERVICE_NODE || process.execPath;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+  const nodePath = process.env.DCP_SERVICE_NODE || process.execPath;
+  if (!isAbsoluteExecutable(nodePath)) {
+    throw new Error(`DCP_SERVICE_NODE must be an absolute executable path: ${nodePath}`);
+  }
+  return nodePath;
 }
 
 function installServiceRuntime(version: string): void {
-  const serviceNpm = getServiceNpmCommand();
+  const serviceNpm = getServiceNpmPath();
   const packageSpec = `@dcprotocol/agent@${version}`;
 
-  execSync(
+  execFileSync(
+    'sudo',
     [
+      '-u',
+      DCP_USER,
+      'env',
+      `HOME=${DCP_DATA_DIR}`,
+      `NPM_CONFIG_CACHE=${DCP_NPM_CACHE_DIR}`,
+      'NPM_CONFIG_UPDATE_NOTIFIER=false',
       serviceNpm,
       'install',
       '--omit=dev',
       '--no-audit',
       '--no-fund',
       '--prefix',
-      shellQuote(DCP_DATA_DIR),
-      shellQuote(packageSpec),
-    ].join(' '),
+      DCP_DATA_DIR,
+      packageSpec,
+    ],
     {
-      env: {
-        ...process.env,
-        HOME: DCP_DATA_DIR,
-        NPM_CONFIG_CACHE: DCP_NPM_CACHE_DIR,
-        NPM_CONFIG_UPDATE_NOTIFIER: 'false',
-      },
       stdio: 'inherit',
     }
   );
@@ -781,6 +883,7 @@ function printManualHermesInstructions(url: string, user?: string): void {
   console.log(chalk.dim('Use this if automatic Hermes setup is not verified.'));
   console.log();
   console.log(`${prefix}hermes config set mcp_servers.dcp.url ${url}`);
+  console.log(`${prefix}hermes config set mcp_servers.dcp.enabled true`);
   console.log(`${prefix}hermes config set mcp_servers.dcp.tools.prompts false`);
   console.log(`${prefix}hermes config set mcp_servers.dcp.tools.resources false`);
   console.log();
@@ -795,6 +898,7 @@ function printManualHermesDockerInstructions(url: string, containerName?: string
   console.log(chalk.dim('Use this if automatic Hermes Docker setup is not verified.'));
   console.log();
   console.log(`docker exec ${container} /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.url ${url}`);
+  console.log(`docker exec ${container} /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.enabled true`);
   console.log(`docker exec ${container} /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.tools.prompts false`);
   console.log(`docker exec ${container} /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.tools.resources false`);
   console.log();
@@ -813,8 +917,23 @@ function verifyHostHermesConfig(target: HermesTarget, url: string): boolean {
     }
   }
 
-  const config = runAsUser(target.user, [target.command, 'config', 'show'], 15000);
+  const config = runAsUserWithEnv(
+    target.user,
+    target.hermesHome ? { HERMES_HOME: target.hermesHome } : {},
+    [target.command, 'config', 'show'],
+    15000
+  );
   return Boolean(config && config.includes('mcp_servers') && config.includes('dcp') && config.includes(url));
+}
+
+function isHostHermesManaged(target: HermesTarget): boolean {
+  if (target.hermesHome && fs.existsSync(path.join(target.hermesHome, '.managed'))) {
+    return true;
+  }
+  if (target.configPath && fs.existsSync(path.join(path.dirname(target.configPath), '.managed'))) {
+    return true;
+  }
+  return false;
 }
 
 function configureHermesDocker(target: HermesTarget, url: string): HermesConfigResult {
@@ -829,8 +948,20 @@ function configureHermesDocker(target: HermesTarget, url: string): HermesConfigR
     };
   }
 
+  if (dockerExecOk(target.containerId, ['test', '-f', '/opt/data/.managed'])) {
+    return {
+      detected: true,
+      written: false,
+      verified: false,
+      reachable: false,
+      target,
+      error: 'Hermes config is managed; edit mcp_servers declaratively',
+    };
+  }
+
   const writes = [
     ['config', 'set', 'mcp_servers.dcp.url', url],
+    ['config', 'set', 'mcp_servers.dcp.enabled', 'true'],
     ['config', 'set', 'mcp_servers.dcp.tools.prompts', 'false'],
     ['config', 'set', 'mcp_servers.dcp.tools.resources', 'false'],
   ].map((args) => dockerExecHermes(target.containerId!, args));
@@ -857,11 +988,24 @@ function configureHermes(target: HermesTarget, url: string): HermesConfigResult 
   }
 
   try {
+    if (isHostHermesManaged(target)) {
+      return {
+        detected: true,
+        written: false,
+        verified: false,
+        reachable: false,
+        target,
+        error: 'Hermes config is managed; edit mcp_servers declaratively',
+      };
+    }
+
+    const configEnv: Record<string, string> = target.hermesHome ? { HERMES_HOME: target.hermesHome } : {};
     const writes = [
       ['config', 'set', 'mcp_servers.dcp.url', url],
+      ['config', 'set', 'mcp_servers.dcp.enabled', 'true'],
       ['config', 'set', 'mcp_servers.dcp.tools.prompts', 'false'],
       ['config', 'set', 'mcp_servers.dcp.tools.resources', 'false'],
-    ].map((args) => runAsUser(target.user, [target.command, ...args], 15000));
+    ].map((args) => runAsUserWithEnv(target.user, configEnv, [target.command, ...args], 15000));
 
     const written = writes.every((output) => output !== null);
     if (!written) {
@@ -946,6 +1090,18 @@ export const installServiceCommand = new Command('install-service')
       process.exit(1);
     }
 
+    if (!commandExists('systemctl')) {
+      error('systemd is required for install-service, but systemctl was not found');
+      process.exit(1);
+    }
+
+    const hostname = os.hostname();
+    const version = getPackageVersion();
+    if (version === '0.0.0') {
+      error('Could not resolve @dcprotocol/agent package version');
+      process.exit(1);
+    }
+
     // 5. Create system user (if not exists)
     console.log('  Creating system user...');
     const userExists = execQuiet(`id ${DCP_USER} 2>/dev/null`);
@@ -975,37 +1131,29 @@ export const installServiceCommand = new Command('install-service')
     execSync(`chmod 700 ${DCP_DATA_DIR}`);
     success(`Created: ${DCP_DATA_DIR}`);
 
+    console.log('  Installing service runtime...');
+    try {
+      installServiceRuntime(version);
+      success(`Installed @dcprotocol/agent@${version} into ${DCP_DATA_DIR}`);
+    } catch (err) {
+      error(`Failed to install service runtime: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      process.exit(1);
+    }
+
     // 7. Generate keypair
     console.log('  Generating service keypair...');
     const { privateKey, publicKey } = generateAgentKeypair();
 
-    // 8. Store private key securely
-    console.log('  Storing private key...');
-    fs.writeFileSync(
-      DCP_KEY_FILE,
-      Buffer.from(privateKey).toString('base64'),
-      { mode: 0o600 }
-    );
-    execSync(`chown ${DCP_USER}:${DCP_USER} ${DCP_KEY_FILE}`);
-    success(`Key stored: ${DCP_KEY_FILE} (mode 0600)`);
-
     // 8a. Submit pairing claim to relay
     console.log('  Submitting pairing claim to relay...');
-    const hostname = os.hostname();
-    const version = getPackageVersion();
 
     const claim = createPairingClaim(inviteData, privateKey, publicKey, hostname, version);
     const claimResult = await submitPairingClaim(claim, inviteData.relay_url);
 
-    // SECURITY: Zeroize private key from memory AFTER signing the claim
-    privateKey.fill(0);
-
     if (!claimResult.success) {
       error(`Failed to submit pairing claim: ${claimResult.error}`);
       console.log(chalk.dim('  Please check your invite and try again.'));
-      if (fs.existsSync(DCP_KEY_FILE)) {
-        fs.unlinkSync(DCP_KEY_FILE);
-      }
+      privateKey.fill(0);
       process.exit(1);
     }
 
@@ -1042,16 +1190,23 @@ export const installServiceCommand = new Command('install-service')
       error(`Pairing request failed: ${approvalResult.status}${approvalResult.error ? ` - ${approvalResult.error}` : ''}`);
       console.log();
       console.log(chalk.dim('Generate a new pairing invite and try again.'));
-      // Clean up key file since pairing failed
-      if (fs.existsSync(DCP_KEY_FILE)) {
-        fs.unlinkSync(DCP_KEY_FILE);
-      }
+      privateKey.fill(0);
       process.exit(1);
     }
 
     success('Pairing approved!');
     console.log(chalk.dim(`    Agent ID: ${approvalResult.agent_id}`));
     console.log();
+
+    console.log('  Storing private key...');
+    fs.writeFileSync(
+      DCP_KEY_FILE,
+      Buffer.from(privateKey).toString('base64'),
+      { mode: 0o600 }
+    );
+    privateKey.fill(0);
+    execSync(`chown ${DCP_USER}:${DCP_USER} ${DCP_KEY_FILE}`);
+    success(`Key stored: ${DCP_KEY_FILE} (mode 0600)`);
 
     // 10a. Detect local agent runtimes before writing the service. If an MCP
     // client runs in Docker bridge mode, bind HTTP MCP to a private Docker
@@ -1103,17 +1258,6 @@ export const installServiceCommand = new Command('install-service')
     );
     execSync(`chown ${DCP_USER}:${DCP_USER} ${DCP_CONFIG_FILE}`);
     success(`Config stored: ${DCP_CONFIG_FILE}`);
-
-    // 12. Create systemd service
-    console.log('  Installing service runtime...');
-    try {
-      installServiceRuntime(version);
-      execSync(`chown -R ${DCP_USER}:${DCP_USER} ${DCP_DATA_DIR}`);
-      success(`Installed @dcprotocol/agent@${version} into ${DCP_DATA_DIR}`);
-    } catch (err) {
-      error(`Failed to install service runtime: ${err instanceof Error ? err.message : 'Unknown error'}`);
-      process.exit(1);
-    }
 
     console.log('  Creating systemd service...');
     fs.writeFileSync(SYSTEMD_SERVICE, buildSystemdService(version, mcpHost, port));
@@ -1376,7 +1520,11 @@ export const installServiceCommand = new Command('install-service')
 
     // 13. Display success message
     console.log();
-    console.log(chalk.bold.green('DCP Agent service installed and paired successfully!'));
+    if (options.start && !serviceHealthy) {
+      console.log(chalk.bold.yellow('DCP Agent paired, but the service is not healthy yet.'));
+    } else {
+      console.log(chalk.bold.green('DCP Agent service installed and paired successfully!'));
+    }
     console.log();
     console.log(`  Agent ID: ${chalk.cyan(approvalResult.agent_id)}`);
     console.log();
@@ -1432,6 +1580,10 @@ export const installServiceCommand = new Command('install-service')
       } catch {
         // Status command might exit with non-zero even when service is running
       }
+    }
+
+    if (options.start && !serviceHealthy) {
+      process.exitCode = 1;
     }
   });
 

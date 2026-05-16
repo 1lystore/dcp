@@ -120,6 +120,7 @@ If host-native Hermes is not verified, run these as the Linux user that runs Her
 
 ```bash
 hermes config set mcp_servers.dcp.url http://127.0.0.1:8420/mcp
+hermes config set mcp_servers.dcp.enabled true
 hermes config set mcp_servers.dcp.tools.prompts false
 hermes config set mcp_servers.dcp.tools.resources false
 ```
@@ -130,6 +131,7 @@ If Docker Hermes is not verified, use the MCP URL printed by the installer:
 
 ```bash
 docker exec hermes /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.url http://172.17.0.1:8420/mcp
+docker exec hermes /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.enabled true
 docker exec hermes /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.tools.prompts false
 docker exec hermes /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.tools.resources false
 ```
@@ -313,6 +315,7 @@ Expected shape:
 mcp_servers:
   dcp:
     url: http://127.0.0.1:8420/mcp
+    enabled: true
     tools:
       prompts: false
       resources: false
@@ -324,6 +327,7 @@ If the installer could not configure Hermes automatically, run:
 
 ```bash
 hermes config set mcp_servers.dcp.url http://127.0.0.1:8420/mcp
+hermes config set mcp_servers.dcp.enabled true
 hermes config set mcp_servers.dcp.tools.prompts false
 hermes config set mcp_servers.dcp.tools.resources false
 ```
@@ -336,6 +340,7 @@ For Docker Hermes, check and repair from the host:
 docker exec hermes cat /opt/data/config.yaml | grep -A 8 mcp_servers
 docker exec hermes curl -s http://172.17.0.1:8420/health
 docker exec hermes /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.url http://172.17.0.1:8420/mcp
+docker exec hermes /opt/hermes/.venv/bin/hermes config set mcp_servers.dcp.enabled true
 ```
 
 Use the exact MCP URL printed by the installer.

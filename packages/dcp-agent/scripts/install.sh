@@ -7,14 +7,6 @@ DCP_NODE_DIR="$DCP_ROOT/node-v$DCP_NODE_VERSION"
 DCP_NODE_BIN="$DCP_NODE_DIR/bin"
 DCP_NPM="$DCP_NODE_BIN/npm"
 
-service_npm_command() {
-  local node_bin="$1"
-  local npm_bin="$2"
-  local bin_dir
-  bin_dir="$(dirname "$node_bin")"
-  echo "/usr/bin/env PATH=$bin_dir:$PATH $node_bin $npm_bin --loglevel=error"
-}
-
 usage() {
   echo "Usage:"
   echo "  curl -fsSL https://dcpagent.com/install.sh | sudo bash -s -- 'dcp_vps_v1_...'"
@@ -73,13 +65,6 @@ install_private_node() {
   rm -rf "$tmp"
 }
 
-stop_existing_service() {
-  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files dcp-agent.service >/dev/null 2>&1; then
-    echo "Stopping existing DCP agent service..."
-    systemctl stop dcp-agent >/dev/null 2>&1 || true
-  fi
-}
-
 main() {
   as_root
 
@@ -97,18 +82,16 @@ main() {
     die "Invalid DCP VPS invite. It must start with dcp_vps_v1_"
   fi
 
-  stop_existing_service
-
   if has_node_22 && command -v npm >/dev/null 2>&1; then
     echo "Using system Node $(node -v) for install."
     local node_bin npm_bin
     node_bin="$(command -v node)"
     npm_bin="$(command -v npm)"
-    PATH="$(dirname "$node_bin"):$PATH" DCP_SERVICE_NODE="$node_bin" DCP_SERVICE_NPM="$(service_npm_command "$node_bin" "$npm_bin")" "$node_bin" "$npm_bin" --loglevel=error exec --yes --package @dcprotocol/agent@latest -- dcp-agent install-service "$invite"
+    PATH="$(dirname "$node_bin"):$PATH" DCP_SERVICE_NODE="$node_bin" DCP_SERVICE_NPM="$npm_bin" "$node_bin" "$npm_bin" --loglevel=error exec --yes --package @dcprotocol/agent@latest -- dcp-agent install-service "$invite"
   else
     install_private_node
     echo "Using DCP runtime $("$DCP_NODE_BIN/node" -v) for install."
-    PATH="$DCP_NODE_BIN:$PATH" DCP_SERVICE_NODE="$DCP_NODE_BIN/node" DCP_SERVICE_NPM="$(service_npm_command "$DCP_NODE_BIN/node" "$DCP_NPM")" "$DCP_NODE_BIN/node" "$DCP_NPM" --loglevel=error exec --yes --package @dcprotocol/agent@latest -- dcp-agent install-service "$invite"
+    PATH="$DCP_NODE_BIN:$PATH" DCP_SERVICE_NODE="$DCP_NODE_BIN/node" DCP_SERVICE_NPM="$DCP_NPM" "$DCP_NODE_BIN/node" "$DCP_NPM" --loglevel=error exec --yes --package @dcprotocol/agent@latest -- dcp-agent install-service "$invite"
   fi
 }
 
