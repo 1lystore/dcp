@@ -90,14 +90,22 @@ fi
 # =============================================================================
 echo "Test 6: Single canonicalJson implementation in src"
 # Exclude test files - test files can have their own helper implementations
-IMPL_COUNT=$(grep -rn "function canonicalJson" "${ROOT_DIR}/packages" --include="*.ts" 2>/dev/null | grep -v "node_modules" | grep -v "\.d\.ts" | grep "/src/" | wc -l | tr -d ' ')
+IMPL_MATCHES=$(rg -n "(export )?function canonicalJson" "${ROOT_DIR}/packages" \
+  -g "*.ts" \
+  -g "!**/*.d.ts" \
+  -g "!**/node_modules/**" \
+  -g "!**/dist/**" \
+  -g "!**/build/**" \
+  -g "!**/target/**" \
+  2>/dev/null | grep "/src/" || true)
+IMPL_COUNT=$(printf "%s\n" "${IMPL_MATCHES}" | sed '/^$/d' | wc -l | tr -d ' ')
 if [[ "${IMPL_COUNT}" -eq 1 ]]; then
   pass "Single canonicalJson implementation in src"
 elif [[ "${IMPL_COUNT}" -eq 0 ]]; then
   fail "No canonicalJson implementation found in src"
 else
   fail "Multiple canonicalJson implementations found in src (${IMPL_COUNT})"
-  grep -rn "function canonicalJson" "${ROOT_DIR}/packages" --include="*.ts" 2>/dev/null | grep -v "node_modules" | grep -v "\.d\.ts" | grep "/src/" || true
+  printf "%s\n" "${IMPL_MATCHES}"
 fi
 
 # =============================================================================
