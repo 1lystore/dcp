@@ -180,6 +180,40 @@ describe('REST Server', () => {
       const body = JSON.parse(response.body);
       expect(body.error.message).toContain('currency is required');
     });
+
+    it('should record auto-approved x402 spend without an existing wallet session', async () => {
+      const payload = Buffer.from(JSON.stringify({
+        x402Version: 1,
+        network: 'solana',
+        resource: 'https://api.example.test/low-value',
+        nonce: 'test-nonce-auto-approved',
+      })).toString('base64');
+
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/vault/sign_x402',
+        payload: {
+          network: 'solana',
+          payload,
+          amount: 0.00001,
+          currency: 'USDC',
+          recipient: 'pay-sh-test-recipient',
+          purpose: 'x402 auto-approved ledger test',
+          agent_name: 'x402-budget-agent',
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+
+      const budgetResponse = await server.inject({
+        method: 'GET',
+        url: '/budget/check?amount=0&currency=USDC&chain=solana',
+      });
+
+      expect(budgetResponse.statusCode).toBe(200);
+      const budgetBody = JSON.parse(budgetResponse.body);
+      expect(budgetBody.remaining.daily).toBeCloseTo(4.99999, 8);
+    });
   });
 
   describe('MCP Unlock Bridge', () => {
