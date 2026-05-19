@@ -102,6 +102,61 @@ export interface VpsPendingConfig {
   agent_name?: string;
 }
 
+export type MobileAgentClient =
+  | 'claude-desktop'
+  | 'cursor'
+  | 'vscode'
+  | 'hermes'
+  | 'openclaw'
+  | 'mcp'
+  | 'custom'
+  | 'hosted';
+
+export type MobileAgentEnvironment = 'local' | 'vps' | 'hosted' | 'dev';
+
+export type MobileDcpScope =
+  | 'read:wallet.address'
+  | 'sign:solana'
+  | 'vault_get_address'
+  | 'vault_budget_check'
+  | 'vault_sign_tx'
+  | 'vault_sign_message';
+
+export interface MobilePairingBudget {
+  daily: number;
+  currency: 'SOL' | 'USDC';
+  approval_threshold: number;
+}
+
+export interface MobilePairingInvite {
+  type: 'dcp_agent_pairing';
+  version: '1.0';
+  relay_url: string;
+  invite_id: string;
+  agent_public_key: string;
+  agent_name: string;
+  agent_client: MobileAgentClient;
+  environment: MobileAgentEnvironment;
+  requested_scopes: MobileDcpScope[];
+  requested_budget: MobilePairingBudget;
+  created_at: string;
+  expires_at: string;
+  nonce: string;
+  signature?: string;
+}
+
+export interface MobilePendingConfig {
+  invite_id: string;
+  invite_url: string;
+  invite: MobilePairingInvite;
+  service_keypair: {
+    public: string;
+    private: string;
+  };
+  pairing_status: 'pending_mobile_approval';
+  created_at: string;
+}
+
 /**
  * Check if a config is a VPS pending config (not yet approved)
  */

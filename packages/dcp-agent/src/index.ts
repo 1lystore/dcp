@@ -23,11 +23,13 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import qrcode from 'qrcode-terminal';
 import {
   parseAndVerifyGrant,
   createConfigFromGrant,
   exchangePairingGrant,
   saveConfig,
+  saveMobilePendingConfig,
   loadConfig,
   listConfigs,
   deleteConfig,
@@ -39,12 +41,20 @@ import { runMcpServer } from './mcp.js';
 import { runHttpMcpServer } from './http-mcp.js';
 import { AgentError } from './types.js';
 import { processSecretsRequest, fetchSecret, fetchSecrets } from './secrets.js';
+import { createMobilePairingInvite } from './mobile-pairing.js';
 import {
   configureOpenClawCommand,
   installServiceCommand,
   uninstallServiceCommand,
 } from './commands/install-service.js';
-import type { PairOptions, RunOptions, StatusOptions } from './types.js';
+import type {
+  MobileAgentClient,
+  MobileAgentEnvironment,
+  MobileDcpScope,
+  PairOptions,
+  RunOptions,
+  StatusOptions,
+} from './types.js';
 
 // ============================================================================
 // Helpers
@@ -197,6 +207,103 @@ async function pairCommand(grantToken: string, options: PairOptions): Promise<vo
     } else {
       error(err instanceof Error ? err.message : 'Unknown error');
     }
+    process.exit(1);
+  }
+}
+
+interface MobilePairOptions {
+  client?: MobileAgentClient;
+  environment?: MobileAgentEnvironment;
+  name?: string;
+  relayUrl?: string;
+  scope?: string[];
+  dailyBudget?: string;
+  currency?: 'SOL' | 'USDC';
+  approvalThreshold?: string;
+  ttlSeconds?: string;
+  json?: boolean;
+  noQr?: boolean;
+}
+
+function parseNumberOption(value: string | undefined, fallback: number, label: string): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${label} must be a non-negative number`);
+  }
+  return parsed;
+}
+
+function defaultAgentName(client: MobileAgentClient): string {
+  const names: Record<MobileAgentClient, string> = {
+    'claude-desktop': 'Claude Desktop',
+    cursor: 'Cursor',
+    vscode: 'VS Code',
+    hermes: 'Hermes',
+    openclaw: 'OpenClaw',
+    mcp: 'MCP Agent',
+    custom: 'Custom Agent',
+    hosted: 'Hosted Agent',
+  };
+  return names[client] || 'DCP Agent';
+}
+
+async function mobilePairCommand(options: MobilePairOptions): Promise<void> {
+  try {
+    const client = options.client || 'custom';
+    const environment = options.environment || (client === 'hermes' || client === 'openclaw' ? 'vps' : 'local');
+    const scopes = (options.scope?.length ? options.scope : ['read:wallet.address', 'sign:solana']) as MobileDcpScope[];
+    const daily = parseNumberOption(options.dailyBudget, 0, '--daily-budget');
+    const approvalThreshold = parseNumberOption(options.approvalThreshold, 0, '--approval-threshold');
+    const ttlSeconds = parseNumberOption(options.ttlSeconds, 10 * 60, '--ttl-seconds');
+
+    const created = createMobilePairingInvite({
+      client,
+      environment,
+      agentName: options.name || defaultAgentName(client),
+      relayUrl: options.relayUrl,
+      requestedScopes: scopes,
+      requestedBudget: {
+        daily,
+        currency: options.currency || 'USDC',
+        approval_threshold: approvalThreshold,
+      },
+      ttlSeconds,
+    });
+
+    saveMobilePendingConfig(created.pendingConfig);
+
+    if (options.json) {
+      console.log(JSON.stringify({
+        invite: created.invite,
+        invite_url: created.inviteUrl,
+      }, null, 2));
+      return;
+    }
+
+    console.log();
+    console.log(chalk.bold('DCP Mobile Pairing'));
+    console.log(dim('Scan this QR with DCP Mobile, or paste the pairing URL into the app.'));
+    console.log();
+
+    if (!options.noQr) {
+      qrcode.generate(created.inviteUrl, { small: true });
+      console.log();
+    }
+
+    console.log(`  ${dim('Agent:')}      ${created.invite.agent_name}`);
+    console.log(`  ${dim('Client:')}     ${created.invite.agent_client}`);
+    console.log(`  ${dim('Environment:')} ${created.invite.environment}`);
+    console.log(`  ${dim('Invite ID:')}   ${created.invite.invite_id}`);
+    console.log(`  ${dim('Expires:')}     ${created.invite.expires_at}`);
+    console.log();
+    console.log(chalk.bold('Pairing URL:'));
+    console.log(created.inviteUrl);
+    console.log();
+    console.log(dim('Pending agent key material was saved locally with 0600 permissions.'));
+    console.log(dim('The mobile vault must approve the invite before this agent can request DCP actions.'));
+  } catch (err) {
+    error(err instanceof Error ? err.message : 'Failed to create mobile pairing invite');
     process.exit(1);
   }
 }
@@ -549,6 +656,26 @@ program
   .description('Pair with a vault using a pairing grant token')
   .option('-n, --name <name>', 'Override agent name')
   .action(pairCommand);
+
+const mobileCommand = program
+  .command('mobile')
+  .description('DCP Mobile pairing commands');
+
+mobileCommand
+  .command('pair')
+  .description('Create a DCP Mobile pairing invite')
+  .option('--client <client>', 'Agent client: claude-desktop, cursor, vscode, hermes, openclaw, mcp, custom, hosted', 'custom')
+  .option('--environment <environment>', 'Environment: local, vps, hosted, dev')
+  .option('-n, --name <name>', 'Agent display name')
+  .option('--relay-url <url>', 'Mobile relay API/base URL')
+  .option('--scope <scope>', 'Requested scope. Repeat for multiple scopes.', (value, previous: string[] = []) => [...previous, value])
+  .option('--daily-budget <amount>', 'Requested daily budget', '0')
+  .option('--currency <currency>', 'Budget currency: USDC or SOL', 'USDC')
+  .option('--approval-threshold <amount>', 'Auto-approval threshold', '0')
+  .option('--ttl-seconds <seconds>', 'Invite lifetime in seconds', '600')
+  .option('--json', 'Print machine-readable JSON')
+  .option('--no-qr', 'Do not print terminal QR')
+  .action(mobilePairCommand);
 
 program
   .command('run')

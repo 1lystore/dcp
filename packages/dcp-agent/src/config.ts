@@ -13,7 +13,7 @@ import {
   generateSigningKeyPair,
   type SignedPairingGrant,
 } from '@dcprotocol/core';
-import { AgentConfig, AgentError } from './types.js';
+import { AgentConfig, AgentError, type MobilePendingConfig } from './types.js';
 
 // ============================================================================
 // Constants
@@ -148,6 +148,20 @@ function getConfigPath(agentId: string): string {
 export function saveConfig(config: AgentConfig): void {
   ensureConfigDir();
   const configPath = getConfigPath(config.agent_id);
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+}
+
+/**
+ * Save pending mobile pairing material.
+ *
+ * This is not a usable AgentConfig yet. The mobile vault must approve the
+ * invite and return vault identity before this can be promoted to a runtime
+ * agent config.
+ */
+export function saveMobilePendingConfig(config: MobilePendingConfig): void {
+  ensureConfigDir();
+  const safeInviteId = config.invite_id.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const configPath = path.join(CONFIG_DIR, `${safeInviteId}.mobile-pending.json`);
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
 }
 
