@@ -272,7 +272,7 @@ const REMOTE_APPROVAL_FETCH_TIMEOUT_MS = parseInt(
   process.env.DCP_TELEGRAM_APPROVAL_FETCH_TIMEOUT_MS || '8000',
   10
 );
-const BUDGET_LEDGER_SCOPE = 'budget.ledger';
+const BUDGET_LEDGER_SCOPE = 'internal.budget.ledger';
 
 interface RemoteApprovalCommand {
   id: string;

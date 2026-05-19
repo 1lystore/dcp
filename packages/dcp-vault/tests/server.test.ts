@@ -21,6 +21,31 @@ import type { FastifyInstance } from 'fastify';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { Keypair, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
+
+function createUnsignedSolanaTransfer(feePayerAddress: string): string {
+  const tx = new Transaction({
+    feePayer: new PublicKey(feePayerAddress),
+    recentBlockhash: Keypair.generate().publicKey.toBase58(),
+  }).add(
+    SystemProgram.transfer({
+      fromPubkey: new PublicKey(feePayerAddress),
+      toPubkey: Keypair.generate().publicKey,
+      lamports: 1,
+    })
+  );
+
+  return tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
+}
+
+function createX402Payload(nonce: string): string {
+  return Buffer.from(JSON.stringify({
+    x402Version: 1,
+    network: 'solana',
+    resource: `https://api.example.test/${nonce}`,
+    nonce,
+  })).toString('base64');
+}
 
 describe('REST Server', () => {
   let server: FastifyInstance;
@@ -68,6 +93,27 @@ describe('REST Server', () => {
       zeroize(masterKey);
     }
     storage.close(); // Close so server can open its own connection
+
+    fs.writeFileSync(
+      path.join(testVaultDir, 'config.json'),
+      JSON.stringify({
+        daily_budget: {
+          LEDGER: 0.0001,
+          TXLEDGER: 0.0001,
+          REPEAT: 0.0001,
+        },
+        tx_limit: {
+          LEDGER: 0.0001,
+          TXLEDGER: 0.0001,
+          REPEAT: 0.0001,
+        },
+        approval_threshold: {
+          LEDGER: 0.00005,
+          TXLEDGER: 0.00005,
+          REPEAT: 0.00005,
+        },
+      }, null, 2)
+    );
 
     // Build and start the server (will create its own storage connection)
     server = await buildServer();
@@ -182,21 +228,14 @@ describe('REST Server', () => {
     });
 
     it('should record auto-approved x402 spend without an existing wallet session', async () => {
-      const payload = Buffer.from(JSON.stringify({
-        x402Version: 1,
-        network: 'solana',
-        resource: 'https://api.example.test/low-value',
-        nonce: 'test-nonce-auto-approved',
-      })).toString('base64');
-
       const response = await server.inject({
         method: 'POST',
         url: '/v1/vault/sign_x402',
         payload: {
           network: 'solana',
-          payload,
+          payload: createX402Payload('test-nonce-auto-approved'),
           amount: 0.00001,
-          currency: 'USDC',
+          currency: 'LEDGER',
           recipient: 'pay-sh-test-recipient',
           purpose: 'x402 auto-approved ledger test',
           agent_name: 'x402-budget-agent',
@@ -207,12 +246,115 @@ describe('REST Server', () => {
 
       const budgetResponse = await server.inject({
         method: 'GET',
-        url: '/budget/check?amount=0&currency=USDC&chain=solana',
+        url: '/budget/check?amount=0&currency=LEDGER&chain=solana',
       });
 
       expect(budgetResponse.statusCode).toBe(200);
       const budgetBody = JSON.parse(budgetResponse.body);
-      expect(budgetBody.remaining.daily).toBeCloseTo(4.99999, 8);
+      expect(budgetBody.remaining.daily).toBeCloseTo(0.00009, 8);
+
+      const agentsResponse = await server.inject({
+        method: 'GET',
+        url: '/agents',
+      });
+      const agentsBody = JSON.parse(agentsResponse.body);
+      const ledgerSession = agentsBody.agents.find(
+        (agent: { agent_name: string }) => agent.agent_name === 'x402-budget-agent'
+      );
+
+      expect(ledgerSession.granted_scopes).toEqual(['internal.budget.ledger']);
+      expect(ledgerSession.granted_scopes).not.toContain('crypto.wallet.solana');
+      expect(ledgerSession.granted_scopes).not.toContain('sign:solana');
+    });
+
+    it('should record auto-approved sign transaction spend without an existing wallet session', async () => {
+      await server.inject({
+        method: 'POST',
+        url: '/v1/vault/unlock',
+        payload: { passphrase },
+      });
+
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/vault/sign',
+        payload: {
+          chain: 'solana',
+          unsigned_tx: createUnsignedSolanaTransfer(x402WalletAddress),
+          amount: 0.00001,
+          currency: 'TXLEDGER',
+          agent_name: 'sign-budget-agent',
+          idempotency_key: 'sign-budget-agent-auto-approved-1',
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+
+      const budgetResponse = await server.inject({
+        method: 'GET',
+        url: '/budget/check?amount=0&currency=TXLEDGER&chain=solana',
+      });
+
+      expect(budgetResponse.statusCode).toBe(200);
+      const budgetBody = JSON.parse(budgetResponse.body);
+      expect(budgetBody.remaining.daily).toBeCloseTo(0.00009, 8);
+
+      const agentsResponse = await server.inject({
+        method: 'GET',
+        url: '/agents',
+      });
+      const agentsBody = JSON.parse(agentsResponse.body);
+      const ledgerSession = agentsBody.agents.find(
+        (agent: { agent_name: string }) => agent.agent_name === 'sign-budget-agent'
+      );
+
+      expect(ledgerSession.granted_scopes).toEqual(['internal.budget.ledger']);
+      expect(ledgerSession.granted_scopes).not.toContain('crypto.wallet.solana');
+      expect(ledgerSession.granted_scopes).not.toContain('sign:solana');
+    });
+
+    it('should debit repeated under-threshold auto-approved spend until the daily limit is reached', async () => {
+      for (const nonce of ['repeat-auto-1', 'repeat-auto-2']) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/vault/sign_x402',
+          payload: {
+            network: 'solana',
+            payload: createX402Payload(nonce),
+            amount: 0.00004,
+            currency: 'REPEAT',
+            recipient: 'pay-sh-repeat-recipient',
+            purpose: 'x402 repeated auto-approved ledger test',
+            agent_name: 'repeat-budget-agent',
+          },
+        });
+
+        expect(response.statusCode).toBe(200);
+      }
+
+      const remainingResponse = await server.inject({
+        method: 'GET',
+        url: '/budget/check?amount=0&currency=REPEAT&chain=solana',
+      });
+      const remainingBody = JSON.parse(remainingResponse.body);
+      expect(remainingBody.remaining.daily).toBeCloseTo(0.00002, 8);
+
+      const overLimitResponse = await server.inject({
+        method: 'POST',
+        url: '/v1/vault/sign_x402',
+        payload: {
+          network: 'solana',
+          payload: createX402Payload('repeat-auto-3'),
+          amount: 0.00004,
+          currency: 'REPEAT',
+          recipient: 'pay-sh-repeat-recipient',
+          purpose: 'x402 repeated auto-approved ledger test',
+          agent_name: 'repeat-budget-agent',
+        },
+      });
+
+      expect(overLimitResponse.statusCode).toBe(400);
+      const overLimitBody = JSON.parse(overLimitResponse.body);
+      expect(overLimitBody.error.code).toBe('BUDGET_EXCEEDED_DAILY');
     });
   });
 
