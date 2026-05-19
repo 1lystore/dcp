@@ -38,6 +38,7 @@ import {
   findAgent,
 } from './config.js';
 import { AgentProxy } from './proxy.js';
+import { AgentConnection } from './connection.js';
 import { runMcpServer } from './mcp.js';
 import { runHttpMcpServer } from './http-mcp.js';
 import { AgentError } from './types.js';
@@ -228,6 +229,13 @@ interface MobilePairOptions {
   waitSeconds?: string;
 }
 
+interface SmokeOptions {
+  agent?: string;
+  signMessage?: string;
+  forceRelay?: boolean;
+  json?: boolean;
+}
+
 function parseNumberOption(value: string | undefined, fallback: number, label: string): number {
   if (value === undefined) return fallback;
   const parsed = Number(value);
@@ -337,6 +345,81 @@ async function mobilePairCommand(options: MobilePairOptions): Promise<void> {
 function getAgentDataDir(): string {
   const homeDir = process.env.HOME || process.env.USERPROFILE || '.';
   return path.join(homeDir, '.dcp', 'agents');
+}
+
+function loadAgentForCommand(agentIdOrName?: string) {
+  if (agentIdOrName) {
+    const config = findAgent(agentIdOrName);
+    if (!config) {
+      error(`Agent not found: ${agentIdOrName}`);
+      console.log(dim('Available agents:'));
+      listConfigs().forEach((c) => console.log(dim(`  - ${c.agent_name} (${c.agent_id})`)));
+      process.exit(1);
+    }
+    return config;
+  }
+
+  const config = getDefaultAgent();
+  if (!config) {
+    error('No agent configured. Run "dcp-agent mobile pair --wait" first.');
+    process.exit(1);
+  }
+  return config;
+}
+
+async function smokeCommand(options: SmokeOptions): Promise<void> {
+  const config = loadAgentForCommand(options.agent);
+  const connection = new AgentConnection(config, { forceRelay: options.forceRelay ?? true });
+
+  try {
+    if (!options.json) {
+      console.log();
+      console.log(chalk.bold('DCP Agent Smoke Test'));
+      console.log(dim('─'.repeat(50)));
+      console.log(`  ${dim('Agent:')} ${config.agent_name} (${config.agent_id})`);
+      console.log(`  ${dim('Vault:')} ${config.vault_id}`);
+      console.log(`  ${dim('Relay:')} ${config.relay_url}`);
+      console.log();
+    }
+
+    await connection.connect();
+    const address = await connection.getAddress('solana');
+    const result: Record<string, unknown> = { address };
+
+    if (!options.json) {
+      success(`Wallet address: ${address.address}`);
+    }
+
+    if (options.signMessage) {
+      if (!options.json) {
+        console.log(dim('Waiting for mobile approval of sign_message...'));
+      }
+      const signed = await connection.signMessage({
+        chain: 'solana',
+        message: options.signMessage,
+        encoding: 'utf8',
+        description: 'DCP mobile smoke test',
+      });
+      result.signature = signed;
+      if (!options.json) {
+        success(`Signature: ${signed.signature}`);
+      }
+    }
+
+    await connection.close();
+
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+    }
+  } catch (err) {
+    await connection.close().catch(() => undefined);
+    if (options.json) {
+      console.log(JSON.stringify({ error: err instanceof Error ? err.message : 'Smoke test failed' }, null, 2));
+    } else {
+      error(err instanceof Error ? err.message : 'Smoke test failed');
+    }
+    process.exit(1);
+  }
 }
 
 async function runCommand(options: RunOptions): Promise<void> {
@@ -716,6 +799,15 @@ program
   .option('--daemon', 'Run in background (survives SSH disconnect)')
   .option('--force-relay', 'Force relay mode (skip local vault detection)')
   .action(runCommand);
+
+program
+  .command('smoke')
+  .description('Test a paired agent against the vault/relay without configuring Claude')
+  .option('-a, --agent <id>', 'Agent ID or name to test (default: first configured)')
+  .option('--sign-message <message>', 'Also request a mobile-approved Solana message signature')
+  .option('--force-relay', 'Force relay mode (default for smoke)', true)
+  .option('-j, --json', 'Output as JSON')
+  .action(smokeCommand);
 
 program
   .command('status')
