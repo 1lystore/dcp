@@ -35,13 +35,16 @@ import type {
   PairingClaimResponse,
   PairingApprovalStatus,
   StoredPairingClaim,
+  MobilePairingApprovalRequest,
+  MobilePairingStatus,
+  MobilePairingInvite,
 } from './types.js';
 import {
   RelayError,
   DEFAULT_RELAY_CONFIG,
   RELAY_VERSION,
 } from './types.js';
-import { MessageStore, ConnectionStore, RateLimiter, PairingClaimStore } from './store.js';
+import { MessageStore, ConnectionStore, RateLimiter, PairingClaimStore, MobilePairingStore } from './store.js';
 import { authenticateRegistration, authenticateRequest, closeAuth, type AuthConfig } from './auth.js';
 
 // ============================================================================
@@ -54,6 +57,7 @@ export class RelayServer {
   private connectionStore: ConnectionStore;
   private rateLimiter: RateLimiter;
   private pairingClaimStore: PairingClaimStore;
+  private mobilePairingStore: MobilePairingStore;
   private config: RelayConfig;
   private authConfig: AuthConfig;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -74,6 +78,7 @@ export class RelayServer {
       this.config.rateLimitWindowMs
     );
     this.pairingClaimStore = new PairingClaimStore();
+    this.mobilePairingStore = new MobilePairingStore();
 
     this.server = Fastify({
       logger: this.config.debug
@@ -135,6 +140,7 @@ export class RelayServer {
     this.messageStore.close();
     this.rateLimiter.close();
     this.pairingClaimStore.close();
+    this.mobilePairingStore.close();
     closeAuth();
     await this.server.close();
   }
@@ -157,6 +163,7 @@ export class RelayServer {
       ...this.connectionStore.getStats(),
       rateLimit: this.rateLimiter.getStats(),
       pairingClaims: this.pairingClaimStore.getStats(),
+      mobilePairings: this.mobilePairingStore.getStats(),
       timestamp: new Date().toISOString(),
     }));
 
@@ -168,6 +175,7 @@ export class RelayServer {
         const connectionStats = this.connectionStore.getStats();
         const rateLimitStats = this.rateLimiter.getStats();
         const pairingStats = this.pairingClaimStore.getStats();
+        const mobilePairingStats = this.mobilePairingStore.getStats();
 
         const format = request.query.format;
 
@@ -200,6 +208,9 @@ export class RelayServer {
             '# HELP dcp_relay_pairing_claims_pending Pending pairing claims',
             '# TYPE dcp_relay_pairing_claims_pending gauge',
             `dcp_relay_pairing_claims_pending ${pairingStats.pendingClaims}`,
+            '# HELP dcp_relay_mobile_pairings_total Total mobile pairings',
+            '# TYPE dcp_relay_mobile_pairings_total gauge',
+            `dcp_relay_mobile_pairings_total ${mobilePairingStats.totalMobilePairings}`,
             '',
           ];
           reply.header('Content-Type', 'text/plain; charset=utf-8');
@@ -212,6 +223,7 @@ export class RelayServer {
           connections: connectionStats,
           rateLimit: rateLimitStats,
           pairingClaims: pairingStats,
+          mobilePairings: mobilePairingStats,
           websockets: {
             vaultConnections: this.wsConnections.size,
             clientConnections: this.clientSockets.size,
@@ -308,6 +320,63 @@ export class RelayServer {
         }
         this.inviteVaultMap.set(invite_id, vault_id);
         return reply.send({ success: true });
+      }
+    );
+
+    // ========================================================================
+    // DCP Mobile Pairing Routes (Agent QR → Mobile approval → Agent polling)
+    // ========================================================================
+
+    this.server.post<{
+      Params: { inviteId: string };
+      Body: MobilePairingApprovalRequest;
+    }>(
+      '/v1/mobile/pairings/:inviteId/approve',
+      async (request, reply) => {
+        return this.handleMobilePairingApprove(
+          request.params.inviteId,
+          request.body,
+          reply
+        );
+      }
+    );
+
+    this.server.post<{
+      Params: { inviteId: string };
+      Body: { denied_reason?: string };
+    }>(
+      '/v1/mobile/pairings/:inviteId/deny',
+      async (request, reply) => {
+        const record = this.mobilePairingStore.deny(
+          request.params.inviteId,
+          request.body?.denied_reason
+        );
+        return reply.send({
+          success: true,
+          invite_id: record.invite_id,
+          status: record.status,
+        });
+      }
+    );
+
+    this.server.get<{ Params: { inviteId: string } }>(
+      '/v1/mobile/pairings/:inviteId/status',
+      async (request, reply) => {
+        return this.handleMobilePairingStatus(request.params.inviteId, reply);
+      }
+    );
+
+    this.server.post<{
+      Params: { vaultId: string };
+      Body: { public_key: string; signing_public_key?: string };
+    }>(
+      '/v1/mobile/vaults/:vaultId/online',
+      async (request, reply) => {
+        if (!request.body?.public_key) {
+          return reply.status(400).send({ error: 'Missing public_key' });
+        }
+        this.connectionStore.register(request.params.vaultId, request.body.public_key);
+        return reply.send({ success: true, vault_id: request.params.vaultId });
       }
     );
   }
@@ -674,6 +743,61 @@ export class RelayServer {
       status,
       agent_id,
     });
+  }
+
+  private async handleMobilePairingApprove(
+    inviteId: string,
+    body: MobilePairingApprovalRequest,
+    reply: FastifyReply
+  ): Promise<unknown> {
+    const validationError = this.validateMobileApproval(inviteId, body);
+    if (validationError) {
+      return reply.status(400).send({ success: false, error: validationError });
+    }
+
+    const record = this.mobilePairingStore.approve(body);
+
+    if (this.config.debug) {
+      console.log(
+        `Mobile pairing approved: ${record.invite_id} (agent: ${record.agent_id}, vault: ${record.vault_id})`
+      );
+    }
+
+    return reply.send({
+      success: true,
+      invite_id: record.invite_id,
+      status: record.status,
+      agent_id: record.agent_id,
+      vault_id: record.vault_id,
+      vault_hpke_public_key: record.vault_hpke_public_key,
+      vault_signing_public_key: record.vault_signing_public_key,
+    });
+  }
+
+  private async handleMobilePairingStatus(
+    inviteId: string,
+    reply: FastifyReply
+  ): Promise<unknown> {
+    const record = this.mobilePairingStore.get(inviteId);
+
+    if (!record) {
+      return reply.send({
+        status: 'pending',
+        invite_id: inviteId,
+      } satisfies MobilePairingStatus);
+    }
+
+    return reply.send({
+      status: record.status,
+      invite_id: record.invite_id,
+      agent_id: record.agent_id,
+      vault_id: record.vault_id,
+      vault_hpke_public_key: record.vault_hpke_public_key,
+      vault_signing_public_key: record.vault_signing_public_key,
+      approved_scopes: record.approved_scopes,
+      approved_budget: record.approved_budget,
+      error: record.denied_reason,
+    } satisfies MobilePairingStatus);
   }
 
   // --------------------------------------------------------------------------
@@ -1154,6 +1278,95 @@ export class RelayServer {
     }
 
     return null;
+  }
+
+  private validateMobileApproval(
+    inviteId: string,
+    body: MobilePairingApprovalRequest
+  ): string | null {
+    if (!body || typeof body !== 'object') {
+      return 'Missing approval body';
+    }
+
+    const invite = body.invite;
+    if (!invite || typeof invite !== 'object') {
+      return 'Missing pairing invite';
+    }
+    if (invite.invite_id !== inviteId) {
+      return 'Invite ID mismatch';
+    }
+    if (!body.vault_id || !body.agent_id) {
+      return 'Missing vault_id or agent_id';
+    }
+    if (!body.vault_hpke_public_key || !body.vault_signing_public_key) {
+      return 'Missing vault relay public keys';
+    }
+    if (!Array.isArray(body.approved_scopes) || body.approved_scopes.length === 0) {
+      return 'approved_scopes must be a non-empty array';
+    }
+    if (!body.approved_budget || typeof body.approved_budget.daily !== 'number') {
+      return 'approved_budget is required';
+    }
+
+    const inviteError = this.validateMobileInvite(invite);
+    if (inviteError) {
+      return inviteError;
+    }
+
+    const requestedScopes = new Set(invite.requested_scopes);
+    const unrequestedScope = body.approved_scopes.find((scope) => !requestedScopes.has(scope));
+    if (unrequestedScope) {
+      return `Approved scope was not requested: ${unrequestedScope}`;
+    }
+
+    return null;
+  }
+
+  private validateMobileInvite(invite: MobilePairingInvite): string | null {
+    if (invite.type !== 'dcp_agent_pairing' || invite.version !== '1.0') {
+      return 'Unsupported mobile pairing invite';
+    }
+    if (!invite.signature) {
+      return 'Invite signature is required';
+    }
+
+    const expiresAt = new Date(invite.expires_at).getTime();
+    if (!Number.isFinite(expiresAt)) {
+      return 'Invalid invite expiry';
+    }
+    if (Date.now() > expiresAt) {
+      return 'Invite expired';
+    }
+
+    try {
+      const { signature: _signature, ...unsignedInvite } = invite;
+      const message = Buffer.from(this.canonicalJson(unsignedInvite), 'utf8');
+      const signature = Buffer.from(invite.signature, 'base64');
+      const publicKey = Buffer.from(invite.agent_public_key, 'base64');
+      if (!ed25519.verify(signature, message, publicKey)) {
+        return 'Invalid invite signature';
+      }
+    } catch (err) {
+      return 'Failed to verify invite signature: ' + (err instanceof Error ? err.message : 'unknown error');
+    }
+
+    return null;
+  }
+
+  private canonicalJson(value: unknown): string {
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => this.canonicalJson(item)).join(',')}]`;
+    }
+
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${this.canonicalJson(record[key])}`)
+        .join(',')}}`;
+    }
+
+    return JSON.stringify(value);
   }
 
   // --------------------------------------------------------------------------

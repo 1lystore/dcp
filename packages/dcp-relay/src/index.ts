@@ -21,7 +21,7 @@
 // ============================================================================
 
 export { RelayServer } from './relay.js';
-export { MessageStore, ConnectionStore, RateLimiter } from './store.js';
+export { MessageStore, ConnectionStore, RateLimiter, MobilePairingStore } from './store.js';
 export {
   authenticateRegistration,
   verifyRegistrationSignature,
@@ -48,6 +48,14 @@ export {
   type StoredPairingClaim,
   type PairingClaimResponse,
   type PairingApprovalStatus,
+  type MobileAgentClient,
+  type MobileAgentEnvironment,
+  type MobileDcpScope,
+  type MobilePairingBudget,
+  type MobilePairingInvite,
+  type MobilePairingApprovalRequest,
+  type MobilePairingRecord,
+  type MobilePairingStatus,
 
   // Constants
   RELAY_VERSION,

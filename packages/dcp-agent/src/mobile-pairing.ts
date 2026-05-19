@@ -4,6 +4,7 @@ import type {
   MobileAgentClient,
   MobileAgentEnvironment,
   MobileDcpScope,
+  MobilePairingApprovalStatus,
   MobilePairingBudget,
   MobilePairingInvite,
   MobilePendingConfig,
@@ -56,8 +57,20 @@ export interface CreatedMobilePairingInvite {
   pendingConfig: MobilePendingConfig;
 }
 
-function canonicalJson(value: Record<string, unknown>): string {
-  return JSON.stringify(value, Object.keys(value).sort());
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
+  }
+
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(',')}}`;
+  }
+
+  return JSON.stringify(value);
 }
 
 function encodeMobilePairingInvite(invite: MobilePairingInvite): string {
@@ -134,5 +147,44 @@ export function createMobilePairingInvite(
       pairing_status: 'pending_mobile_approval',
       created_at: createdAt.toISOString(),
     },
+  };
+}
+
+export async function getMobilePairingStatus(
+  relayUrl: string,
+  inviteId: string
+): Promise<MobilePairingApprovalStatus> {
+  const response = await fetch(
+    `${relayUrl.replace(/\/$/, '')}/v1/mobile/pairings/${encodeURIComponent(inviteId)}/status`
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch mobile pairing status (${response.status})`);
+  }
+
+  return (await response.json()) as MobilePairingApprovalStatus;
+}
+
+export async function waitForMobilePairingApproval(
+  relayUrl: string,
+  inviteId: string,
+  options: { timeoutMs?: number; pollIntervalMs?: number } = {}
+): Promise<MobilePairingApprovalStatus> {
+  const timeoutMs = options.timeoutMs ?? 10 * 60 * 1000;
+  const pollIntervalMs = options.pollIntervalMs ?? 2000;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const status = await getMobilePairingStatus(relayUrl, inviteId);
+    if (status.status !== 'pending') {
+      return status;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+
+  return {
+    status: 'expired',
+    invite_id: inviteId,
+    error: 'Timed out waiting for mobile approval',
   };
 }

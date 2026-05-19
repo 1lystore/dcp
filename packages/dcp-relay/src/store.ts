@@ -20,6 +20,8 @@ import type {
   RelayConfig,
   PairingClaim,
   StoredPairingClaim,
+  MobilePairingApprovalRequest,
+  MobilePairingRecord,
 } from './types.js';
 import { RelayError, MESSAGE_TTL_MS } from './types.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -768,6 +770,139 @@ export class PairingClaimStore {
   /**
    * Stop cleanup interval
    */
+  close(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+  }
+}
+
+// ============================================================================
+// DCP Mobile Pairing Store
+// ============================================================================
+
+/** Mobile pairing status TTL: enough time for the QR terminal to poll. */
+const MOBILE_PAIRING_TTL_MS = 10 * 60 * 1000;
+const MOBILE_PAIRING_RESOLVED_TTL_MS = 60 * 60 * 1000;
+
+export class MobilePairingStore {
+  private records: Map<string, MobilePairingRecord> = new Map();
+  private cleanupInterval: ReturnType<typeof setInterval> | null = null;
+
+  constructor() {
+    this.cleanupInterval = setInterval(() => {
+      this.cleanup();
+    }, 60_000);
+  }
+
+  approve(request: MobilePairingApprovalRequest): MobilePairingRecord {
+    const now = Date.now();
+    const existing = this.records.get(request.invite.invite_id);
+    if (existing && existing.status === 'approved') {
+      return existing;
+    }
+
+    const record: MobilePairingRecord = {
+      invite_id: request.invite.invite_id,
+      invite: request.invite,
+      received_at: existing?.received_at ?? now,
+      status: 'approved',
+      vault_id: request.vault_id,
+      vault_hpke_public_key: request.vault_hpke_public_key,
+      vault_signing_public_key: request.vault_signing_public_key,
+      agent_id: request.agent_id,
+      approved_scopes: request.approved_scopes,
+      approved_budget: request.approved_budget,
+      resolved_at: now,
+    };
+
+    this.records.set(record.invite_id, record);
+    return record;
+  }
+
+  deny(inviteId: string, deniedReason?: string): MobilePairingRecord {
+    const now = Date.now();
+    const existing = this.records.get(inviteId);
+    const record: MobilePairingRecord = {
+      invite_id: inviteId,
+      invite: existing?.invite ?? {
+        type: 'dcp_agent_pairing',
+        version: '1.0',
+        relay_url: '',
+        invite_id: inviteId,
+        agent_public_key: '',
+        agent_name: '',
+        agent_client: 'custom',
+        environment: 'dev',
+        requested_scopes: [],
+        requested_budget: { daily: 0, currency: 'USDC', approval_threshold: 0 },
+        created_at: new Date(now).toISOString(),
+        expires_at: new Date(now + MOBILE_PAIRING_TTL_MS).toISOString(),
+        nonce: '',
+      },
+      received_at: existing?.received_at ?? now,
+      status: 'denied',
+      resolved_at: now,
+      denied_reason: deniedReason,
+    };
+
+    this.records.set(inviteId, record);
+    return record;
+  }
+
+  get(inviteId: string): MobilePairingRecord | undefined {
+    const record = this.records.get(inviteId);
+    if (!record) return undefined;
+
+    const now = Date.now();
+    if (record.status === 'approved' || record.status === 'denied') {
+      return record;
+    }
+
+    if (now - record.received_at > MOBILE_PAIRING_TTL_MS) {
+      record.status = 'expired';
+      record.resolved_at = now;
+    }
+
+    return record;
+  }
+
+  cleanup(): number {
+    const now = Date.now();
+    let removed = 0;
+
+    for (const [inviteId, record] of this.records) {
+      if (record.status !== 'approved' && record.status !== 'denied' && now - record.received_at > MOBILE_PAIRING_TTL_MS) {
+        record.status = 'expired';
+        record.resolved_at = now;
+      }
+
+      if (record.resolved_at && now - record.resolved_at > MOBILE_PAIRING_RESOLVED_TTL_MS) {
+        this.records.delete(inviteId);
+        removed++;
+      }
+    }
+
+    return removed;
+  }
+
+  getStats(): { totalMobilePairings: number; approvedMobilePairings: number; deniedMobilePairings: number } {
+    let approved = 0;
+    let denied = 0;
+
+    for (const record of this.records.values()) {
+      if (record.status === 'approved') approved++;
+      if (record.status === 'denied') denied++;
+    }
+
+    return {
+      totalMobilePairings: this.records.size,
+      approvedMobilePairings: approved,
+      deniedMobilePairings: denied,
+    };
+  }
+
   close(): void {
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);

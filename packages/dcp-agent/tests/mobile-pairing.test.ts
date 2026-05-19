@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { verifySignature } from '@dcprotocol/core';
-import { createMobilePairingInvite } from '../src/mobile-pairing.js';
+import { canonicalJson, createMobilePairingInvite } from '../src/mobile-pairing.js';
 
 function canonicalInvitePayload(invite: Record<string, unknown>): string {
   const { signature: _signature, ...unsigned } = invite;
-  return JSON.stringify(unsigned, Object.keys(unsigned).sort());
+  return canonicalJson(unsigned);
 }
 
 describe('mobile pairing', () => {
@@ -49,6 +49,35 @@ describe('mobile pairing', () => {
     );
 
     expect(valid).toBe(true);
+  });
+
+  it('covers nested budget fields in the invite signature', () => {
+    const { invite } = createMobilePairingInvite({
+      client: 'custom',
+      environment: 'dev',
+      agentName: 'Budget Integrity Agent',
+      requestedBudget: {
+        daily: 1,
+        currency: 'USDC',
+        approval_threshold: 0,
+      },
+    });
+
+    const tampered = {
+      ...invite,
+      requested_budget: {
+        ...invite.requested_budget,
+        daily: 999,
+      },
+    };
+
+    const valid = verifySignature(
+      Buffer.from(canonicalInvitePayload(tampered), 'utf8'),
+      Buffer.from(invite.signature!, 'base64'),
+      Buffer.from(invite.agent_public_key, 'base64')
+    );
+
+    expect(valid).toBe(false);
   });
 
   it('rejects unsupported MVP scopes', () => {

@@ -304,3 +304,87 @@ export interface PairingApprovalStatus {
   vault_id?: string;
   error?: string;
 }
+
+// ============================================================================
+// DCP Mobile Pairing Types (Agent QR → Mobile approval → Agent polling)
+// ============================================================================
+
+export type MobileAgentClient =
+  | 'claude-desktop'
+  | 'cursor'
+  | 'vscode'
+  | 'hermes'
+  | 'openclaw'
+  | 'mcp'
+  | 'custom'
+  | 'hosted';
+
+export type MobileAgentEnvironment = 'local' | 'vps' | 'hosted' | 'dev';
+
+export type MobileDcpScope =
+  | 'read:wallet.address'
+  | 'sign:solana'
+  | 'vault_get_address'
+  | 'vault_budget_check'
+  | 'vault_sign_tx'
+  | 'vault_sign_message';
+
+export interface MobilePairingBudget {
+  daily: number;
+  currency: 'SOL' | 'USDC';
+  approval_threshold: number;
+}
+
+export interface MobilePairingInvite {
+  type: 'dcp_agent_pairing';
+  version: '1.0';
+  relay_url: string;
+  invite_id: string;
+  agent_public_key: string;
+  agent_name: string;
+  agent_client: MobileAgentClient;
+  environment: MobileAgentEnvironment;
+  requested_scopes: MobileDcpScope[];
+  requested_budget: MobilePairingBudget;
+  created_at: string;
+  expires_at: string;
+  nonce: string;
+  signature?: string;
+}
+
+export interface MobilePairingApprovalRequest {
+  invite: MobilePairingInvite;
+  vault_id: string;
+  agent_id: string;
+  vault_hpke_public_key: string;
+  vault_signing_public_key: string;
+  approved_scopes: MobileDcpScope[];
+  approved_budget: MobilePairingBudget;
+}
+
+export interface MobilePairingRecord {
+  invite_id: string;
+  invite: MobilePairingInvite;
+  received_at: number;
+  status: 'approved' | 'denied' | 'expired';
+  vault_id?: string;
+  vault_hpke_public_key?: string;
+  vault_signing_public_key?: string;
+  agent_id?: string;
+  approved_scopes?: MobileDcpScope[];
+  approved_budget?: MobilePairingBudget;
+  resolved_at?: number;
+  denied_reason?: string;
+}
+
+export interface MobilePairingStatus {
+  status: 'pending' | 'approved' | 'denied' | 'expired' | 'not_found';
+  invite_id?: string;
+  agent_id?: string;
+  vault_id?: string;
+  vault_hpke_public_key?: string;
+  vault_signing_public_key?: string;
+  approved_scopes?: MobileDcpScope[];
+  approved_budget?: MobilePairingBudget;
+  error?: string;
+}

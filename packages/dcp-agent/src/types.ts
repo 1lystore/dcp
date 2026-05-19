@@ -157,6 +157,18 @@ export interface MobilePendingConfig {
   created_at: string;
 }
 
+export interface MobilePairingApprovalStatus {
+  status: 'pending' | 'approved' | 'denied' | 'expired' | 'not_found';
+  invite_id?: string;
+  agent_id?: string;
+  vault_id?: string;
+  vault_hpke_public_key?: string;
+  vault_signing_public_key?: string;
+  approved_scopes?: MobileDcpScope[];
+  approved_budget?: MobilePairingBudget;
+  error?: string;
+}
+
 /**
  * Check if a config is a VPS pending config (not yet approved)
  */

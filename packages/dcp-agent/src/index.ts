@@ -30,6 +30,7 @@ import {
   exchangePairingGrant,
   saveConfig,
   saveMobilePendingConfig,
+  promoteMobilePendingConfig,
   loadConfig,
   listConfigs,
   deleteConfig,
@@ -41,7 +42,7 @@ import { runMcpServer } from './mcp.js';
 import { runHttpMcpServer } from './http-mcp.js';
 import { AgentError } from './types.js';
 import { processSecretsRequest, fetchSecret, fetchSecrets } from './secrets.js';
-import { createMobilePairingInvite } from './mobile-pairing.js';
+import { createMobilePairingInvite, waitForMobilePairingApproval } from './mobile-pairing.js';
 import {
   configureOpenClawCommand,
   installServiceCommand,
@@ -223,6 +224,8 @@ interface MobilePairOptions {
   ttlSeconds?: string;
   json?: boolean;
   noQr?: boolean;
+  wait?: boolean;
+  waitSeconds?: string;
 }
 
 function parseNumberOption(value: string | undefined, fallback: number, label: string): number {
@@ -302,6 +305,29 @@ async function mobilePairCommand(options: MobilePairOptions): Promise<void> {
     console.log();
     console.log(dim('Pending agent key material was saved locally with 0600 permissions.'));
     console.log(dim('The mobile vault must approve the invite before this agent can request DCP actions.'));
+
+    if (options.wait) {
+      const waitSeconds = parseNumberOption(options.waitSeconds, ttlSeconds, '--wait-seconds');
+      console.log();
+      console.log(dim(`Waiting up to ${waitSeconds}s for DCP Mobile approval...`));
+      const status = await waitForMobilePairingApproval(
+        created.invite.relay_url,
+        created.invite.invite_id,
+        { timeoutMs: waitSeconds * 1000 }
+      );
+
+      if (status.status !== 'approved') {
+        error(`Mobile pairing ${status.status}${status.error ? `: ${status.error}` : ''}`);
+        process.exit(1);
+      }
+
+      success('Mobile pairing approved');
+      console.log(`  ${dim('Agent ID:')} ${status.agent_id}`);
+      console.log(`  ${dim('Vault ID:')} ${status.vault_id}`);
+      const config = promoteMobilePendingConfig(created.pendingConfig, status);
+      console.log(dim(`Saved agent config: ${config.agent_id}`));
+      console.log(dim(`Next: run "dcp-agent run --agent ${config.agent_id} --mode mcp" from your MCP host.`));
+    }
   } catch (err) {
     error(err instanceof Error ? err.message : 'Failed to create mobile pairing invite');
     process.exit(1);
@@ -675,6 +701,8 @@ mobileCommand
   .option('--ttl-seconds <seconds>', 'Invite lifetime in seconds', '600')
   .option('--json', 'Print machine-readable JSON')
   .option('--no-qr', 'Do not print terminal QR')
+  .option('--wait', 'Wait until DCP Mobile approves or denies the pairing')
+  .option('--wait-seconds <seconds>', 'How long --wait should poll for approval')
   .action(mobilePairCommand);
 
 program
