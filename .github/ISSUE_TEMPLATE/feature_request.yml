@@ -1,0 +1,106 @@
+name: Feature request
+description: Suggest an idea for this project.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for product ideas, developer experience improvements, and protocol/API requests.
+
+        DCP treats security and user experience as core product requirements. Please include any approval, signing, privacy, or recovery implications.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user pain or workflow limitation are you trying to solve?
+      placeholder: It is hard to...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the feature in plain language.
+    validations:
+      required: true
+  - type: dropdown
+    id: user_type
+    attributes:
+      label: Who is this for?
+      multiple: true
+      options:
+        - Wallet owner
+        - AI agent user
+        - App developer
+        - MCP user
+        - Protocol integrator
+        - OSS contributor
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      multiple: true
+      options:
+        - Desktop app
+        - Mobile app
+        - Vault
+        - Agent
+        - MCP
+        - Telegram approvals
+        - Relay
+        - CLI
+        - SDK / client
+        - Documentation
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: ux
+    attributes:
+      label: UX expectations
+      description: What should the user see, click, approve, or understand?
+      placeholder: The user should be able to...
+    validations:
+      required: true
+  - type: dropdown
+    id: security_area
+    attributes:
+      label: Security or privacy considerations
+      description: Select any areas that need special care.
+      multiple: true
+      options:
+        - None known
+        - Approval flow
+        - Wallet/signing
+        - Budget enforcement
+        - Secret/key storage
+        - Logs or notifications
+        - Agent permissions
+        - User privacy
+        - Recovery / backup
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: mvp
+    attributes:
+      label: MVP scope
+      description: What is the smallest useful version of this feature?
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you consider?
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I described any security or privacy implications I am aware of.
+          required: true
