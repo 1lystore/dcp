@@ -262,9 +262,7 @@ describe('REST Server', () => {
         (agent: { agent_name: string }) => agent.agent_name === 'x402-budget-agent'
       );
 
-      expect(ledgerSession.granted_scopes).toEqual(['internal.budget.ledger']);
-      expect(ledgerSession.granted_scopes).not.toContain('crypto.wallet.solana');
-      expect(ledgerSession.granted_scopes).not.toContain('sign:solana');
+      expect(ledgerSession).toBeUndefined();
     });
 
     it('should record auto-approved sign transaction spend without an existing wallet session', async () => {
@@ -307,9 +305,7 @@ describe('REST Server', () => {
         (agent: { agent_name: string }) => agent.agent_name === 'sign-budget-agent'
       );
 
-      expect(ledgerSession.granted_scopes).toEqual(['internal.budget.ledger']);
-      expect(ledgerSession.granted_scopes).not.toContain('crypto.wallet.solana');
-      expect(ledgerSession.granted_scopes).not.toContain('sign:solana');
+      expect(ledgerSession).toBeUndefined();
     });
 
     it('should debit repeated under-threshold auto-approved spend until the daily limit is reached', async () => {
@@ -337,6 +333,17 @@ describe('REST Server', () => {
       });
       const remainingBody = JSON.parse(remainingResponse.body);
       expect(remainingBody.remaining.daily).toBeCloseTo(0.00002, 8);
+
+      const agentsResponse = await server.inject({
+        method: 'GET',
+        url: '/agents',
+      });
+      const agentsBody = JSON.parse(agentsResponse.body);
+      const ledgerSession = agentsBody.agents.find(
+        (agent: { agent_name: string }) => agent.agent_name === 'repeat-budget-agent'
+      );
+
+      expect(ledgerSession).toBeUndefined();
 
       const overLimitResponse = await server.inject({
         method: 'POST',

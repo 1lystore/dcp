@@ -274,6 +274,11 @@ const REMOTE_APPROVAL_FETCH_TIMEOUT_MS = parseInt(
 );
 const BUDGET_LEDGER_SCOPE = 'internal.budget.ledger';
 
+function isInternalOnlySession(session: { granted_scopes?: string[] }): boolean {
+  const scopes = session.granted_scopes || [];
+  return scopes.length > 0 && scopes.every((scope) => scope.startsWith('internal.'));
+}
+
 interface RemoteApprovalCommand {
   id: string;
   consent_id: string;
@@ -2584,7 +2589,7 @@ async function buildServer(): Promise<FastifyInstance> {
   // ============================================================================
 
   server.get('/agents', async () => {
-    const sessions = storage.listActiveSessions();
+    const sessions = storage.listActiveSessions().filter((session) => !isInternalOnlySession(session));
 
     return {
       agents: sessions.map((s) => ({
