@@ -21,6 +21,7 @@ import chalk from 'chalk';
 import ora, { type Ora } from 'ora';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import qrcode from 'qrcode-terminal';
@@ -228,6 +229,7 @@ interface MobilePairOptions {
   noQr?: boolean;
   wait?: boolean;
   waitSeconds?: string;
+  configureMcp?: boolean;
 }
 
 interface SmokeOptions {
@@ -258,6 +260,80 @@ function defaultAgentName(client: MobileAgentClient): string {
     hosted: 'Hosted Agent',
   };
   return names[client] || 'DCP Agent';
+}
+
+function mcpServerConfig(agentId: string): { command: string; args: string[] } {
+  return {
+    command: 'npx',
+    args: ['-y', '@dcprotocol/agent', 'run', '--mode', 'mcp', '--agent', agentId, '--force-relay'],
+  };
+}
+
+function claudeDesktopConfigPath(): string | null {
+  const home = os.homedir();
+  if (process.platform === 'darwin') {
+    return path.join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json');
+  }
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA;
+    return appData ? path.join(appData, 'Claude', 'claude_desktop_config.json') : null;
+  }
+  return path.join(home, '.config', 'Claude', 'claude_desktop_config.json');
+}
+
+function readJsonFile(filePath: string): Record<string, unknown> {
+  if (!fs.existsSync(filePath)) return {};
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    return raw.trim() ? JSON.parse(raw) as Record<string, unknown> : {};
+  } catch {
+    throw new Error(`Could not parse existing MCP config: ${filePath}`);
+  }
+}
+
+function upsertClaudeDesktopMcp(agentId: string): string {
+  const configPath = claudeDesktopConfigPath();
+  if (!configPath) {
+    throw new Error('Could not locate Claude Desktop config path on this OS');
+  }
+
+  const config = readJsonFile(configPath);
+  const mcpServers = config.mcpServers && typeof config.mcpServers === 'object'
+    ? config.mcpServers as Record<string, unknown>
+    : {};
+  mcpServers.dcp = mcpServerConfig(agentId);
+  config.mcpServers = mcpServers;
+
+  fs.mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+  return configPath;
+}
+
+function printMcpInstallHelp(client: MobileAgentClient, agentId: string): void {
+  const serverConfig = mcpServerConfig(agentId);
+  if (client === 'cursor') {
+    const deepLink = `cursor://anysphere.cursor-deeplink/mcp/install?name=dcp&config=${Buffer.from(JSON.stringify(serverConfig)).toString('base64')}`;
+    console.log();
+    console.log(chalk.bold('Cursor MCP install link:'));
+    console.log(deepLink);
+    return;
+  }
+
+  console.log();
+  console.log(chalk.bold('MCP config:'));
+  console.log(JSON.stringify({ mcpServers: { dcp: serverConfig } }, null, 2));
+}
+
+function configureMcpForClient(client: MobileAgentClient, agentId: string): void {
+  if (client === 'claude-desktop') {
+    const configPath = upsertClaudeDesktopMcp(agentId);
+    success('Claude Desktop MCP config updated');
+    console.log(`  ${dim('Config:')} ${configPath}`);
+    console.log(dim('Restart Claude Desktop to load the DCP mobile-backed server.'));
+    return;
+  }
+
+  printMcpInstallHelp(client, agentId);
 }
 
 async function mobilePairCommand(options: MobilePairOptions): Promise<void> {
@@ -337,12 +413,24 @@ async function mobilePairCommand(options: MobilePairOptions): Promise<void> {
       console.log(`  ${dim('Vault ID:')} ${status.vault_id}`);
       const config = promoteMobilePendingConfig(created.pendingConfig, status);
       console.log(dim(`Saved agent config: ${config.agent_id}`));
-      console.log(dim(`Next: run "dcp-agent run --agent ${config.agent_id} --mode mcp" from your MCP host.`));
+      if (options.configureMcp) {
+        configureMcpForClient(client, config.agent_id);
+      } else {
+        console.log(dim(`Next: run "dcp-agent run --agent ${config.agent_id} --mode mcp --force-relay" from your MCP host.`));
+      }
     }
   } catch (err) {
     error(err instanceof Error ? err.message : 'Failed to create mobile pairing invite');
     process.exit(1);
   }
+}
+
+async function mobileInstallCommand(options: MobilePairOptions): Promise<void> {
+  await mobilePairCommand({
+    ...options,
+    wait: true,
+    configureMcp: options.configureMcp ?? true,
+  });
 }
 
 function getAgentDataDir(): string {
@@ -790,7 +878,28 @@ mobileCommand
   .option('--no-qr', 'Do not print terminal QR')
   .option('--wait', 'Wait until DCP Mobile approves or denies the pairing')
   .option('--wait-seconds <seconds>', 'How long --wait should poll for approval')
+  .option('--configure-mcp', 'After approval, configure the local MCP client when supported')
   .action(mobilePairCommand);
+
+mobileCommand
+  .command('install')
+  .description('Pair DCP Mobile and configure this MCP client when supported')
+  .option('--client <client>', 'Agent client: claude-desktop, cursor, vscode, hermes, openclaw, mcp, custom, hosted', 'claude-desktop')
+  .option('--environment <environment>', 'Environment: local, vps, hosted, dev')
+  .option('-n, --name <name>', 'Agent display name')
+  .option('--agent-id <id>', 'Agent ID to request. Defaults to canonical DCP ID for known clients.')
+  .option('--relay-url <url>', 'Mobile relay API/base URL')
+  .option('--scope <scope>', 'Requested scope. Repeat for multiple scopes.', (value, previous: string[] = []) => [...previous, value])
+  .option('--daily-budget <amount>', 'Requested daily budget', '0')
+  .option('--currency <currency>', 'Budget currency: USDC or SOL', 'USDC')
+  .option('--approval-threshold <amount>', 'Auto-approval threshold', '0')
+  .option('--ttl-seconds <seconds>', 'Invite lifetime in seconds', '600')
+  .option('--json', 'Print machine-readable JSON')
+  .option('--no-qr', 'Do not print terminal QR')
+  .option('--wait-seconds <seconds>', 'How long to wait for approval')
+  .option('--configure-mcp', 'Configure the local MCP client when supported', true)
+  .option('--no-configure-mcp', 'Do not write MCP client config; print next steps only')
+  .action(mobileInstallCommand);
 
 program
   .command('run')
