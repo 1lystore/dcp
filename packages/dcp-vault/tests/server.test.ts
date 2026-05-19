@@ -161,6 +161,92 @@ describe('REST Server', () => {
       expect(body.session_id).toBe(x402SessionId);
     });
 
+    it('should sign a generic Solana payment message with protocol context', async () => {
+      await server.inject({
+        method: 'POST',
+        url: '/v1/vault/unlock',
+        payload: { passphrase },
+      });
+
+      const payload = Buffer.from('pay-sh-mpp-message').toString('base64');
+
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/vault/sign_payment_message',
+        payload: {
+          chain: 'solana',
+          protocol: 'mpp',
+          payload,
+          amount: 0.00001,
+          currency: 'SOL',
+          recipient: 'pay-sh-test-recipient',
+          resource: 'https://api.example.test/mpp',
+          purpose: 'MPP endpoint test',
+          agent_name: 'x402-test-agent',
+          session_id: x402SessionId,
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.signature).toMatch(/^[1-9A-HJ-NP-Za-km-z]+$/);
+      expect(body.public_key).toBe(x402WalletAddress);
+      expect(body.chain).toBe('solana');
+      expect(body.session_id).toBe(x402SessionId);
+    });
+
+    it('should consume approved consent when retrying a USDC payment message signature', async () => {
+      await server.inject({
+        method: 'POST',
+        url: '/v1/vault/unlock',
+        payload: { passphrase },
+      });
+
+      const payload = Buffer.from('payment-message-approval-retry').toString('base64');
+      const request = {
+        chain: 'solana',
+        protocol: 'mpp',
+        payload,
+        amount: 0.01,
+        currency: 'USDC',
+        recipient: 'payment-test-recipient',
+        resource: 'https://api.example.test/paywalled',
+        purpose: 'Payment approval retry test',
+        agent_name: 'payment-retry-agent',
+      };
+
+      const firstResponse = await server.inject({
+        method: 'POST',
+        url: '/v1/vault/sign_payment_message',
+        payload: request,
+      });
+
+      expect(firstResponse.statusCode).toBe(200);
+      const firstBody = JSON.parse(firstResponse.body);
+      expect(firstBody.requires_consent).toBe(true);
+      expect(firstBody.consent_id).toBeTruthy();
+
+      const approvalStorage = new VaultStorage(testVaultDir);
+      try {
+        expect(approvalStorage.resolveConsent(firstBody.consent_id, 'approved')).toBe(true);
+      } finally {
+        approvalStorage.close();
+      }
+
+      const retryResponse = await server.inject({
+        method: 'POST',
+        url: '/v1/vault/sign_payment_message',
+        payload: request,
+      });
+
+      expect(retryResponse.statusCode).toBe(200);
+      const retryBody = JSON.parse(retryResponse.body);
+      expect(retryBody.requires_consent).toBeUndefined();
+      expect(retryBody.signature).toMatch(/^[1-9A-HJ-NP-Za-km-z]+$/);
+      expect(retryBody.public_key).toBe(x402WalletAddress);
+      expect(retryBody.chain).toBe('solana');
+    });
+
     it('should require currency when x402 amount is provided', async () => {
       const payload = Buffer.from('x402-test').toString('base64');
 

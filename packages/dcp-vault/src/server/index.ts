@@ -4129,39 +4129,46 @@ async function buildServer(): Promise<FastifyInstance> {
   // V1 API: Vault Sign x402 (with consent)
   // ============================================================================
 
-  server.post<{
-    Body: {
-      network: 'solana';
-      payload: string;
-      amount?: string | number;
-      currency?: string;
-      recipient?: string;
-      purpose?: string;
-      agent_name: string;
-      session_id?: string;
-      service_id?: string;
-      service_signature?: string;
-      timestamp?: string;
-      nonce?: string;
-    };
-  }>('/v1/vault/sign_x402', async (request) => {
+  type SignPaymentMessageBody = {
+    network?: 'solana';
+    chain?: Chain;
+    protocol?: string;
+    payload: string;
+    amount?: string | number;
+    currency?: string;
+    recipient?: string;
+    purpose?: string;
+    resource?: string;
+    agent_name: string;
+    session_id?: string;
+    service_id?: string;
+    service_signature?: string;
+    timestamp?: string;
+    nonce?: string;
+  };
+
+  const handleSignPaymentMessage = async (body: SignPaymentMessageBody) => {
     const {
       network,
+      chain: requestedChain,
+      protocol,
       payload,
       amount,
       currency,
       recipient,
       purpose,
+      resource,
       agent_name,
       session_id,
-    } = request.body;
+    } = body;
     let effectiveSessionId = session_id;
+    const resolvedNetwork = network || requestedChain;
 
-    if (!network || !payload || !agent_name) {
-      throw new VaultError('INTERNAL_ERROR', 'network, payload, and agent_name are required');
+    if (!resolvedNetwork || !payload || !agent_name) {
+      throw new VaultError('INTERNAL_ERROR', 'network/chain, payload, and agent_name are required');
     }
 
-    if (network !== 'solana') {
+    if (resolvedNetwork !== 'solana') {
       throw new VaultError('INVALID_CHAIN', 'Only solana network is supported');
     }
 
@@ -4197,6 +4204,7 @@ async function buildServer(): Promise<FastifyInstance> {
 
     // Track if budget check auto-approved this transaction
     let budgetAutoApproved = false;
+    const operation = protocol ? `sign_payment_message:${protocol}` : 'sign_payment_message';
 
     if (parsedAmount !== undefined && currency) {
       const budgetResult = budget.checkBudget(parsedAmount, currency, chain);
@@ -4227,28 +4235,48 @@ async function buildServer(): Promise<FastifyInstance> {
       }
 
       if (budgetResult.requires_approval) {
-        const { consent, isNew } = storage.createPendingConsent(
-        agent_name,
-        'sign_x402',
-        walletScope,
-          consentDetailsWithDisplayName(request.body as Record<string, unknown>, agent_name, {
-            amount: parsedAmount,
-            currency,
-            network,
-            recipient,
-            purpose,
-          })
-        );
+        const consumedConsent = storage.consumeApprovedConsent(agent_name, operation, walletScope);
+        if (consumedConsent) {
+          budgetAutoApproved = true;
+          storage.logAudit('EXECUTE', 'success', {
+            agentName: agent_name,
+            scope: walletScope,
+            operation: 'consume_approval',
+            details: JSON.stringify({
+              consent_id: consumedConsent.id,
+              amount: parsedAmount,
+              currency,
+              network: resolvedNetwork,
+              protocol,
+              resource,
+            }),
+          });
+        } else {
+          const { consent, isNew } = storage.createPendingConsent(
+            agent_name,
+            operation,
+            walletScope,
+            consentDetailsWithDisplayName(body as Record<string, unknown>, agent_name, {
+              amount: parsedAmount,
+              currency,
+              network: resolvedNetwork,
+              protocol,
+              recipient,
+              purpose,
+              resource,
+            })
+          );
 
-        // Telegram notification handled by consent watcher (avoids duplicates)
+          // Telegram notification handled by consent watcher (avoids duplicates)
 
-        return {
-          requires_consent: true,
-          consent_id: consent.id,
-          expires_at: consent.expires_at,
-          reason: 'Amount exceeds approval threshold',
-          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
-        };
+          return {
+            requires_consent: true,
+            consent_id: consent.id,
+            expires_at: consent.expires_at,
+            reason: 'Amount exceeds approval threshold',
+            message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
+          };
+        }
       } else {
         // Amount is under approval threshold - auto-approve
         budgetAutoApproved = true;
@@ -4263,27 +4291,47 @@ async function buildServer(): Promise<FastifyInstance> {
 
     // Skip session check if budget auto-approved
     if (!hasSession && !budgetAutoApproved) {
-      const { consent, isNew } = storage.createPendingConsent(
-        agent_name,
-        'sign_x402',
-        walletScope,
-        consentDetailsWithDisplayName(request.body as Record<string, unknown>, agent_name, {
-          amount: parsedAmount,
-          currency,
-          network,
-          recipient,
-          purpose,
-        })
-      );
+      const consumedConsent = storage.consumeApprovedConsent(agent_name, operation, walletScope);
+      if (consumedConsent) {
+        budgetAutoApproved = true;
+        storage.logAudit('EXECUTE', 'success', {
+          agentName: agent_name,
+          scope: walletScope,
+          operation: 'consume_approval',
+          details: JSON.stringify({
+            consent_id: consumedConsent.id,
+            amount: parsedAmount,
+            currency,
+            network: resolvedNetwork,
+            protocol,
+            resource,
+          }),
+        });
+      } else {
+        const { consent, isNew } = storage.createPendingConsent(
+          agent_name,
+          operation,
+          walletScope,
+          consentDetailsWithDisplayName(body as Record<string, unknown>, agent_name, {
+            amount: parsedAmount,
+            currency,
+            network: resolvedNetwork,
+            protocol,
+            recipient,
+            purpose,
+            resource,
+          })
+        );
 
-      // Telegram notification handled by consent watcher (avoids duplicates)
+        // Telegram notification handled by consent watcher (avoids duplicates)
 
-      return {
-        requires_consent: true,
-        consent_id: consent.id,
-        expires_at: consent.expires_at,
-        message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
-      };
+        return {
+          requires_consent: true,
+          consent_id: consent.id,
+          expires_at: consent.expires_at,
+          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
+        };
+      }
     }
 
     const records = storage.listRecords();
@@ -4303,7 +4351,7 @@ async function buildServer(): Promise<FastifyInstance> {
     const signature = signSolanaMessage(encryptedKey, masterKey, payload, 'base64');
 
     if (parsedAmount !== undefined && currency && effectiveSessionId) {
-      storage.recordSpend(effectiveSessionId, parsedAmount, currency, chain, 'sign_x402', 'committed', {
+      storage.recordSpend(effectiveSessionId, parsedAmount, currency, chain, operation, 'committed', {
         destination: recipient,
       });
     }
@@ -4311,13 +4359,15 @@ async function buildServer(): Promise<FastifyInstance> {
     storage.logAudit('EXECUTE', 'success', {
       agentName: agent_name,
       scope: walletScope,
-      operation: 'sign_x402',
+      operation,
       details: JSON.stringify({
         amount: parsedAmount,
         currency,
-        network,
+        network: resolvedNetwork,
+        protocol,
         recipient,
         purpose,
+        resource,
       }),
     });
 
@@ -4327,7 +4377,16 @@ async function buildServer(): Promise<FastifyInstance> {
       chain,
       session_id: effectiveSessionId,
     };
-  });
+  };
+
+  server.post<{ Body: SignPaymentMessageBody }>(
+    '/v1/vault/sign_payment_message',
+    async (request) => handleSignPaymentMessage(request.body)
+  );
+
+  server.post<{ Body: SignPaymentMessageBody }>('/v1/vault/sign_x402', async (request) =>
+    handleSignPaymentMessage({ ...request.body, protocol: request.body.protocol || 'x402' })
+  );
 
   // ============================================================================
   // V1 API: Activity (Audit Events)

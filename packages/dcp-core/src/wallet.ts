@@ -19,6 +19,7 @@
 
 import { Keypair, Transaction, VersionedTransaction } from '@solana/web3.js';
 import bs58 from 'bs58';
+import nacl from 'tweetnacl';
 import {
   Chain,
   KeyType,
@@ -306,9 +307,6 @@ export function signSolanaMessage(
     const keypair = Keypair.fromSeed(privateKey);
     const messageBuffer = Buffer.from(message, encoding);
 
-    // Use nacl sign for Ed25519
-    // @solana/web3.js uses tweetnacl internally
-    const nacl = require('tweetnacl');
     const signature = nacl.sign.detached(messageBuffer, keypair.secretKey);
 
     // Return base58 encoded signature (Solana ecosystem standard)

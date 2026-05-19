@@ -87215,6 +87215,7 @@ var require_dist5 = __commonJS({
     }
     var import_web3 = (init_index_esm(), __toCommonJS(index_esm_exports));
     var import_bs582 = __toESM2(require_cjs2());
+    var import_tweetnacl2 = __toESM2(require_nacl_fast());
     var CHAIN_KEY_TYPES = {
       solana: "ed25519"
     };
@@ -87315,8 +87316,7 @@ var require_dist5 = __commonJS({
       try {
         const keypair = import_web3.Keypair.fromSeed(privateKey);
         const messageBuffer = Buffer.from(message, encoding);
-        const nacl2 = require_nacl_fast();
-        const signature2 = nacl2.sign.detached(messageBuffer, keypair.secretKey);
+        const signature2 = import_tweetnacl2.default.sign.detached(messageBuffer, keypair.secretKey);
         return encode(signature2);
       } finally {
         zeroize(privateKey);
@@ -99672,6 +99672,7 @@ async function buildServer() {
       "cursor": { id: "agent_cursor", name: "Cursor" },
       "vscode": { id: "agent_vscode", name: "VS Code" },
       "openclaw": { id: "agent_openclaw_local", name: "OpenClaw" },
+      "hermes": { id: "agent_hermes_local", name: "Hermes" },
       "other": { id: "agent_local_mcp", name: body.custom_name || "Local MCP" }
     };
     const { id: LOCAL_MCP_AGENT_ID, name: LOCAL_MCP_AGENT_NAME } = agentTypeMapping[agentType] || agentTypeMapping["claude-desktop"];
@@ -99764,6 +99765,7 @@ async function buildServer() {
       "agent_cursor",
       "agent_vscode",
       "agent_openclaw_local",
+      "agent_hermes_local",
       "agent_local_mcp"
     ];
     if (agentType) {
@@ -99772,6 +99774,7 @@ async function buildServer() {
         "cursor": "agent_cursor",
         "vscode": "agent_vscode",
         "openclaw": "agent_openclaw_local",
+        "hermes": "agent_hermes_local",
         "other": "agent_local_mcp"
       };
       const agentId = agentIdMap[agentType];
@@ -101347,13 +101350,14 @@ async function buildServer() {
   server.post("/v1/vault/sign_message", async (request) => {
     return handleSignMessage(request.body);
   });
-  server.post("/v1/vault/sign_x402", async (request) => {
-    const { network, payload, amount, currency, recipient, purpose, agent_name, session_id } = request.body;
+  const handleSignPaymentMessage = async (body) => {
+    const { network, chain: requestedChain, protocol, payload, amount, currency, recipient, purpose, resource, agent_name, session_id } = body;
     let effectiveSessionId = session_id;
-    if (!network || !payload || !agent_name) {
-      throw new import_core.VaultError("INTERNAL_ERROR", "network, payload, and agent_name are required");
+    const resolvedNetwork = network || requestedChain;
+    if (!resolvedNetwork || !payload || !agent_name) {
+      throw new import_core.VaultError("INTERNAL_ERROR", "network/chain, payload, and agent_name are required");
     }
-    if (network !== "solana") {
+    if (resolvedNetwork !== "solana") {
       throw new import_core.VaultError("INVALID_CHAIN", "Only solana network is supported");
     }
     if (!storage.isUnlocked()) {
@@ -101382,6 +101386,7 @@ async function buildServer() {
       throw new import_core.VaultError("INTERNAL_ERROR", "currency is required when amount is provided");
     }
     let budgetAutoApproved = false;
+    const operation = protocol ? `sign_payment_message:${protocol}` : "sign_payment_message";
     if (parsedAmount !== void 0 && currency) {
       const budgetResult = budget.checkBudget(parsedAmount, currency, chain);
       if (!budgetResult.allowed) {
@@ -101404,20 +101409,40 @@ async function buildServer() {
         });
       }
       if (budgetResult.requires_approval) {
-        const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_x402", walletScope, consentDetailsWithDisplayName(request.body, agent_name, {
-          amount: parsedAmount,
-          currency,
-          network,
-          recipient,
-          purpose
-        }));
-        return {
-          requires_consent: true,
-          consent_id: consent.id,
-          expires_at: consent.expires_at,
-          reason: "Amount exceeds approval threshold",
-          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`
-        };
+        const consumedConsent = storage.consumeApprovedConsent(agent_name, operation, walletScope);
+        if (consumedConsent) {
+          budgetAutoApproved = true;
+          storage.logAudit("EXECUTE", "success", {
+            agentName: agent_name,
+            scope: walletScope,
+            operation: "consume_approval",
+            details: JSON.stringify({
+              consent_id: consumedConsent.id,
+              amount: parsedAmount,
+              currency,
+              network: resolvedNetwork,
+              protocol,
+              resource
+            })
+          });
+        } else {
+          const { consent, isNew } = storage.createPendingConsent(agent_name, operation, walletScope, consentDetailsWithDisplayName(body, agent_name, {
+            amount: parsedAmount,
+            currency,
+            network: resolvedNetwork,
+            protocol,
+            recipient,
+            purpose,
+            resource
+          }));
+          return {
+            requires_consent: true,
+            consent_id: consent.id,
+            expires_at: consent.expires_at,
+            reason: "Amount exceeds approval threshold",
+            message: `Consent required. Approve with: POST /consent/${consent.id}/approve`
+          };
+        }
       } else {
         budgetAutoApproved = true;
         storage.logAudit("EXECUTE", "success", {
@@ -101429,19 +101454,39 @@ async function buildServer() {
       }
     }
     if (!hasSession && !budgetAutoApproved) {
-      const { consent, isNew } = storage.createPendingConsent(agent_name, "sign_x402", walletScope, consentDetailsWithDisplayName(request.body, agent_name, {
-        amount: parsedAmount,
-        currency,
-        network,
-        recipient,
-        purpose
-      }));
-      return {
-        requires_consent: true,
-        consent_id: consent.id,
-        expires_at: consent.expires_at,
-        message: `Consent required. Approve with: POST /consent/${consent.id}/approve`
-      };
+      const consumedConsent = storage.consumeApprovedConsent(agent_name, operation, walletScope);
+      if (consumedConsent) {
+        budgetAutoApproved = true;
+        storage.logAudit("EXECUTE", "success", {
+          agentName: agent_name,
+          scope: walletScope,
+          operation: "consume_approval",
+          details: JSON.stringify({
+            consent_id: consumedConsent.id,
+            amount: parsedAmount,
+            currency,
+            network: resolvedNetwork,
+            protocol,
+            resource
+          })
+        });
+      } else {
+        const { consent, isNew } = storage.createPendingConsent(agent_name, operation, walletScope, consentDetailsWithDisplayName(body, agent_name, {
+          amount: parsedAmount,
+          currency,
+          network: resolvedNetwork,
+          protocol,
+          recipient,
+          purpose,
+          resource
+        }));
+        return {
+          requires_consent: true,
+          consent_id: consent.id,
+          expires_at: consent.expires_at,
+          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`
+        };
+      }
     }
     const records = storage.listRecords();
     const walletRecord = records.find((r) => r.item_type === "WALLET_KEY" && r.chain === chain);
@@ -101455,20 +101500,22 @@ async function buildServer() {
     }
     const signature2 = (0, import_core.signSolanaMessage)(encryptedKey, masterKey, payload, "base64");
     if (parsedAmount !== void 0 && currency && effectiveSessionId) {
-      storage.recordSpend(effectiveSessionId, parsedAmount, currency, chain, "sign_x402", "committed", {
+      storage.recordSpend(effectiveSessionId, parsedAmount, currency, chain, operation, "committed", {
         destination: recipient
       });
     }
     storage.logAudit("EXECUTE", "success", {
       agentName: agent_name,
       scope: walletScope,
-      operation: "sign_x402",
+      operation,
       details: JSON.stringify({
         amount: parsedAmount,
         currency,
-        network,
+        network: resolvedNetwork,
+        protocol,
         recipient,
-        purpose
+        purpose,
+        resource
       })
     });
     return {
@@ -101477,7 +101524,9 @@ async function buildServer() {
       chain,
       session_id: effectiveSessionId
     };
-  });
+  };
+  server.post("/v1/vault/sign_payment_message", async (request) => handleSignPaymentMessage(request.body));
+  server.post("/v1/vault/sign_x402", async (request) => handleSignPaymentMessage({ ...request.body, protocol: request.body.protocol || "x402" }));
   server.get("/v1/vault/activity", async (request) => {
     const limit = parseInt(request.query.limit || "100", 10);
     const agentName = request.query.agent;
