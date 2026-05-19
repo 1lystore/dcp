@@ -133,6 +133,7 @@ export interface MobilePairingInvite {
   version: '1.0';
   relay_url: string;
   invite_id: string;
+  requested_agent_id: string;
   agent_public_key: string;
   agent_name: string;
   agent_client: MobileAgentClient;

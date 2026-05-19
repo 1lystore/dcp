@@ -217,6 +217,7 @@ interface MobilePairOptions {
   client?: MobileAgentClient;
   environment?: MobileAgentEnvironment;
   name?: string;
+  agentId?: string;
   relayUrl?: string;
   scope?: string[];
   dailyBudget?: string;
@@ -272,6 +273,7 @@ async function mobilePairCommand(options: MobilePairOptions): Promise<void> {
       client,
       environment,
       agentName: options.name || defaultAgentName(client),
+      agentId: options.agentId,
       relayUrl: options.relayUrl,
       requestedScopes: scopes,
       requestedBudget: {
@@ -303,6 +305,7 @@ async function mobilePairCommand(options: MobilePairOptions): Promise<void> {
     }
 
     console.log(`  ${dim('Agent:')}      ${created.invite.agent_name}`);
+    console.log(`  ${dim('Agent ID:')}   ${created.invite.requested_agent_id}`);
     console.log(`  ${dim('Client:')}     ${created.invite.agent_client}`);
     console.log(`  ${dim('Environment:')} ${created.invite.environment}`);
     console.log(`  ${dim('Invite ID:')}   ${created.invite.invite_id}`);
@@ -776,6 +779,7 @@ mobileCommand
   .option('--client <client>', 'Agent client: claude-desktop, cursor, vscode, hermes, openclaw, mcp, custom, hosted', 'custom')
   .option('--environment <environment>', 'Environment: local, vps, hosted, dev')
   .option('-n, --name <name>', 'Agent display name')
+  .option('--agent-id <id>', 'Agent ID to request. Defaults to canonical DCP ID for known clients.')
   .option('--relay-url <url>', 'Mobile relay API/base URL')
   .option('--scope <scope>', 'Requested scope. Repeat for multiple scopes.', (value, previous: string[] = []) => [...previous, value])
   .option('--daily-budget <amount>', 'Requested daily budget', '0')

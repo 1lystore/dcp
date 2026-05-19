@@ -1298,6 +1298,9 @@ export class RelayServer {
     if (!body.vault_id || !body.agent_id) {
       return 'Missing vault_id or agent_id';
     }
+    if (body.agent_id !== invite.requested_agent_id) {
+      return 'Agent ID mismatch';
+    }
     if (!body.vault_hpke_public_key || !body.vault_signing_public_key) {
       return 'Missing vault relay public keys';
     }

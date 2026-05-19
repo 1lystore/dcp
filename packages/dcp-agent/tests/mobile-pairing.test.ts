@@ -26,6 +26,7 @@ describe('mobile pairing', () => {
     expect(invite.type).toBe('dcp_agent_pairing');
     expect(invite.version).toBe('1.0');
     expect(invite.relay_url).toBe('https://relay.example.test');
+    expect(invite.requested_agent_id).toBe('agent_claude_desktop');
     expect(invite.agent_client).toBe('claude-desktop');
     expect(invite.environment).toBe('local');
     expect(invite.requested_scopes).toEqual(['read:wallet.address', 'sign:solana']);
@@ -40,7 +41,10 @@ describe('mobile pairing', () => {
       client: 'custom',
       environment: 'dev',
       agentName: 'Test Agent',
+      agentId: 'agent_custom_test',
     });
+
+    expect(invite.requested_agent_id).toBe('agent_custom_test');
 
     const valid = verifySignature(
       Buffer.from(canonicalInvitePayload(invite), 'utf8'),

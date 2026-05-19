@@ -45,6 +45,7 @@ export interface CreateMobilePairingInviteInput {
   client: MobileAgentClient;
   environment: MobileAgentEnvironment;
   agentName: string;
+  agentId?: string;
   relayUrl?: string;
   requestedScopes?: MobileDcpScope[];
   requestedBudget?: MobilePairingBudget;
@@ -77,6 +78,20 @@ function encodeMobilePairingInvite(invite: MobilePairingInvite): string {
   return `dcp://pair?invite=${encodeURIComponent(JSON.stringify(invite))}`;
 }
 
+export function canonicalMobileAgentId(client: MobileAgentClient): string {
+  const ids: Record<MobileAgentClient, string> = {
+    'claude-desktop': 'agent_claude_desktop',
+    cursor: 'agent_cursor',
+    vscode: 'agent_vscode',
+    hermes: 'agent_hermes_local',
+    openclaw: 'agent_openclaw_local',
+    mcp: 'agent_local_mcp',
+    custom: `agent_mobile_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+    hosted: `agent_hosted_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+  };
+  return ids[client];
+}
+
 function assertSupported(input: CreateMobilePairingInviteInput): void {
   if (!SUPPORTED_CLIENTS.has(input.client)) {
     throw new Error(`Unsupported mobile agent client: ${input.client}`);
@@ -101,6 +116,7 @@ export function createMobilePairingInvite(
   const ttlSeconds = input.ttlSeconds ?? 10 * 60;
   const expiresAt = new Date(createdAt.getTime() + ttlSeconds * 1000);
   const inviteId = `mob_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  const requestedAgentId = input.agentId?.trim() || canonicalMobileAgentId(input.client);
   const requestedBudget = input.requestedBudget ?? {
     daily: 0,
     currency: 'USDC',
@@ -112,6 +128,7 @@ export function createMobilePairingInvite(
     version: MOBILE_PAIRING_VERSION,
     relay_url: (input.relayUrl || process.env.DCP_MOBILE_RELAY_URL || DEFAULT_MOBILE_RELAY_URL).replace(/\/$/, ''),
     invite_id: inviteId,
+    requested_agent_id: requestedAgentId,
     agent_public_key: keypair.publicKey.toString('base64'),
     agent_name: input.agentName.trim(),
     agent_client: input.client,

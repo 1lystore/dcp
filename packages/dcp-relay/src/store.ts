@@ -831,6 +831,7 @@ export class MobilePairingStore {
         version: '1.0',
         relay_url: '',
         invite_id: inviteId,
+        requested_agent_id: '',
         agent_public_key: '',
         agent_name: '',
         agent_client: 'custom',

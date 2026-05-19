@@ -59,6 +59,7 @@ function createMobileInvite(overrides: Partial<MobilePairingInvite> = {}): Mobil
     version: '1.0',
     relay_url: 'http://127.0.0.1:8422',
     invite_id: `mob_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+    requested_agent_id: 'agent_claude_desktop',
     agent_public_key: Buffer.from(publicKey).toString('base64'),
     agent_name: 'Test Mobile Agent',
     agent_client: 'custom',
@@ -552,7 +553,7 @@ describe('RelayServer', () => {
           body: JSON.stringify({
             invite,
             vault_id: 'vault_mobile_test',
-            agent_id: 'agent_mobile_test',
+            agent_id: 'agent_claude_desktop',
             vault_hpke_public_key: Buffer.alloc(32, 1).toString('base64'),
             vault_signing_public_key: Buffer.alloc(32, 2).toString('base64'),
             approved_scopes: invite.requested_scopes,
@@ -564,7 +565,7 @@ describe('RelayServer', () => {
 
       expect(approveResponse.status).toBe(200);
       expect(approved.status).toBe('approved');
-      expect(approved.agent_id).toBe('agent_mobile_test');
+      expect(approved.agent_id).toBe('agent_claude_desktop');
 
       const statusResponse = await fetch(
         `http://127.0.0.1:${testPort}/v1/mobile/pairings/${encodeURIComponent(invite.invite_id)}/status`
@@ -595,7 +596,7 @@ describe('RelayServer', () => {
           body: JSON.stringify({
             invite: forged,
             vault_id: 'vault_mobile_test',
-            agent_id: 'agent_mobile_test',
+            agent_id: 'agent_claude_desktop',
             vault_hpke_public_key: Buffer.alloc(32, 1).toString('base64'),
             vault_signing_public_key: Buffer.alloc(32, 2).toString('base64'),
             approved_scopes: forged.requested_scopes,
@@ -620,7 +621,7 @@ describe('RelayServer', () => {
           body: JSON.stringify({
             invite,
             vault_id: 'vault_mobile_test',
-            agent_id: 'agent_mobile_test',
+            agent_id: 'agent_claude_desktop',
             vault_hpke_public_key: Buffer.alloc(32, 1).toString('base64'),
             vault_signing_public_key: Buffer.alloc(32, 2).toString('base64'),
             approved_scopes: ['read:wallet.address', 'sign:solana'],
