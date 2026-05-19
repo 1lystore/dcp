@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { signMessage, generateSigningKeyPair } from '@dcprotocol/core';
+import { canonicalJson, signMessage, generateSigningKeyPair } from '@dcprotocol/core';
 import type {
   MobileAgentClient,
   MobileAgentEnvironment,
@@ -58,21 +58,7 @@ export interface CreatedMobilePairingInvite {
   pendingConfig: MobilePendingConfig;
 }
 
-export function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
-  }
-
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
-      .join(',')}}`;
-  }
-
-  return JSON.stringify(value);
-}
+export { canonicalJson };
 
 function encodeMobilePairingInvite(invite: MobilePairingInvite): string {
   return `dcp://pair?invite=${encodeURIComponent(JSON.stringify(invite))}`;
