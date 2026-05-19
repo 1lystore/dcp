@@ -1,0 +1,108 @@
+name: Bug report
+description: Create a report to help us improve DCP.
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please include enough detail for us to reproduce it safely.
+
+        If this involves leaked secrets, private keys, unauthorized signing, or a live exploit, do not open a public issue. Email security@1ly.store instead.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the bug and the impact.
+      placeholder: DCP did X when I expected Y.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include commands, config, agent flow, or UI steps.
+      placeholder: |
+        1. Run ...
+        2. Connect ...
+        3. Approve/sign ...
+        4. See error ...
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      multiple: true
+      options:
+        - Desktop app
+        - Mobile app
+        - Vault
+        - Agent
+        - MCP
+        - Telegram approvals
+        - Relay
+        - CLI
+        - SDK / client
+        - Documentation
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Share relevant versions and platform details.
+      placeholder: |
+        OS:
+        Node:
+        pnpm:
+        DCP package/version or commit:
+        Agent/client used:
+    validations:
+      required: true
+  - type: dropdown
+    id: security_impact
+    attributes:
+      label: Security or privacy impact
+      description: Select any area this may affect.
+      multiple: true
+      options:
+        - None known
+        - Approval flow
+        - Wallet/signing
+        - Budget enforcement
+        - Secret/key storage
+        - Logs or notifications
+        - Agent permissions
+        - User privacy
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, screenshots, or traces
+      description: Redact private keys, tokens, recovery phrases, API keys, and personal data.
+      render: shell
+  - type: textarea
+    id: regression
+    attributes:
+      label: Regression details
+      description: Did this work before? If yes, which version/commit was good?
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have removed private keys, tokens, recovery phrases, and sensitive personal data.
+          required: true
+        - label: I searched existing issues and did not find a duplicate.
+          required: true

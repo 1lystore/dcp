@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: mailto:security@1ly.store
+    about: Report private keys, unauthorized signing, live exploits, or sensitive security issues privately.
+  - name: General discussion
+    url: https://github.com/1lystore/dcp/discussions
+    about: Ask questions, share ideas, or discuss broader DCP usage.
