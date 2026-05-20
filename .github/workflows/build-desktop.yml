@@ -135,11 +135,12 @@ jobs:
 
             ### Release notes
 
-            - Added Hermes support in DCP Desktop Connect.
-            - Added one-command VPS pairing for host-native Hermes and Docker Hermes.
-            - Hardened the VPS service installer so systemd runs the installed DCP agent runtime directly.
-            - Preserved OpenClaw MCP setup while allowing OpenClaw and Hermes to share the same DCP endpoint on a VPS.
+            - Fixed auto-approved budget accounting for `sign_x402` and `/v1/vault/sign`.
+            - Kept internal budget ledger sessions hidden from user-facing agent lists.
+            - Added regression coverage for repeated under-threshold spend reaching the daily budget limit.
             - Updated the bundled vault runtime used by the Desktop app.
+
+            Thanks to @TateLyman for the community contribution behind this fix.
 
             ### Downloads
 
@@ -156,7 +157,7 @@ jobs:
 
             ### Installation
 
-            - **macOS**: Open the DMG file and drag DCP to your Applications folder
+            - **macOS**: Open the DMG file and drag DCP to your Applications folder. If macOS blocks the app because this build is not notarized yet, run `xattr -cr /Applications/DCP.app` once, then open DCP again.
             - **Windows**: Run the MSI or EXE installer
             - **Linux**: Install the DEB or RPM package using your package manager
 

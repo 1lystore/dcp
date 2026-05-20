@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## Unreleased
 
+## 2.0.4 — 2026-05-20
+
+### Fixed
+- Fixed auto-approved budget accounting so `sign_x402` and `/v1/vault/sign` spend is recorded even when no wallet session exists.
+- Kept internal budget ledger sessions out of user-facing agent lists, so Desktop does not show accounting-only sessions as connected agents.
+- Added regression coverage for repeated under-threshold spend reaching the daily budget limit.
+
+### Thanks
+- Thanks to @TateLyman for reporting and fixing the auto-approved spend accounting issue, including the follow-up tests and internal-session UX cleanup.
+
 ## 0.2.0 — 2026-03-19
 
 ### Added
