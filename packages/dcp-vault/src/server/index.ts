@@ -272,6 +272,12 @@ const REMOTE_APPROVAL_FETCH_TIMEOUT_MS = parseInt(
   process.env.DCP_TELEGRAM_APPROVAL_FETCH_TIMEOUT_MS || '8000',
   10
 );
+const BUDGET_LEDGER_SCOPE = 'internal.budget.ledger';
+
+function isInternalOnlySession(session: { granted_scopes?: string[] }): boolean {
+  const scopes = session.granted_scopes || [];
+  return scopes.length > 0 && scopes.every((scope) => scope.startsWith('internal.'));
+}
 
 interface RemoteApprovalCommand {
   id: string;
@@ -309,6 +315,23 @@ function findActiveSessionForScope(agentName: string, scope: string): string | u
     }
   }
   return undefined;
+}
+
+function getBudgetLedgerSessionId(agentName: string): string {
+  const existing = findActiveSessionForScope(agentName, BUDGET_LEDGER_SCOPE);
+  if (existing) {
+    return existing;
+  }
+
+  const session = storage.createSession(
+    agentName,
+    [BUDGET_LEDGER_SCOPE],
+    'once',
+    new Date(Date.now() + 24 * 60 * 60 * 1000),
+    { purpose: 'Budget ledger for auto-approved spend' }
+  );
+
+  return session.id;
 }
 
 function scopeMatches(pattern: string, scope: string): boolean {
@@ -2566,7 +2589,7 @@ async function buildServer(): Promise<FastifyInstance> {
   // ============================================================================
 
   server.get('/agents', async () => {
-    const sessions = storage.listActiveSessions();
+    const sessions = storage.listActiveSessions().filter((session) => !isInternalOnlySession(session));
 
     return {
       agents: sessions.map((s) => ({
@@ -3968,8 +3991,9 @@ async function buildServer(): Promise<FastifyInstance> {
     const signResult = await signTransaction(payload, masterKey, chain, unsigned_tx);
 
     // Record spend event if amount provided
-    if (amount !== undefined && amount > 0 && effectiveSessionId) {
-      storage.recordSpend(effectiveSessionId, amount, txCurrency, chain, 'sign_tx', 'committed', {
+    if (amount !== undefined && amount > 0) {
+      const spendSessionId = effectiveSessionId || getBudgetLedgerSessionId(agent_name);
+      storage.recordSpend(spendSessionId, amount, txCurrency, chain, 'sign_tx', 'committed', {
         idempotencyKey: idempotency_key,
       });
     }
@@ -4302,8 +4326,9 @@ async function buildServer(): Promise<FastifyInstance> {
 
     const signature = signSolanaMessage(encryptedKey, masterKey, payload, 'base64');
 
-    if (parsedAmount !== undefined && currency && effectiveSessionId) {
-      storage.recordSpend(effectiveSessionId, parsedAmount, currency, chain, 'sign_x402', 'committed', {
+    if (parsedAmount !== undefined && currency) {
+      const spendSessionId = effectiveSessionId || getBudgetLedgerSessionId(agent_name);
+      storage.recordSpend(spendSessionId, parsedAmount, currency, chain, 'sign_x402', 'committed', {
         destination: recipient,
       });
     }
