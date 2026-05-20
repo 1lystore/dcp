@@ -120,7 +120,9 @@ export type MobileDcpScope =
   | 'vault_get_address'
   | 'vault_budget_check'
   | 'vault_sign_tx'
-  | 'vault_sign_message';
+  | 'vault_sign_message'
+  | `read:credentials.api.${string}`
+  | `write:credentials.api.${string}`;
 
 export interface MobilePairingBudget {
   daily: number;

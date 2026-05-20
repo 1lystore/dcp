@@ -235,6 +235,10 @@ interface MobilePairOptions {
 interface SmokeOptions {
   agent?: string;
   signMessage?: string;
+  readScope?: string;
+  writeScope?: string;
+  writeName?: string;
+  writeValue?: string;
   forceRelay?: boolean;
   json?: boolean;
 }
@@ -494,6 +498,35 @@ async function smokeCommand(options: SmokeOptions): Promise<void> {
       result.signature = signed;
       if (!options.json) {
         success(`Signature: ${signed.signature}`);
+      }
+    }
+
+    if (options.writeScope) {
+      if (!options.writeValue) {
+        throw new Error('--write-value is required with --write-scope');
+      }
+      if (!options.json) {
+        console.log(dim(`Waiting for mobile approval of vault_write ${options.writeScope}...`));
+      }
+      const written = await connection.writeCredential(options.writeScope, {
+        name: options.writeName || options.writeScope.split('.').at(-1) || options.writeScope,
+        value: options.writeValue,
+      });
+      result.write = written;
+      if (!options.json) {
+        success(`Write approved: ${written.scope}`);
+      }
+    }
+
+    if (options.readScope) {
+      if (!options.json) {
+        console.log(dim(`Waiting for mobile approval of vault_read ${options.readScope}...`));
+      }
+      const read = await connection.readCredential(options.readScope);
+      result.read = read;
+      if (!options.json) {
+        const keys = read.data ? Object.keys(read.data).join(', ') : 'no data';
+        success(`Read approved: ${read.scope} (${keys})`);
       }
     }
 
@@ -918,6 +951,10 @@ program
   .description('Test a paired agent against the vault/relay without configuring Claude')
   .option('-a, --agent <id>', 'Agent ID or name to test (default: first configured)')
   .option('--sign-message <message>', 'Also request a mobile-approved Solana message signature')
+  .option('--read-scope <scope>', 'Also request a mobile-approved vault_read for a scope, e.g. credentials.api.openai')
+  .option('--write-scope <scope>', 'Also request a mobile-approved vault_write for a scope, e.g. credentials.api.openai')
+  .option('--write-name <name>', 'Display name to store with --write-scope')
+  .option('--write-value <value>', 'Secret value to store with --write-scope')
   .option('--force-relay', 'Force relay mode (default for smoke)', true)
   .option('-j, --json', 'Output as JSON')
   .action(smokeCommand);

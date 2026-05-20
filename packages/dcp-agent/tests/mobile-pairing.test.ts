@@ -84,6 +84,17 @@ describe('mobile pairing', () => {
     expect(valid).toBe(false);
   });
 
+  it('allows mobile API credential read and write scopes', () => {
+    const { invite } = createMobilePairingInvite({
+      client: 'custom',
+      environment: 'dev',
+      agentName: 'Credential Agent',
+      requestedScopes: ['read:credentials.api.openai', 'write:credentials.api.openai'],
+    });
+
+    expect(invite.requested_scopes).toEqual(['read:credentials.api.openai', 'write:credentials.api.openai']);
+  });
+
   it('rejects unsupported MVP scopes', () => {
     expect(() =>
       createMobilePairingInvite({

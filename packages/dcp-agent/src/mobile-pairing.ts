@@ -41,6 +41,14 @@ const SUPPORTED_SCOPES = new Set<MobileDcpScope>([
   'vault_sign_message',
 ]);
 
+function isSupportedMobileScope(scope: string): scope is MobileDcpScope {
+  return (
+    SUPPORTED_SCOPES.has(scope as MobileDcpScope) ||
+    scope.startsWith('read:credentials.api.') ||
+    scope.startsWith('write:credentials.api.')
+  );
+}
+
 export interface CreateMobilePairingInviteInput {
   client: MobileAgentClient;
   environment: MobileAgentEnvironment;
@@ -86,7 +94,7 @@ function assertSupported(input: CreateMobilePairingInviteInput): void {
     throw new Error(`Unsupported mobile agent environment: ${input.environment}`);
   }
   for (const scope of input.requestedScopes || []) {
-    if (!SUPPORTED_SCOPES.has(scope)) {
+    if (!isSupportedMobileScope(scope)) {
       throw new Error(`Unsupported mobile MVP scope: ${scope}`);
     }
   }
