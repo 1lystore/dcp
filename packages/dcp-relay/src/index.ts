@@ -21,7 +21,7 @@
 // ============================================================================
 
 export { RelayServer } from './relay.js';
-export { MessageStore, ConnectionStore, RateLimiter, MobilePairingStore } from './store.js';
+export { MessageStore, ConnectionStore, RateLimiter, MobilePairingStore, PushTokenStore } from './store.js';
 export {
   authenticateRegistration,
   verifyRegistrationSignature,
@@ -43,6 +43,7 @@ export {
   type LongPollResponse,
   type StoredMessage,
   type VaultConnection,
+  type PushTokenRegistration,
   type RelayErrorCode,
   type PairingClaim,
   type StoredPairingClaim,
@@ -84,6 +85,7 @@ interface RelayCliOptions {
   host: string;
   debug: boolean;
   rateLimitPerMinute: number;
+  expoPushUrl: string;
 }
 
 function parseArgs(): RelayCliOptions {
@@ -94,6 +96,7 @@ function parseArgs(): RelayCliOptions {
   let host = process.env.DCP_RELAY_HOST || DEFAULT_RELAY_CONFIG.host;
   let debug = process.env.DCP_RELAY_DEBUG === 'true' || false;
   let rateLimitPerMinute = parseInt(process.env.DCP_RELAY_RATE_LIMIT || '', 10) || DEFAULT_RELAY_CONFIG.rateLimitPerMinute;
+  let expoPushUrl = process.env.DCP_EXPO_PUSH_URL ?? DEFAULT_RELAY_CONFIG.expoPushUrl;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -105,6 +108,8 @@ function parseArgs(): RelayCliOptions {
       debug = true;
     } else if (arg === '--rate-limit' || arg === '-r') {
       rateLimitPerMinute = parseInt(args[++i], 10) || rateLimitPerMinute;
+    } else if (arg === '--no-push') {
+      expoPushUrl = '';
     } else if (arg === '--help') {
       console.log(`
 DCP Relay - Encrypted message bus for cloud MCP clients
@@ -124,6 +129,7 @@ Environment Variables:
   DCP_RELAY_HOST            Host to bind to
   DCP_RELAY_DEBUG           Enable debug logging (true/false)
   DCP_RELAY_RATE_LIMIT      Max requests per vault per minute
+  DCP_EXPO_PUSH_URL         Expo push API endpoint; set empty with --no-push to disable
 
 Examples:
   dcp-relay                         # Start on default port
@@ -135,11 +141,11 @@ Examples:
     }
   }
 
-  return { port, host, debug, rateLimitPerMinute };
+  return { port, host, debug, rateLimitPerMinute, expoPushUrl };
 }
 
 async function main(): Promise<void> {
-  const { port, host, debug, rateLimitPerMinute } = parseArgs();
+  const { port, host, debug, rateLimitPerMinute, expoPushUrl } = parseArgs();
 
   const relay = new RelayServer({
     port,
@@ -147,6 +153,7 @@ async function main(): Promise<void> {
     debug,
     enableLongPoll: true,
     rateLimitPerMinute,
+    expoPushUrl,
   });
 
   // Handle shutdown

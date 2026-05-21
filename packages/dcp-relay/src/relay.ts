@@ -44,7 +44,7 @@ import {
   DEFAULT_RELAY_CONFIG,
   RELAY_VERSION,
 } from './types.js';
-import { MessageStore, ConnectionStore, RateLimiter, PairingClaimStore, MobilePairingStore } from './store.js';
+import { MessageStore, ConnectionStore, RateLimiter, PairingClaimStore, MobilePairingStore, PushTokenStore } from './store.js';
 import { authenticateRegistration, authenticateRequest, closeAuth, type AuthConfig } from './auth.js';
 
 // ============================================================================
@@ -58,6 +58,7 @@ export class RelayServer {
   private rateLimiter: RateLimiter;
   private pairingClaimStore: PairingClaimStore;
   private mobilePairingStore: MobilePairingStore;
+  private pushTokenStore: PushTokenStore;
   private config: RelayConfig;
   private authConfig: AuthConfig;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -79,6 +80,7 @@ export class RelayServer {
     );
     this.pairingClaimStore = new PairingClaimStore();
     this.mobilePairingStore = new MobilePairingStore();
+    this.pushTokenStore = new PushTokenStore();
 
     this.server = Fastify({
       logger: this.config.debug
@@ -164,6 +166,7 @@ export class RelayServer {
       rateLimit: this.rateLimiter.getStats(),
       pairingClaims: this.pairingClaimStore.getStats(),
       mobilePairings: this.mobilePairingStore.getStats(),
+      push: this.pushTokenStore.getStats(),
       timestamp: new Date().toISOString(),
     }));
 
@@ -176,6 +179,7 @@ export class RelayServer {
         const rateLimitStats = this.rateLimiter.getStats();
         const pairingStats = this.pairingClaimStore.getStats();
         const mobilePairingStats = this.mobilePairingStore.getStats();
+        const pushStats = this.pushTokenStore.getStats();
 
         const format = request.query.format;
 
@@ -211,6 +215,9 @@ export class RelayServer {
             '# HELP dcp_relay_mobile_pairings_total Total mobile pairings',
             '# TYPE dcp_relay_mobile_pairings_total gauge',
             `dcp_relay_mobile_pairings_total ${mobilePairingStats.totalMobilePairings}`,
+            '# HELP dcp_relay_push_tokens_registered Registered mobile push tokens',
+            '# TYPE dcp_relay_push_tokens_registered gauge',
+            `dcp_relay_push_tokens_registered ${pushStats.registeredPushTokens}`,
             '',
           ];
           reply.header('Content-Type', 'text/plain; charset=utf-8');
@@ -224,6 +231,7 @@ export class RelayServer {
           rateLimit: rateLimitStats,
           pairingClaims: pairingStats,
           mobilePairings: mobilePairingStats,
+          push: pushStats,
           websockets: {
             vaultConnections: this.wsConnections.size,
             clientConnections: this.clientSockets.size,
@@ -379,6 +387,40 @@ export class RelayServer {
         return reply.send({ success: true, vault_id: request.params.vaultId });
       }
     );
+
+    this.server.post<{
+      Body: {
+        vault_id: string;
+        token: string;
+        platform?: 'ios' | 'android' | 'web' | 'unknown';
+        device_id?: string;
+      };
+    }>(
+      '/v1/devices/push-token',
+      async (request, reply) => {
+        const { vault_id, token, platform, device_id } = request.body;
+        if (!vault_id || !token) {
+          return reply.status(400).send({ error: 'Missing vault_id or token' });
+        }
+        if (!this.isExpoPushToken(token)) {
+          return reply.status(400).send({ error: 'Unsupported push token format' });
+        }
+
+        const record = this.pushTokenStore.register({
+          vault_id,
+          token,
+          platform: platform ?? 'unknown',
+          device_id,
+        });
+
+        return reply.send({
+          success: true,
+          vault_id: record.vault_id,
+          platform: record.platform,
+          updated_at: new Date(record.updated_at).toISOString(),
+        });
+      }
+    );
   }
 
   private async handleRequest(
@@ -467,6 +509,8 @@ export class RelayServer {
       ws.send(JSON.stringify(wsMsg));
       this.messageStore.markDelivered(envelope.request_id);
     }
+
+    void this.notifyMobilePush(envelope);
 
     return reply.status(202).send({
       queued: true,
@@ -1133,6 +1177,8 @@ export class RelayServer {
       this.messageStore.markDelivered(envelope.request_id);
     }
 
+    void this.notifyMobilePush(envelope);
+
     this.sendWsMessage(ws, {
       type: 'ack',
       payload: { request_id: envelope.request_id, accepted: true },
@@ -1182,6 +1228,47 @@ export class RelayServer {
       this.sendWsMessage(ws, msg);
     }
     this.unregisterClientRequest(response.request_id);
+  }
+
+  private isExpoPushToken(token: string): boolean {
+    return /^Expo(nent)?PushToken\[[A-Za-z0-9_-]+\]$/.test(token);
+  }
+
+  private async notifyMobilePush(envelope: RelayEnvelope): Promise<void> {
+    if (!this.config.expoPushUrl) return;
+    const registration = this.pushTokenStore.get(envelope.vault_id);
+    if (!registration) return;
+
+    try {
+      const response = await fetch(this.config.expoPushUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          to: registration.token,
+          title: 'DCP approval needed',
+          body: 'Open DCP to review this request.',
+          sound: 'default',
+          priority: 'high',
+          data: {
+            type: 'approval_pending',
+            vault_id: envelope.vault_id,
+            request_id: envelope.request_id,
+          },
+        }),
+      });
+
+      if (!response.ok && this.config.debug) {
+        const text = await response.text().catch(() => '');
+        console.error(`Expo push failed (${response.status})${text ? `: ${text}` : ''}`);
+      }
+    } catch (err) {
+      if (this.config.debug) {
+        console.error('Expo push dispatch failed:', err);
+      }
+    }
   }
 
   private sendWsMessage(ws: WebSocket, msg: WsMessage): void {
@@ -1382,5 +1469,9 @@ export class RelayServer {
 
   getConnectionStore(): ConnectionStore {
     return this.connectionStore;
+  }
+
+  getPushTokenStore(): PushTokenStore {
+    return this.pushTokenStore;
   }
 }

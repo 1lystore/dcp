@@ -157,6 +157,14 @@ export interface VaultConnection {
   ws?: unknown; // WebSocket reference
 }
 
+export interface PushTokenRegistration {
+  vault_id: string;
+  token: string;
+  platform?: 'ios' | 'android' | 'web' | 'unknown';
+  device_id?: string;
+  updated_at: number;
+}
+
 // ============================================================================
 // Error Types (from protocol spec section 7.3)
 // ============================================================================
@@ -219,6 +227,8 @@ export interface RelayConfig {
   rateLimitPerMinute: number;
   /** Rate limit window in ms (default: 60000 = 1 minute) */
   rateLimitWindowMs: number;
+  /** Expo push API endpoint. Empty disables outbound push delivery. */
+  expoPushUrl: string;
 }
 
 export const DEFAULT_RELAY_CONFIG: RelayConfig = {
@@ -231,6 +241,7 @@ export const DEFAULT_RELAY_CONFIG: RelayConfig = {
   debug: false,
   rateLimitPerMinute: 60,
   rateLimitWindowMs: 60_000,
+  expoPushUrl: 'https://exp.host/--/api/v2/push/send',
 };
 
 // ============================================================================

@@ -22,6 +22,7 @@ import type {
   StoredPairingClaim,
   MobilePairingApprovalRequest,
   MobilePairingRecord,
+  PushTokenRegistration,
 } from './types.js';
 import { RelayError, MESSAGE_TTL_MS } from './types.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -48,6 +49,7 @@ export class MessageStore {
       debug: config.debug ?? false,
       rateLimitPerMinute: config.rateLimitPerMinute ?? 60,
       rateLimitWindowMs: config.rateLimitWindowMs ?? 60_000,
+      expoPushUrl: config.expoPushUrl ?? 'https://exp.host/--/api/v2/push/send',
     };
 
     // Start cleanup interval
@@ -909,5 +911,45 @@ export class MobilePairingStore {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = null;
     }
+  }
+}
+
+// ============================================================================
+// Mobile Push Token Store
+// ============================================================================
+
+const PUSH_TOKEN_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+
+export class PushTokenStore {
+  private tokensByVault: Map<string, PushTokenRegistration> = new Map();
+
+  register(input: Omit<PushTokenRegistration, 'updated_at'>): PushTokenRegistration {
+    const record: PushTokenRegistration = {
+      ...input,
+      platform: input.platform ?? 'unknown',
+      updated_at: Date.now(),
+    };
+    this.tokensByVault.set(input.vault_id, record);
+    return record;
+  }
+
+  get(vaultId: string): PushTokenRegistration | undefined {
+    const record = this.tokensByVault.get(vaultId);
+    if (!record) return undefined;
+    if (Date.now() - record.updated_at > PUSH_TOKEN_MAX_AGE_MS) {
+      this.tokensByVault.delete(vaultId);
+      return undefined;
+    }
+    return record;
+  }
+
+  remove(vaultId: string): boolean {
+    return this.tokensByVault.delete(vaultId);
+  }
+
+  getStats(): { registeredPushTokens: number } {
+    return {
+      registeredPushTokens: this.tokensByVault.size,
+    };
   }
 }

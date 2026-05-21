@@ -637,6 +637,39 @@ describe('RelayServer', () => {
   });
 
   describe('Request endpoint', () => {
+    it('registers mobile push tokens without exposing approval details', async () => {
+      const response = await fetch(`http://127.0.0.1:${testPort}/v1/devices/push-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vault_id: 'vault_push',
+          token: 'ExpoPushToken[abc123_DEF-456]',
+          platform: 'android',
+          device_id: 'device_test',
+        }),
+      });
+      const data = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(data.success).toBe(true);
+      expect(data.vault_id).toBe('vault_push');
+      expect(server.getPushTokenStore().get('vault_push')?.token).toBe('ExpoPushToken[abc123_DEF-456]');
+    });
+
+    it('rejects unsupported push token formats', async () => {
+      const response = await fetch(`http://127.0.0.1:${testPort}/v1/devices/push-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vault_id: 'vault_push',
+          token: 'plain-secret-token',
+          platform: 'android',
+        }),
+      });
+
+      expect(response.status).toBe(400);
+    });
+
     it('should reject request for unconnected vault', async () => {
       const envelope = createTestEnvelope({ vault_id: 'vault_not_connected' });
 
