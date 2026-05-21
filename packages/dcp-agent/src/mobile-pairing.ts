@@ -63,6 +63,7 @@ export interface CreateMobilePairingInviteInput {
 export interface CreatedMobilePairingInvite {
   invite: MobilePairingInvite;
   inviteUrl: string;
+  shortInviteUrl: string;
   pendingConfig: MobilePendingConfig;
 }
 
@@ -70,6 +71,14 @@ export { canonicalJson };
 
 function encodeMobilePairingInvite(invite: MobilePairingInvite): string {
   return `dcp://pair?invite=${encodeURIComponent(JSON.stringify(invite))}`;
+}
+
+function encodeShortMobilePairingInvite(invite: MobilePairingInvite): string {
+  const params = new URLSearchParams({
+    relay: invite.relay_url,
+    invite_id: invite.invite_id,
+  });
+  return `dcp://pair?${params.toString()}`;
 }
 
 export function canonicalMobileAgentId(client: MobileAgentClient): string {
@@ -113,7 +122,7 @@ export function createMobilePairingInvite(
   const requestedAgentId = input.agentId?.trim() || canonicalMobileAgentId(input.client);
   const requestedBudget = input.requestedBudget ?? {
     daily: 0,
-    currency: 'USDC',
+    currency: 'SOL',
     approval_threshold: 0,
   };
 
@@ -127,7 +136,7 @@ export function createMobilePairingInvite(
     agent_name: input.agentName.trim(),
     agent_client: input.client,
     environment: input.environment,
-    requested_scopes: input.requestedScopes ?? ['read:wallet.address', 'sign:solana'],
+    requested_scopes: input.requestedScopes ?? [],
     requested_budget: requestedBudget,
     created_at: createdAt.toISOString(),
     expires_at: expiresAt.toISOString(),
@@ -143,10 +152,12 @@ export function createMobilePairingInvite(
     signature,
   };
   const inviteUrl = encodeMobilePairingInvite(invite);
+  const shortInviteUrl = encodeShortMobilePairingInvite(invite);
 
   return {
     invite,
     inviteUrl,
+    shortInviteUrl,
     pendingConfig: {
       invite_id: inviteId,
       invite_url: inviteUrl,
@@ -159,6 +170,19 @@ export function createMobilePairingInvite(
       created_at: createdAt.toISOString(),
     },
   };
+}
+
+export async function publishMobilePairingInvite(invite: MobilePairingInvite): Promise<void> {
+  const response = await fetch(`${invite.relay_url.replace(/\/$/, '')}/v1/mobile/pairings`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ invite }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`Failed to publish mobile pairing invite (${response.status})${text ? `: ${text}` : ''}`);
+  }
 }
 
 export async function getMobilePairingStatus(

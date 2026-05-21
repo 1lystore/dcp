@@ -45,6 +45,7 @@ describe('mobile pairing', () => {
     });
 
     expect(invite.requested_agent_id).toBe('agent_custom_test');
+    expect(invite.requested_scopes).toEqual([]);
 
     const valid = verifySignature(
       Buffer.from(canonicalInvitePayload(invite), 'utf8'),

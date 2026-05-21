@@ -336,6 +336,43 @@ export class RelayServer {
     // ========================================================================
 
     this.server.post<{
+      Body: { invite?: MobilePairingInvite };
+    }>(
+      '/v1/mobile/pairings',
+      async (request, reply) => {
+        const invite = request.body?.invite;
+        if (!invite || typeof invite !== 'object') {
+          return reply.status(400).send({ success: false, error: 'Missing pairing invite' });
+        }
+        const inviteError = this.validateMobileInvite(invite);
+        if (inviteError) {
+          return reply.status(400).send({ success: false, error: inviteError });
+        }
+        const record = this.mobilePairingStore.registerInvite(invite);
+        return reply.send({
+          success: true,
+          invite_id: record.invite_id,
+          status: record.status,
+        });
+      }
+    );
+
+    this.server.get<{ Params: { inviteId: string } }>(
+      '/v1/mobile/pairings/:inviteId/invite',
+      async (request, reply) => {
+        const record = this.mobilePairingStore.get(request.params.inviteId);
+        if (!record || record.status === 'expired') {
+          return reply.status(404).send({ success: false, error: 'Pairing invite not found' });
+        }
+        return reply.send({
+          invite_id: record.invite_id,
+          invite: record.invite,
+          status: record.status,
+        });
+      }
+    );
+
+    this.server.post<{
       Params: { inviteId: string };
       Body: MobilePairingApprovalRequest;
     }>(
@@ -1391,8 +1428,8 @@ export class RelayServer {
     if (!body.vault_hpke_public_key || !body.vault_signing_public_key) {
       return 'Missing vault relay public keys';
     }
-    if (!Array.isArray(body.approved_scopes) || body.approved_scopes.length === 0) {
-      return 'approved_scopes must be a non-empty array';
+    if (!Array.isArray(body.approved_scopes)) {
+      return 'approved_scopes must be an array';
     }
     if (!body.approved_budget || typeof body.approved_budget.daily !== 'number') {
       return 'approved_budget is required';

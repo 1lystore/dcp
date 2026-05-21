@@ -25,6 +25,7 @@ import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import qrcode from 'qrcode-terminal';
+import { Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 import {
   parseAndVerifyGrant,
   createConfigFromGrant,
@@ -44,7 +45,7 @@ import { runMcpServer } from './mcp.js';
 import { runHttpMcpServer } from './http-mcp.js';
 import { AgentError } from './types.js';
 import { processSecretsRequest, fetchSecret, fetchSecrets } from './secrets.js';
-import { createMobilePairingInvite, waitForMobilePairingApproval } from './mobile-pairing.js';
+import { createMobilePairingInvite, publishMobilePairingInvite, waitForMobilePairingApproval } from './mobile-pairing.js';
 import {
   configureOpenClawCommand,
   installServiceCommand,
@@ -222,11 +223,12 @@ interface MobilePairOptions {
   relayUrl?: string;
   scope?: string[];
   dailyBudget?: string;
-  currency?: 'SOL' | 'USDC';
+  currency?: 'SOL' | 'USDC' | '1LY';
   approvalThreshold?: string;
   ttlSeconds?: string;
   json?: boolean;
   noQr?: boolean;
+  largeQr?: boolean;
   wait?: boolean;
   waitSeconds?: string;
   configureMcp?: boolean;
@@ -235,10 +237,14 @@ interface MobilePairOptions {
 interface SmokeOptions {
   agent?: string;
   signMessage?: string;
+  signTxAmount?: string;
+  signTxCurrency?: string;
+  signTxDestination?: string;
   readScope?: string;
   writeScope?: string;
   writeName?: string;
   writeValue?: string;
+  skipAddress?: boolean;
   forceRelay?: boolean;
   json?: boolean;
 }
@@ -344,7 +350,7 @@ async function mobilePairCommand(options: MobilePairOptions): Promise<void> {
   try {
     const client = options.client || 'custom';
     const environment = options.environment || (client === 'hermes' || client === 'openclaw' ? 'vps' : 'local');
-    const scopes = (options.scope?.length ? options.scope : ['read:wallet.address', 'sign:solana']) as MobileDcpScope[];
+    const scopes = (options.scope?.length ? options.scope : []) as MobileDcpScope[];
     const daily = parseNumberOption(options.dailyBudget, 0, '--daily-budget');
     const approvalThreshold = parseNumberOption(options.approvalThreshold, 0, '--approval-threshold');
     const ttlSeconds = parseNumberOption(options.ttlSeconds, 10 * 60, '--ttl-seconds');
@@ -358,18 +364,20 @@ async function mobilePairCommand(options: MobilePairOptions): Promise<void> {
       requestedScopes: scopes,
       requestedBudget: {
         daily,
-        currency: options.currency || 'USDC',
+        currency: options.currency || 'SOL',
         approval_threshold: approvalThreshold,
       },
       ttlSeconds,
     });
 
+    await publishMobilePairingInvite(created.invite);
     saveMobilePendingConfig(created.pendingConfig);
 
     if (options.json) {
       console.log(JSON.stringify({
         invite: created.invite,
         invite_url: created.inviteUrl,
+        short_invite_url: created.shortInviteUrl,
       }, null, 2));
       return;
     }
@@ -380,7 +388,7 @@ async function mobilePairCommand(options: MobilePairOptions): Promise<void> {
     console.log();
 
     if (!options.noQr) {
-      qrcode.generate(created.inviteUrl, { small: true });
+      qrcode.generate(created.shortInviteUrl, { small: !options.largeQr });
       console.log();
     }
 
@@ -392,7 +400,8 @@ async function mobilePairCommand(options: MobilePairOptions): Promise<void> {
     console.log(`  ${dim('Expires:')}     ${created.invite.expires_at}`);
     console.log();
     console.log(chalk.bold('Pairing URL:'));
-    console.log(created.inviteUrl);
+    console.log(created.shortInviteUrl);
+    console.log(dim('Full signed invite is stored on relay and verified by the mobile app.'));
     console.log();
     console.log(dim('Pending agent key material was saved locally with 0600 permissions.'));
     console.log(dim('The mobile vault must approve the invite before this agent can request DCP actions.'));
@@ -462,6 +471,28 @@ function loadAgentForCommand(agentIdOrName?: string) {
   return config;
 }
 
+function buildSmokeTransferTx(fromAddress: string, destinationAddress: string, amountSol: number): string {
+  if (!Number.isFinite(amountSol) || amountSol <= 0) {
+    throw new Error('--sign-tx-amount must be a positive SOL amount');
+  }
+
+  const fromPubkey = new PublicKey(fromAddress);
+  const toPubkey = new PublicKey(destinationAddress);
+  const lamports = Math.max(1, Math.round(amountSol * LAMPORTS_PER_SOL));
+  const tx = new Transaction({
+    feePayer: fromPubkey,
+    recentBlockhash: Keypair.generate().publicKey.toBase58(),
+  }).add(
+    SystemProgram.transfer({
+      fromPubkey,
+      toPubkey,
+      lamports,
+    })
+  );
+
+  return tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
+}
+
 async function smokeCommand(options: SmokeOptions): Promise<void> {
   const config = loadAgentForCommand(options.agent);
   const connection = new AgentConnection(config, { forceRelay: options.forceRelay ?? true });
@@ -478,11 +509,16 @@ async function smokeCommand(options: SmokeOptions): Promise<void> {
     }
 
     await connection.connect();
-    const address = await connection.getAddress('solana');
-    const result: Record<string, unknown> = { address };
+    const result: Record<string, unknown> = {};
 
-    if (!options.json) {
-      success(`Wallet address: ${address.address}`);
+    const needsAddress = !options.skipAddress || Boolean(options.signTxAmount);
+    const address = needsAddress ? await connection.getAddress('solana') : null;
+    if (address) {
+      result.address = address;
+
+      if (!options.json) {
+        success(`Wallet address: ${address.address}`);
+      }
     }
 
     if (options.signMessage) {
@@ -498,6 +534,41 @@ async function smokeCommand(options: SmokeOptions): Promise<void> {
       result.signature = signed;
       if (!options.json) {
         success(`Signature: ${signed.signature}`);
+      }
+    }
+
+    if (options.signTxAmount) {
+      if (!address) {
+        throw new Error('Wallet address is required to build the smoke transaction');
+      }
+      const amount = parseNumberOption(options.signTxAmount, Number.NaN, '--sign-tx-amount');
+      const currency = (options.signTxCurrency || 'SOL').toUpperCase();
+      if (currency !== 'SOL') {
+        throw new Error('--sign-tx-currency currently supports SOL for generated smoke transactions');
+      }
+      const destination = options.signTxDestination || Keypair.generate().publicKey.toBase58();
+      const unsignedTx = buildSmokeTransferTx(address.address, destination, amount);
+
+      if (!options.json) {
+        console.log(dim(`Waiting for mobile approval of vault_sign_tx ${amount} SOL...`));
+        console.log(dim(`Destination: ${destination}`));
+      }
+
+      const signedTx = await connection.signTx({
+        chain: 'solana',
+        unsignedTx,
+        amount,
+        currency,
+        destination,
+        description: `DCP mobile smoke test transfer (${amount} SOL)`,
+        idempotencyKey: `smoke-${Date.now()}`,
+      });
+      result.sign_tx = signedTx;
+      if (!options.json) {
+        success(`Transaction signed: ${signedTx.signature}`);
+        if (signedTx.remaining_daily !== undefined) {
+          success(`Remaining daily budget: ${signedTx.remaining_daily} ${currency}`);
+        }
       }
     }
 
@@ -904,11 +975,12 @@ mobileCommand
   .option('--relay-url <url>', 'Mobile relay API/base URL')
   .option('--scope <scope>', 'Requested scope. Repeat for multiple scopes.', (value, previous: string[] = []) => [...previous, value])
   .option('--daily-budget <amount>', 'Requested daily budget', '0')
-  .option('--currency <currency>', 'Budget currency: USDC or SOL', 'USDC')
+  .option('--currency <currency>', 'Budget currency: SOL, USDC, or 1LY', 'SOL')
   .option('--approval-threshold <amount>', 'Auto-approval threshold', '0')
   .option('--ttl-seconds <seconds>', 'Invite lifetime in seconds', '600')
   .option('--json', 'Print machine-readable JSON')
   .option('--no-qr', 'Do not print terminal QR')
+  .option('--large-qr', 'Print a larger terminal QR for difficult scanners')
   .option('--wait', 'Wait until DCP Mobile approves or denies the pairing')
   .option('--wait-seconds <seconds>', 'How long --wait should poll for approval')
   .option('--configure-mcp', 'After approval, configure the local MCP client when supported')
@@ -924,11 +996,12 @@ mobileCommand
   .option('--relay-url <url>', 'Mobile relay API/base URL')
   .option('--scope <scope>', 'Requested scope. Repeat for multiple scopes.', (value, previous: string[] = []) => [...previous, value])
   .option('--daily-budget <amount>', 'Requested daily budget', '0')
-  .option('--currency <currency>', 'Budget currency: USDC or SOL', 'USDC')
+  .option('--currency <currency>', 'Budget currency: SOL, USDC, or 1LY', 'SOL')
   .option('--approval-threshold <amount>', 'Auto-approval threshold', '0')
   .option('--ttl-seconds <seconds>', 'Invite lifetime in seconds', '600')
   .option('--json', 'Print machine-readable JSON')
   .option('--no-qr', 'Do not print terminal QR')
+  .option('--large-qr', 'Print a larger terminal QR for difficult scanners')
   .option('--wait-seconds <seconds>', 'How long to wait for approval')
   .option('--configure-mcp', 'Configure the local MCP client when supported', true)
   .option('--no-configure-mcp', 'Do not write MCP client config; print next steps only')
@@ -950,11 +1023,15 @@ program
   .command('smoke')
   .description('Test a paired agent against the vault/relay without configuring Claude')
   .option('-a, --agent <id>', 'Agent ID or name to test (default: first configured)')
-  .option('--sign-message <message>', 'Also request a mobile-approved Solana message signature')
+  .option('--sign-message <message>', 'Request a Solana message signature for login/auth challenge testing')
+  .option('--sign-tx-amount <amount>', 'Generate and request signing for a smoke-test SOL transfer amount')
+  .option('--sign-tx-currency <currency>', 'Currency for --sign-tx-amount (currently SOL)', 'SOL')
+  .option('--sign-tx-destination <address>', 'Destination public key for generated smoke-test transfer')
   .option('--read-scope <scope>', 'Also request a mobile-approved vault_read for a scope, e.g. credentials.api.openai')
   .option('--write-scope <scope>', 'Also request a mobile-approved vault_write for a scope, e.g. credentials.api.openai')
   .option('--write-name <name>', 'Display name to store with --write-scope')
   .option('--write-value <value>', 'Secret value to store with --write-scope')
+  .option('--skip-address', 'Skip the initial wallet address check')
   .option('--force-relay', 'Force relay mode (default for smoke)', true)
   .option('-j, --json', 'Output as JSON')
   .action(smokeCommand);

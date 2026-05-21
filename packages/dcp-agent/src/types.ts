@@ -126,7 +126,7 @@ export type MobileDcpScope =
 
 export interface MobilePairingBudget {
   daily: number;
-  currency: 'SOL' | 'USDC';
+  currency: 'SOL' | 'USDC' | '1LY';
   approval_threshold: number;
 }
 

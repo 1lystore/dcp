@@ -342,7 +342,7 @@ export type MobileDcpScope =
 
 export interface MobilePairingBudget {
   daily: number;
-  currency: 'SOL' | 'USDC';
+  currency: 'SOL' | 'USDC' | '1LY';
   approval_threshold: number;
 }
 
@@ -378,7 +378,7 @@ export interface MobilePairingRecord {
   invite_id: string;
   invite: MobilePairingInvite;
   received_at: number;
-  status: 'approved' | 'denied' | 'expired';
+  status: 'pending' | 'approved' | 'denied' | 'expired';
   vault_id?: string;
   vault_hpke_public_key?: string;
   vault_signing_public_key?: string;

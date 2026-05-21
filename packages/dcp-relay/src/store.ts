@@ -798,6 +798,24 @@ export class MobilePairingStore {
     }, 60_000);
   }
 
+  registerInvite(invite: MobilePairingApprovalRequest['invite']): MobilePairingRecord {
+    const now = Date.now();
+    const existing = this.records.get(invite.invite_id);
+    if (existing && existing.status !== 'expired') {
+      return existing;
+    }
+
+    const record: MobilePairingRecord = {
+      invite_id: invite.invite_id,
+      invite,
+      received_at: now,
+      status: 'pending',
+    };
+
+    this.records.set(record.invite_id, record);
+    return record;
+  }
+
   approve(request: MobilePairingApprovalRequest): MobilePairingRecord {
     const now = Date.now();
     const existing = this.records.get(request.invite.invite_id);
@@ -839,7 +857,7 @@ export class MobilePairingStore {
         agent_client: 'custom',
         environment: 'dev',
         requested_scopes: [],
-        requested_budget: { daily: 0, currency: 'USDC', approval_threshold: 0 },
+        requested_budget: { daily: 0, currency: 'SOL', approval_threshold: 0 },
         created_at: new Date(now).toISOString(),
         expires_at: new Date(now + MOBILE_PAIRING_TTL_MS).toISOString(),
         nonce: '',
