@@ -136,6 +136,18 @@ export class AuthSessionStore {
     return true;
   }
 
+  /**
+   * Bind the DPoP key thumbprint on first use (browser auth-code flow, where the
+   * key is established at /token rather than at /authorize). No-op if already bound.
+   * Returns the effective jkt (existing or newly bound).
+   */
+  bindJkt(sessionId: string, jkt: string): string | null {
+    const s = this.sessions.get(sessionId);
+    if (!s) return null;
+    if (!s.agent_jkt) s.agent_jkt = jkt;
+    return s.agent_jkt;
+  }
+
   private sweep(): void {
     const now = Date.now();
     for (const [id, s] of this.sessions) {

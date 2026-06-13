@@ -57,6 +57,8 @@ import {
   RefreshTokenStore,
   processConnect,
   processToken,
+  processAuthorize,
+  authorizeStatus,
   verifyAccessToken,
   verifyDpopProof,
   wwwAuthenticateChallenge,
@@ -467,6 +469,7 @@ export class RelayServer {
       Body: {
         grant_type?: string;
         device_code?: string;
+        code?: string;
         code_verifier?: string;
         refresh_token?: string;
       };
@@ -476,6 +479,7 @@ export class RelayServer {
       const result = await processToken(deps, {
         grantType: body.grant_type || '',
         deviceCode: body.device_code,
+        code: body.code,
         codeVerifier: body.code_verifier,
         refreshToken: body.refresh_token,
         dpopProof: (request.headers['dpop'] as string) || '',
@@ -486,6 +490,105 @@ export class RelayServer {
       if (result.status === 200) reply.header('cache-control', 'no-store');
       return result.body;
     });
+
+    // Browser authorization (Claude.ai / ChatGPT auth-code + PKCE). The user
+    // pastes a DCP connect-link; we redeem it, they approve on-device, then we
+    // redirect to redirect_uri with an authorization code. (DPoP binds at /token.)
+    this.server.get<{
+      Querystring: {
+        resource?: string;
+        code_challenge?: string;
+        code_challenge_method?: string;
+        redirect_uri?: string;
+        state?: string;
+        client_id?: string;
+        connect_link?: string;
+      };
+    }>('/oauth/authorize', async (request, reply) => {
+      const q = request.query;
+      const esc = (s: string | undefined) =>
+        String(s ?? '').replace(/[&<>"']/g, (c) =>
+          ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
+        );
+      const redirectUri = q.redirect_uri || '';
+      // Validate redirect_uri is a well-formed absolute URL before reflecting it.
+      try {
+        if (redirectUri) new URL(redirectUri);
+      } catch {
+        reply.status(400).header('content-type', 'text/html');
+        return '<h1>Invalid redirect_uri</h1>';
+      }
+      reply.header('content-type', 'text/html; charset=utf-8');
+
+      const shell = (inner: string) =>
+        `<!doctype html><html><head><meta charset="utf-8"><title>Connect to DCP</title>` +
+        `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+        `<style>body{font-family:system-ui,sans-serif;max-width:520px;margin:48px auto;padding:0 20px;color:#111}` +
+        `.code{font:700 32px/1.2 monospace;letter-spacing:6px;margin:16px 0}` +
+        `input{width:100%;padding:10px;font:14px monospace;box-sizing:border-box}` +
+        `button{padding:10px 16px;margin-top:12px;font-size:15px;cursor:pointer}.muted{color:#666;font-size:13px}</style>` +
+        `</head><body>${inner}</body></html>`;
+
+      // Step 1 — collect the connect-link if not supplied.
+      if (!q.connect_link) {
+        return shell(
+          `<h2>Connect a cloud agent to your DCP vault</h2>` +
+            `<p class="muted">Open DCP → Connect → Cloud Agent, generate a connect-link, and paste it here.</p>` +
+            `<form method="GET" action="/oauth/authorize">` +
+            `<input name="connect_link" placeholder="dcp_connect_v1_..." autofocus required>` +
+            `<input type="hidden" name="resource" value="${esc(q.resource)}">` +
+            `<input type="hidden" name="code_challenge" value="${esc(q.code_challenge)}">` +
+            `<input type="hidden" name="code_challenge_method" value="${esc(q.code_challenge_method)}">` +
+            `<input type="hidden" name="redirect_uri" value="${esc(redirectUri)}">` +
+            `<input type="hidden" name="state" value="${esc(q.state)}">` +
+            `<input type="hidden" name="client_id" value="${esc(q.client_id)}">` +
+            `<button type="submit">Continue</button></form>`
+        );
+      }
+
+      // Step 2 — redeem + open a session; the page polls approval, then redirects.
+      const deps = await this.grantDeps(request);
+      const result = await processAuthorize(deps, {
+        connectLink: q.connect_link,
+        codeChallenge: q.code_challenge || '',
+        codeChallengeMethod: q.code_challenge_method,
+        sourceIp: request.ip,
+        clientId: q.client_id,
+      });
+      if (!result.ok) {
+        return shell(`<h2>Could not connect</h2><p class="muted">Error: ${esc(result.error)}.</p>`);
+      }
+
+      const cfg = {
+        sessionId: result.sessionId,
+        redirectUri,
+        state: q.state || '',
+      };
+      return shell(
+        `<h2>Approve on your DCP device</h2>` +
+          `<p class="muted">Confirm this match code matches the one shown on your device, then approve there.</p>` +
+          `<div class="code">${esc(result.matchCode)}</div>` +
+          `<p class="muted" id="s">Waiting for approval…</p>` +
+          `<script>(function(){var c=${JSON.stringify(cfg)};` +
+          `function poll(){fetch('/oauth/authorize/status?session='+encodeURIComponent(c.sessionId))` +
+          `.then(function(r){return r.json()}).then(function(d){` +
+          `if(d.status==='approved'){var u=new URL(c.redirectUri);u.searchParams.set('code',d.code);` +
+          `if(c.state)u.searchParams.set('state',c.state);location.href=u.toString();return;}` +
+          `if(d.status==='denied'||d.status==='expired'){document.getElementById('s').textContent='Connection '+d.status+'.';return;}` +
+          `setTimeout(poll,2000);}).catch(function(){setTimeout(poll,3000)})}poll();})();</script>`
+      );
+    });
+
+    // Browser authorization status poll (used by the /oauth/authorize page).
+    this.server.get<{ Querystring: { session?: string } }>(
+      '/oauth/authorize/status',
+      async (request, reply) => {
+        reply.header('cache-control', 'no-store');
+        if (!request.query.session) return { status: 'unknown' };
+        const deps = await this.grantDeps(request);
+        return authorizeStatus(deps, request.query.session);
+      }
+    );
 
     // Per-vault MCP resource (Streamable HTTP). Verifies the DPoP-bound,
     // audience-bound access token, then bridges the MCP request to the vault.

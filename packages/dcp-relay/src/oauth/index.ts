@@ -78,9 +78,13 @@ export {
 export {
   processConnect,
   processToken,
+  processAuthorize,
+  authorizeStatus,
   DEVICE_CODE_GRANT,
   type GrantDeps,
   type GrantResponse,
   type ConnectRequest,
   type TokenRequest,
+  type AuthorizeRequest,
+  type AuthorizeResult,
 } from './grant.js';

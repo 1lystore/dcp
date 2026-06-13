@@ -134,6 +134,88 @@ export async function processConnect(
 }
 
 // ----------------------------------------------------------------------------
+// /oauth/authorize — browser auth-code flow (Claude.ai / ChatGPT)
+// ----------------------------------------------------------------------------
+// The user pastes a connect-link; we redeem it (triggering on-device approval),
+// open an authorization session, and return an authorization "code" (the session
+// id). The browser page polls approval, then redirects to redirect_uri with the
+// code. The DPoP key is bound later at /token (TOFU). PKCE is mandatory.
+
+export interface AuthorizeRequest {
+  connectLink: string;
+  codeChallenge: string;
+  codeChallengeMethod?: string;
+  sourceIp?: string;
+  clientId?: string;
+  scope?: string;
+}
+
+export interface AuthorizeResult {
+  ok: boolean;
+  status: number;
+  error?: string;
+  sessionId?: string;
+  matchCode?: string;
+}
+
+export async function processAuthorize(
+  deps: GrantDeps,
+  req: AuthorizeRequest
+): Promise<AuthorizeResult> {
+  const routing = parseConnectLinkRouting(req.connectLink);
+  if (!routing) return { ok: false, status: 400, error: 'invalid_connect_link' };
+  if (!req.codeChallenge || (req.codeChallengeMethod ?? 'S256') !== 'S256') {
+    return { ok: false, status: 400, error: 'pkce_s256_required' };
+  }
+
+  const redeem = await deps.bridge.redeem({
+    vaultId: routing.vault_id,
+    connectLink: req.connectLink,
+    redeemerKey: `browser:${routing.link_id}`,
+    sourceIp: req.sourceIp,
+  });
+  if (!redeem.ok) {
+    return {
+      ok: false,
+      status: redeem.reason === 'vault_unreachable' ? 503 : 400,
+      error: redeem.reason || 'redeem_failed',
+    };
+  }
+
+  const session = deps.sessions.create({
+    vault_id: routing.vault_id,
+    link_id: routing.link_id,
+    agent_id: redeem.agentId,
+    agent_jkt: '', // bound at /token on first use (TOFU)
+    code_challenge: req.codeChallenge,
+    scope: req.scope || '',
+    audience: resourceFor(deps.issuer, routing.vault_id),
+    match_code: redeem.matchCode,
+    client_id: req.clientId,
+  });
+
+  return { ok: true, status: 200, sessionId: session.session_id, matchCode: redeem.matchCode };
+}
+
+/** Poll a browser authorization session's approval status. */
+export async function authorizeStatus(
+  deps: GrantDeps,
+  sessionId: string
+): Promise<{ status: 'pending' | 'approved' | 'denied' | 'expired' | 'unknown'; code?: string }> {
+  const session = deps.sessions.get(sessionId);
+  if (!session) return { status: 'unknown' };
+  if (session.status === 'expired') return { status: 'expired' };
+  if (!session.agent_id) return { status: 'unknown' };
+  const approval = await deps.bridge.approvalStatus({
+    vaultId: session.vault_id,
+    agentId: session.agent_id,
+  });
+  if (approval.status === 'approved') return { status: 'approved', code: session.session_id };
+  if (approval.status === 'denied' || approval.status === 'revoked') return { status: 'denied' };
+  return { status: 'pending' };
+}
+
+// ----------------------------------------------------------------------------
 // /oauth/token — device_code poll + refresh_token rotation
 // ----------------------------------------------------------------------------
 
@@ -141,6 +223,8 @@ export interface TokenRequest {
   grantType: string;
   /** device_code grant */
   deviceCode?: string;
+  /** authorization_code grant (the code == the approved session id) */
+  code?: string;
   codeVerifier?: string;
   /** refresh_token grant */
   refreshToken?: string;
@@ -167,6 +251,12 @@ export async function processToken(deps: GrantDeps, req: TokenRequest): Promise<
   if (req.grantType === DEVICE_CODE_GRANT) {
     return processDeviceCodeGrant(deps, req, jkt);
   }
+  if (req.grantType === 'authorization_code') {
+    // Browser auth-code flow: the `code` IS the authorization session id (minted by
+    // /oauth/authorize AFTER on-device approval). Exchange reuses the device-code
+    // path: same PKCE + same-DPoP-key + approval gate.
+    return processDeviceCodeGrant(deps, { ...req, deviceCode: req.code }, jkt);
+  }
   if (req.grantType === 'refresh_token') {
     return processRefreshGrant(deps, req, jkt);
   }
@@ -188,8 +278,10 @@ async function processDeviceCodeGrant(
   if (session.status === 'expired') return oauthError(400, 'expired_token');
   if (session.status === 'issued') return oauthError(400, 'invalid_grant', 'device_code already used');
 
-  // The token request must use the SAME DPoP key as the connect request.
-  if (jkt !== session.agent_jkt) {
+  // Bind the DPoP key: device-flow set it at /connect; browser auth-code binds it
+  // here on first use (TOFU). Either way, subsequent calls must match.
+  const boundJkt = deps.sessions.bindJkt(session.session_id, jkt);
+  if (boundJkt !== jkt) {
     return oauthError(400, 'invalid_grant', 'DPoP key does not match the authorization session');
   }
   // PKCE binds connect -> token.
