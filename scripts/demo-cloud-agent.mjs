@@ -70,7 +70,9 @@ async function jpost(path, body, headers = {}) {
   const url = `${RELAY}${path}`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...headers },
+    // ngrok-skip-browser-warning bypasses ngrok's free-tier interstitial so we
+    // always get JSON, not the warning HTML page.
+    headers: { 'content-type': 'application/json', 'ngrok-skip-browser-warning': 'true', ...headers },
     body: JSON.stringify(body),
   });
   const text = await res.text();
