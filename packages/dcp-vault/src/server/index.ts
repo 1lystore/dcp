@@ -3509,9 +3509,12 @@ async function buildServer(): Promise<FastifyInstance> {
             error: { code: 'AGENT_NOT_FOUND', message: 'Agent not found' },
           });
         }
+        // Fast-fail at the relay too (denylist + kill refresh chains) — Rule #7.
+        relayClient?.sendCloudConnectRevoke(request.params.agentId);
         return { revoked: true, agent_id: request.params.agentId };
       }
       const result = storage.revokeCloudConnectLink(link.link_id);
+      relayClient?.sendCloudConnectRevoke(result.agent_id || request.params.agentId);
       return { revoked: true, agent_id: result.agent_id };
     }
   );

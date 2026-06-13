@@ -226,6 +226,15 @@ export class RelayClient extends SimpleEmitter {
     });
   }
 
+  /** Tell the relay to instantly revoke a cloud agent (denylist + kill refresh chains). */
+  sendCloudConnectRevoke(agentId: string): boolean {
+    return this.sendWsMessage({
+      type: 'cloud_connect_revoke',
+      payload: { vault_id: this.config.vaultId, agent_id: agentId },
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   /**
    * Cleanup resources
    */

@@ -1524,6 +1524,13 @@ export class RelayServer {
         break;
       }
 
+      case 'cloud_connect_revoke': {
+        // Vault instructing the relay to instantly revoke a cloud agent (Rule #7).
+        const payload = (msg.payload || {}) as { agent_id?: string };
+        if (payload.agent_id) this.revokeAgentAccess(payload.agent_id);
+        break;
+      }
+
       default:
         this.sendWsError(ws, 'RELAY_INVALID_ENVELOPE', `Unknown message type: ${msg.type}`);
     }

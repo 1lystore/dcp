@@ -162,4 +162,49 @@ describe('Cloud-Connect MCP data plane (E2E over WS)', () => {
     expect(lastMcp?.agent_id).toBe('agent_1');
     expect((lastMcp?.body as { method?: string })?.method).toBe('tools/list');
   });
+
+  it('honors a vault revoke push over WS (Rule #7 fast-fail at the relay)', async () => {
+    const agent = await makeAgentKey();
+    const verifier = 'v'.repeat(64);
+    const c = await (
+      await fetch(`${base()}/oauth/connect`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', dpop: await dpop(agent, 'POST', `${base()}/oauth/connect`) },
+        body: JSON.stringify({ connect_link: makeConnectLink(VAULT), code_challenge: s256(verifier) }),
+      })
+    ).json();
+    const t = await (
+      await fetch(`${base()}/oauth/token`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', dpop: await dpop(agent, 'POST', `${base()}/oauth/token`) },
+        body: JSON.stringify({ grant_type: DEVICE_GRANT, device_code: c.device_code, code_verifier: verifier }),
+      })
+    ).json();
+    const accessToken = t.access_token as string;
+    const url = `${base()}/v/${VAULT}/mcp`;
+    const call = async () =>
+      fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `DPoP ${accessToken}`,
+          dpop: await dpop(agent, 'POST', url, ath(accessToken)),
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      });
+
+    expect((await call()).status).toBe(200);
+
+    // The vault pushes a revoke; the relay must denylist the agent.
+    vaultWs.send(
+      JSON.stringify({
+        type: 'cloud_connect_revoke',
+        payload: { vault_id: VAULT, agent_id: 'agent_1' },
+        timestamp: new Date().toISOString(),
+      })
+    );
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect((await call()).status).toBe(401);
+  });
 });
