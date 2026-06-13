@@ -35,13 +35,16 @@ import type {
   PairingClaimResponse,
   PairingApprovalStatus,
   StoredPairingClaim,
+  MobilePairingApprovalRequest,
+  MobilePairingStatus,
+  MobilePairingInvite,
 } from './types.js';
 import {
   RelayError,
   DEFAULT_RELAY_CONFIG,
   RELAY_VERSION,
 } from './types.js';
-import { MessageStore, ConnectionStore, RateLimiter, PairingClaimStore } from './store.js';
+import { MessageStore, ConnectionStore, RateLimiter, PairingClaimStore, MobilePairingStore, PushTokenStore } from './store.js';
 import { authenticateRegistration, authenticateRequest, closeAuth, type AuthConfig } from './auth.js';
 
 // ============================================================================
@@ -54,6 +57,8 @@ export class RelayServer {
   private connectionStore: ConnectionStore;
   private rateLimiter: RateLimiter;
   private pairingClaimStore: PairingClaimStore;
+  private mobilePairingStore: MobilePairingStore;
+  private pushTokenStore: PushTokenStore;
   private config: RelayConfig;
   private authConfig: AuthConfig;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -74,6 +79,8 @@ export class RelayServer {
       this.config.rateLimitWindowMs
     );
     this.pairingClaimStore = new PairingClaimStore();
+    this.mobilePairingStore = new MobilePairingStore();
+    this.pushTokenStore = new PushTokenStore();
 
     this.server = Fastify({
       logger: this.config.debug
@@ -135,6 +142,7 @@ export class RelayServer {
     this.messageStore.close();
     this.rateLimiter.close();
     this.pairingClaimStore.close();
+    this.mobilePairingStore.close();
     closeAuth();
     await this.server.close();
   }
@@ -157,6 +165,8 @@ export class RelayServer {
       ...this.connectionStore.getStats(),
       rateLimit: this.rateLimiter.getStats(),
       pairingClaims: this.pairingClaimStore.getStats(),
+      mobilePairings: this.mobilePairingStore.getStats(),
+      push: this.pushTokenStore.getStats(),
       timestamp: new Date().toISOString(),
     }));
 
@@ -168,6 +178,8 @@ export class RelayServer {
         const connectionStats = this.connectionStore.getStats();
         const rateLimitStats = this.rateLimiter.getStats();
         const pairingStats = this.pairingClaimStore.getStats();
+        const mobilePairingStats = this.mobilePairingStore.getStats();
+        const pushStats = this.pushTokenStore.getStats();
 
         const format = request.query.format;
 
@@ -200,6 +212,12 @@ export class RelayServer {
             '# HELP dcp_relay_pairing_claims_pending Pending pairing claims',
             '# TYPE dcp_relay_pairing_claims_pending gauge',
             `dcp_relay_pairing_claims_pending ${pairingStats.pendingClaims}`,
+            '# HELP dcp_relay_mobile_pairings_total Total mobile pairings',
+            '# TYPE dcp_relay_mobile_pairings_total gauge',
+            `dcp_relay_mobile_pairings_total ${mobilePairingStats.totalMobilePairings}`,
+            '# HELP dcp_relay_push_tokens_registered Registered mobile push tokens',
+            '# TYPE dcp_relay_push_tokens_registered gauge',
+            `dcp_relay_push_tokens_registered ${pushStats.registeredPushTokens}`,
             '',
           ];
           reply.header('Content-Type', 'text/plain; charset=utf-8');
@@ -212,6 +230,8 @@ export class RelayServer {
           connections: connectionStats,
           rateLimit: rateLimitStats,
           pairingClaims: pairingStats,
+          mobilePairings: mobilePairingStats,
+          push: pushStats,
           websockets: {
             vaultConnections: this.wsConnections.size,
             clientConnections: this.clientSockets.size,
@@ -310,6 +330,134 @@ export class RelayServer {
         return reply.send({ success: true });
       }
     );
+
+    // ========================================================================
+    // DCP Mobile Pairing Routes (Agent QR → Mobile approval → Agent polling)
+    // ========================================================================
+
+    this.server.post<{
+      Body: { invite?: MobilePairingInvite };
+    }>(
+      '/v1/mobile/pairings',
+      async (request, reply) => {
+        const invite = request.body?.invite;
+        if (!invite || typeof invite !== 'object') {
+          return reply.status(400).send({ success: false, error: 'Missing pairing invite' });
+        }
+        const inviteError = this.validateMobileInvite(invite);
+        if (inviteError) {
+          return reply.status(400).send({ success: false, error: inviteError });
+        }
+        const record = this.mobilePairingStore.registerInvite(invite);
+        return reply.send({
+          success: true,
+          invite_id: record.invite_id,
+          status: record.status,
+        });
+      }
+    );
+
+    this.server.get<{ Params: { inviteId: string } }>(
+      '/v1/mobile/pairings/:inviteId/invite',
+      async (request, reply) => {
+        const record = this.mobilePairingStore.get(request.params.inviteId);
+        if (!record || record.status === 'expired') {
+          return reply.status(404).send({ success: false, error: 'Pairing invite not found' });
+        }
+        return reply.send({
+          invite_id: record.invite_id,
+          invite: record.invite,
+          status: record.status,
+        });
+      }
+    );
+
+    this.server.post<{
+      Params: { inviteId: string };
+      Body: MobilePairingApprovalRequest;
+    }>(
+      '/v1/mobile/pairings/:inviteId/approve',
+      async (request, reply) => {
+        return this.handleMobilePairingApprove(
+          request.params.inviteId,
+          request.body,
+          reply
+        );
+      }
+    );
+
+    this.server.post<{
+      Params: { inviteId: string };
+      Body: { denied_reason?: string };
+    }>(
+      '/v1/mobile/pairings/:inviteId/deny',
+      async (request, reply) => {
+        const record = this.mobilePairingStore.deny(
+          request.params.inviteId,
+          request.body?.denied_reason
+        );
+        return reply.send({
+          success: true,
+          invite_id: record.invite_id,
+          status: record.status,
+        });
+      }
+    );
+
+    this.server.get<{ Params: { inviteId: string } }>(
+      '/v1/mobile/pairings/:inviteId/status',
+      async (request, reply) => {
+        return this.handleMobilePairingStatus(request.params.inviteId, reply);
+      }
+    );
+
+    this.server.post<{
+      Params: { vaultId: string };
+      Body: { public_key: string; signing_public_key?: string };
+    }>(
+      '/v1/mobile/vaults/:vaultId/online',
+      async (request, reply) => {
+        if (!request.body?.public_key) {
+          return reply.status(400).send({ error: 'Missing public_key' });
+        }
+        this.connectionStore.register(request.params.vaultId, request.body.public_key);
+        return reply.send({ success: true, vault_id: request.params.vaultId });
+      }
+    );
+
+    this.server.post<{
+      Body: {
+        vault_id: string;
+        token: string;
+        platform?: 'ios' | 'android' | 'web' | 'unknown';
+        device_id?: string;
+      };
+    }>(
+      '/v1/devices/push-token',
+      async (request, reply) => {
+        const { vault_id, token, platform, device_id } = request.body;
+        if (!vault_id || !token) {
+          return reply.status(400).send({ error: 'Missing vault_id or token' });
+        }
+        if (!this.isExpoPushToken(token)) {
+          return reply.status(400).send({ error: 'Unsupported push token format' });
+        }
+
+        const record = this.pushTokenStore.register({
+          vault_id,
+          token,
+          platform: platform ?? 'unknown',
+          device_id,
+        });
+
+        return reply.send({
+          success: true,
+          vault_id: record.vault_id,
+          platform: record.platform,
+          updated_at: new Date(record.updated_at).toISOString(),
+        });
+      }
+    );
   }
 
   private async handleRequest(
@@ -398,6 +546,8 @@ export class RelayServer {
       ws.send(JSON.stringify(wsMsg));
       this.messageStore.markDelivered(envelope.request_id);
     }
+
+    void this.notifyMobilePush(envelope);
 
     return reply.status(202).send({
       queued: true,
@@ -674,6 +824,61 @@ export class RelayServer {
       status,
       agent_id,
     });
+  }
+
+  private async handleMobilePairingApprove(
+    inviteId: string,
+    body: MobilePairingApprovalRequest,
+    reply: FastifyReply
+  ): Promise<unknown> {
+    const validationError = this.validateMobileApproval(inviteId, body);
+    if (validationError) {
+      return reply.status(400).send({ success: false, error: validationError });
+    }
+
+    const record = this.mobilePairingStore.approve(body);
+
+    if (this.config.debug) {
+      console.log(
+        `Mobile pairing approved: ${record.invite_id} (agent: ${record.agent_id}, vault: ${record.vault_id})`
+      );
+    }
+
+    return reply.send({
+      success: true,
+      invite_id: record.invite_id,
+      status: record.status,
+      agent_id: record.agent_id,
+      vault_id: record.vault_id,
+      vault_hpke_public_key: record.vault_hpke_public_key,
+      vault_signing_public_key: record.vault_signing_public_key,
+    });
+  }
+
+  private async handleMobilePairingStatus(
+    inviteId: string,
+    reply: FastifyReply
+  ): Promise<unknown> {
+    const record = this.mobilePairingStore.get(inviteId);
+
+    if (!record) {
+      return reply.send({
+        status: 'pending',
+        invite_id: inviteId,
+      } satisfies MobilePairingStatus);
+    }
+
+    return reply.send({
+      status: record.status,
+      invite_id: record.invite_id,
+      agent_id: record.agent_id,
+      vault_id: record.vault_id,
+      vault_hpke_public_key: record.vault_hpke_public_key,
+      vault_signing_public_key: record.vault_signing_public_key,
+      approved_scopes: record.approved_scopes,
+      approved_budget: record.approved_budget,
+      error: record.denied_reason,
+    } satisfies MobilePairingStatus);
   }
 
   // --------------------------------------------------------------------------
@@ -1009,6 +1214,8 @@ export class RelayServer {
       this.messageStore.markDelivered(envelope.request_id);
     }
 
+    void this.notifyMobilePush(envelope);
+
     this.sendWsMessage(ws, {
       type: 'ack',
       payload: { request_id: envelope.request_id, accepted: true },
@@ -1058,6 +1265,47 @@ export class RelayServer {
       this.sendWsMessage(ws, msg);
     }
     this.unregisterClientRequest(response.request_id);
+  }
+
+  private isExpoPushToken(token: string): boolean {
+    return /^Expo(nent)?PushToken\[[A-Za-z0-9_-]+\]$/.test(token);
+  }
+
+  private async notifyMobilePush(envelope: RelayEnvelope): Promise<void> {
+    if (!this.config.expoPushUrl) return;
+    const registration = this.pushTokenStore.get(envelope.vault_id);
+    if (!registration) return;
+
+    try {
+      const response = await fetch(this.config.expoPushUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          to: registration.token,
+          title: 'DCP approval needed',
+          body: 'Open DCP to review this request.',
+          sound: 'default',
+          priority: 'high',
+          data: {
+            type: 'approval_pending',
+            vault_id: envelope.vault_id,
+            request_id: envelope.request_id,
+          },
+        }),
+      });
+
+      if (!response.ok && this.config.debug) {
+        const text = await response.text().catch(() => '');
+        console.error(`Expo push failed (${response.status})${text ? `: ${text}` : ''}`);
+      }
+    } catch (err) {
+      if (this.config.debug) {
+        console.error('Expo push dispatch failed:', err);
+      }
+    }
   }
 
   private sendWsMessage(ws: WebSocket, msg: WsMessage): void {
@@ -1156,6 +1404,98 @@ export class RelayServer {
     return null;
   }
 
+  private validateMobileApproval(
+    inviteId: string,
+    body: MobilePairingApprovalRequest
+  ): string | null {
+    if (!body || typeof body !== 'object') {
+      return 'Missing approval body';
+    }
+
+    const invite = body.invite;
+    if (!invite || typeof invite !== 'object') {
+      return 'Missing pairing invite';
+    }
+    if (invite.invite_id !== inviteId) {
+      return 'Invite ID mismatch';
+    }
+    if (!body.vault_id || !body.agent_id) {
+      return 'Missing vault_id or agent_id';
+    }
+    if (body.agent_id !== invite.requested_agent_id) {
+      return 'Agent ID mismatch';
+    }
+    if (!body.vault_hpke_public_key || !body.vault_signing_public_key) {
+      return 'Missing vault relay public keys';
+    }
+    if (!Array.isArray(body.approved_scopes)) {
+      return 'approved_scopes must be an array';
+    }
+    if (!body.approved_budget || typeof body.approved_budget.daily !== 'number') {
+      return 'approved_budget is required';
+    }
+
+    const inviteError = this.validateMobileInvite(invite);
+    if (inviteError) {
+      return inviteError;
+    }
+
+    const requestedScopes = new Set(invite.requested_scopes);
+    const unrequestedScope = body.approved_scopes.find((scope) => !requestedScopes.has(scope));
+    if (unrequestedScope) {
+      return `Approved scope was not requested: ${unrequestedScope}`;
+    }
+
+    return null;
+  }
+
+  private validateMobileInvite(invite: MobilePairingInvite): string | null {
+    if (invite.type !== 'dcp_agent_pairing' || invite.version !== '1.0') {
+      return 'Unsupported mobile pairing invite';
+    }
+    if (!invite.signature) {
+      return 'Invite signature is required';
+    }
+
+    const expiresAt = new Date(invite.expires_at).getTime();
+    if (!Number.isFinite(expiresAt)) {
+      return 'Invalid invite expiry';
+    }
+    if (Date.now() > expiresAt) {
+      return 'Invite expired';
+    }
+
+    try {
+      const { signature: _signature, ...unsignedInvite } = invite;
+      const message = Buffer.from(this.canonicalJson(unsignedInvite), 'utf8');
+      const signature = Buffer.from(invite.signature, 'base64');
+      const publicKey = Buffer.from(invite.agent_public_key, 'base64');
+      if (!ed25519.verify(signature, message, publicKey)) {
+        return 'Invalid invite signature';
+      }
+    } catch (err) {
+      return 'Failed to verify invite signature: ' + (err instanceof Error ? err.message : 'unknown error');
+    }
+
+    return null;
+  }
+
+  private canonicalJson(value: unknown): string {
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => this.canonicalJson(item)).join(',')}]`;
+    }
+
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${this.canonicalJson(record[key])}`)
+        .join(',')}}`;
+    }
+
+    return JSON.stringify(value);
+  }
+
   // --------------------------------------------------------------------------
   // Getters (for testing)
   // --------------------------------------------------------------------------
@@ -1166,5 +1506,9 @@ export class RelayServer {
 
   getConnectionStore(): ConnectionStore {
     return this.connectionStore;
+  }
+
+  getPushTokenStore(): PushTokenStore {
+    return this.pushTokenStore;
   }
 }

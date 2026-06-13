@@ -401,6 +401,8 @@ export class RelayTransport implements Transport {
     const data = response as {
       scope?: string;
       data?: Record<string, unknown>;
+      name?: string;
+      value?: unknown;
       sensitivity?: 'standard' | 'sensitive' | 'critical';
       is_reference?: boolean;
       requires_consent?: boolean;
@@ -428,7 +430,7 @@ export class RelayTransport implements Transport {
 
     return {
       scope: data.scope || scope,
-      data: data.data ?? null,
+      data: data.data ?? (data.value !== undefined ? { name: data.name, value: data.value } : null),
       sensitivity: data.sensitivity,
       isReference: data.is_reference,
       sessionId: data.session_id,
@@ -445,9 +447,19 @@ export class RelayTransport implements Transport {
   ): Promise<WriteCredentialResult> {
     const sessionId = this.getSessionId(scope);
 
+    const secretValue = typeof data.value === 'string'
+      ? data.value
+      : typeof data.api_key === 'string'
+        ? data.api_key
+        : typeof data.token === 'string'
+          ? data.token
+          : undefined;
+
     const params = {
       scope,
       data,
+      name: typeof data.name === 'string' ? data.name : undefined,
+      value: secretValue,
       session_id: sessionId,
     };
 
@@ -457,6 +469,7 @@ export class RelayTransport implements Transport {
       scope?: string;
       created?: boolean;
       updated?: boolean;
+      ok?: boolean;
       sensitivity?: 'standard' | 'sensitive' | 'critical';
       requires_consent?: boolean;
       consent_id?: string;
@@ -483,7 +496,7 @@ export class RelayTransport implements Transport {
 
     return {
       scope: result.scope || scope,
-      created: result.created ?? false,
+      created: result.created ?? result.ok === true,
       updated: result.updated ?? false,
       sensitivity: result.sensitivity,
       sessionId: result.session_id,

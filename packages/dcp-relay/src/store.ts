@@ -20,6 +20,9 @@ import type {
   RelayConfig,
   PairingClaim,
   StoredPairingClaim,
+  MobilePairingApprovalRequest,
+  MobilePairingRecord,
+  PushTokenRegistration,
 } from './types.js';
 import { RelayError, MESSAGE_TTL_MS } from './types.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -46,6 +49,7 @@ export class MessageStore {
       debug: config.debug ?? false,
       rateLimitPerMinute: config.rateLimitPerMinute ?? 60,
       rateLimitWindowMs: config.rateLimitWindowMs ?? 60_000,
+      expoPushUrl: config.expoPushUrl ?? 'https://exp.host/--/api/v2/push/send',
     };
 
     // Start cleanup interval
@@ -773,5 +777,197 @@ export class PairingClaimStore {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = null;
     }
+  }
+}
+
+// ============================================================================
+// DCP Mobile Pairing Store
+// ============================================================================
+
+/** Mobile pairing status TTL: enough time for the QR terminal to poll. */
+const MOBILE_PAIRING_TTL_MS = 10 * 60 * 1000;
+const MOBILE_PAIRING_RESOLVED_TTL_MS = 60 * 60 * 1000;
+
+export class MobilePairingStore {
+  private records: Map<string, MobilePairingRecord> = new Map();
+  private cleanupInterval: ReturnType<typeof setInterval> | null = null;
+
+  constructor() {
+    this.cleanupInterval = setInterval(() => {
+      this.cleanup();
+    }, 60_000);
+  }
+
+  registerInvite(invite: MobilePairingApprovalRequest['invite']): MobilePairingRecord {
+    const now = Date.now();
+    const existing = this.records.get(invite.invite_id);
+    if (existing && existing.status !== 'expired') {
+      return existing;
+    }
+
+    const record: MobilePairingRecord = {
+      invite_id: invite.invite_id,
+      invite,
+      received_at: now,
+      status: 'pending',
+    };
+
+    this.records.set(record.invite_id, record);
+    return record;
+  }
+
+  approve(request: MobilePairingApprovalRequest): MobilePairingRecord {
+    const now = Date.now();
+    const existing = this.records.get(request.invite.invite_id);
+    if (existing && existing.status === 'approved') {
+      return existing;
+    }
+
+    const record: MobilePairingRecord = {
+      invite_id: request.invite.invite_id,
+      invite: request.invite,
+      received_at: existing?.received_at ?? now,
+      status: 'approved',
+      vault_id: request.vault_id,
+      vault_hpke_public_key: request.vault_hpke_public_key,
+      vault_signing_public_key: request.vault_signing_public_key,
+      agent_id: request.agent_id,
+      approved_scopes: request.approved_scopes,
+      approved_budget: request.approved_budget,
+      resolved_at: now,
+    };
+
+    this.records.set(record.invite_id, record);
+    return record;
+  }
+
+  deny(inviteId: string, deniedReason?: string): MobilePairingRecord {
+    const now = Date.now();
+    const existing = this.records.get(inviteId);
+    const record: MobilePairingRecord = {
+      invite_id: inviteId,
+      invite: existing?.invite ?? {
+        type: 'dcp_agent_pairing',
+        version: '1.0',
+        relay_url: '',
+        invite_id: inviteId,
+        requested_agent_id: '',
+        agent_public_key: '',
+        agent_name: '',
+        agent_client: 'custom',
+        environment: 'dev',
+        requested_scopes: [],
+        requested_budget: { daily: 0, currency: 'SOL', approval_threshold: 0 },
+        created_at: new Date(now).toISOString(),
+        expires_at: new Date(now + MOBILE_PAIRING_TTL_MS).toISOString(),
+        nonce: '',
+      },
+      received_at: existing?.received_at ?? now,
+      status: 'denied',
+      resolved_at: now,
+      denied_reason: deniedReason,
+    };
+
+    this.records.set(inviteId, record);
+    return record;
+  }
+
+  get(inviteId: string): MobilePairingRecord | undefined {
+    const record = this.records.get(inviteId);
+    if (!record) return undefined;
+
+    const now = Date.now();
+    if (record.status === 'approved' || record.status === 'denied') {
+      return record;
+    }
+
+    if (now - record.received_at > MOBILE_PAIRING_TTL_MS) {
+      record.status = 'expired';
+      record.resolved_at = now;
+    }
+
+    return record;
+  }
+
+  cleanup(): number {
+    const now = Date.now();
+    let removed = 0;
+
+    for (const [inviteId, record] of this.records) {
+      if (record.status !== 'approved' && record.status !== 'denied' && now - record.received_at > MOBILE_PAIRING_TTL_MS) {
+        record.status = 'expired';
+        record.resolved_at = now;
+      }
+
+      if (record.resolved_at && now - record.resolved_at > MOBILE_PAIRING_RESOLVED_TTL_MS) {
+        this.records.delete(inviteId);
+        removed++;
+      }
+    }
+
+    return removed;
+  }
+
+  getStats(): { totalMobilePairings: number; approvedMobilePairings: number; deniedMobilePairings: number } {
+    let approved = 0;
+    let denied = 0;
+
+    for (const record of this.records.values()) {
+      if (record.status === 'approved') approved++;
+      if (record.status === 'denied') denied++;
+    }
+
+    return {
+      totalMobilePairings: this.records.size,
+      approvedMobilePairings: approved,
+      deniedMobilePairings: denied,
+    };
+  }
+
+  close(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+  }
+}
+
+// ============================================================================
+// Mobile Push Token Store
+// ============================================================================
+
+const PUSH_TOKEN_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+
+export class PushTokenStore {
+  private tokensByVault: Map<string, PushTokenRegistration> = new Map();
+
+  register(input: Omit<PushTokenRegistration, 'updated_at'>): PushTokenRegistration {
+    const record: PushTokenRegistration = {
+      ...input,
+      platform: input.platform ?? 'unknown',
+      updated_at: Date.now(),
+    };
+    this.tokensByVault.set(input.vault_id, record);
+    return record;
+  }
+
+  get(vaultId: string): PushTokenRegistration | undefined {
+    const record = this.tokensByVault.get(vaultId);
+    if (!record) return undefined;
+    if (Date.now() - record.updated_at > PUSH_TOKEN_MAX_AGE_MS) {
+      this.tokensByVault.delete(vaultId);
+      return undefined;
+    }
+    return record;
+  }
+
+  remove(vaultId: string): boolean {
+    return this.tokensByVault.delete(vaultId);
+  }
+
+  getStats(): { registeredPushTokens: number } {
+    return {
+      registeredPushTokens: this.tokensByVault.size,
+    };
   }
 }

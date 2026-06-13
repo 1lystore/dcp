@@ -5,9 +5,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { randomBytes } from 'node:crypto';
+import { ed25519 } from '@noble/curves/ed25519';
 import { MessageStore, ConnectionStore, RateLimiter } from '../src/store.js';
 import { RelayServer } from '../src/relay.js';
-import type { RelayEnvelope, RelayResponseEnvelope } from '../src/types.js';
+import type { MobilePairingInvite, RelayEnvelope, RelayResponseEnvelope } from '../src/types.js';
 import { RelayError, RELAY_VERSION } from '../src/types.js';
 
 // ============================================================================
@@ -32,6 +34,47 @@ function createTestResponse(requestId: string): RelayResponseEnvelope {
     request_id: requestId,
     encrypted_payload: 'base64_encrypted_response_here',
     timestamp: new Date().toISOString(),
+  };
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function createMobileInvite(overrides: Partial<MobilePairingInvite> = {}): MobilePairingInvite {
+  const privateKey = randomBytes(32);
+  const publicKey = ed25519.getPublicKey(privateKey);
+  const unsigned: Omit<MobilePairingInvite, 'signature'> = {
+    type: 'dcp_agent_pairing',
+    version: '1.0',
+    relay_url: 'http://127.0.0.1:8422',
+    invite_id: `mob_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+    requested_agent_id: 'agent_claude_desktop',
+    agent_public_key: Buffer.from(publicKey).toString('base64'),
+    agent_name: 'Test Mobile Agent',
+    agent_client: 'custom',
+    environment: 'dev',
+    requested_scopes: ['read:wallet.address', 'sign:solana'],
+    requested_budget: { daily: 5, currency: 'USDC', approval_threshold: 0 },
+    created_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    nonce: randomBytes(16).toString('hex'),
+    ...overrides,
+  };
+  const signature = ed25519.sign(Buffer.from(canonicalJson(unsigned), 'utf8'), privateKey);
+  return {
+    ...unsigned,
+    signature: Buffer.from(signature).toString('base64'),
   };
 }
 
@@ -490,7 +533,143 @@ describe('RelayServer', () => {
     });
   });
 
+  describe('Mobile pairing endpoints', () => {
+    it('returns pending until the mobile vault approves an invite', async () => {
+      const invite = createMobileInvite();
+
+      const pendingResponse = await fetch(
+        `http://127.0.0.1:${testPort}/v1/mobile/pairings/${encodeURIComponent(invite.invite_id)}/status`
+      );
+      const pending = await pendingResponse.json();
+
+      expect(pendingResponse.status).toBe(200);
+      expect(pending.status).toBe('pending');
+
+      const approveResponse = await fetch(
+        `http://127.0.0.1:${testPort}/v1/mobile/pairings/${encodeURIComponent(invite.invite_id)}/approve`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            invite,
+            vault_id: 'vault_mobile_test',
+            agent_id: 'agent_claude_desktop',
+            vault_hpke_public_key: Buffer.alloc(32, 1).toString('base64'),
+            vault_signing_public_key: Buffer.alloc(32, 2).toString('base64'),
+            approved_scopes: invite.requested_scopes,
+            approved_budget: invite.requested_budget,
+          }),
+        }
+      );
+      const approved = await approveResponse.json();
+
+      expect(approveResponse.status).toBe(200);
+      expect(approved.status).toBe('approved');
+      expect(approved.agent_id).toBe('agent_claude_desktop');
+
+      const statusResponse = await fetch(
+        `http://127.0.0.1:${testPort}/v1/mobile/pairings/${encodeURIComponent(invite.invite_id)}/status`
+      );
+      const status = await statusResponse.json();
+
+      expect(status.status).toBe('approved');
+      expect(status.vault_id).toBe('vault_mobile_test');
+      expect(status.vault_hpke_public_key).toBe(Buffer.alloc(32, 1).toString('base64'));
+      expect(status.approved_scopes).toEqual(invite.requested_scopes);
+    });
+
+    it('rejects forged mobile approval payloads', async () => {
+      const invite = createMobileInvite();
+      const forged = {
+        ...invite,
+        requested_budget: {
+          ...invite.requested_budget,
+          daily: 999,
+        },
+      };
+
+      const response = await fetch(
+        `http://127.0.0.1:${testPort}/v1/mobile/pairings/${encodeURIComponent(invite.invite_id)}/approve`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            invite: forged,
+            vault_id: 'vault_mobile_test',
+            agent_id: 'agent_claude_desktop',
+            vault_hpke_public_key: Buffer.alloc(32, 1).toString('base64'),
+            vault_signing_public_key: Buffer.alloc(32, 2).toString('base64'),
+            approved_scopes: forged.requested_scopes,
+            approved_budget: forged.requested_budget,
+          }),
+        }
+      );
+      const data = await response.json();
+
+      expect(response.status).toBe(400);
+      expect(data.error).toContain('Invalid invite signature');
+    });
+
+    it('rejects scopes the agent did not request', async () => {
+      const invite = createMobileInvite({ requested_scopes: ['read:wallet.address'] });
+
+      const response = await fetch(
+        `http://127.0.0.1:${testPort}/v1/mobile/pairings/${encodeURIComponent(invite.invite_id)}/approve`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            invite,
+            vault_id: 'vault_mobile_test',
+            agent_id: 'agent_claude_desktop',
+            vault_hpke_public_key: Buffer.alloc(32, 1).toString('base64'),
+            vault_signing_public_key: Buffer.alloc(32, 2).toString('base64'),
+            approved_scopes: ['read:wallet.address', 'sign:solana'],
+            approved_budget: invite.requested_budget,
+          }),
+        }
+      );
+      const data = await response.json();
+
+      expect(response.status).toBe(400);
+      expect(data.error).toContain('Approved scope was not requested');
+    });
+  });
+
   describe('Request endpoint', () => {
+    it('registers mobile push tokens without exposing approval details', async () => {
+      const response = await fetch(`http://127.0.0.1:${testPort}/v1/devices/push-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vault_id: 'vault_push',
+          token: 'ExpoPushToken[abc123_DEF-456]',
+          platform: 'android',
+          device_id: 'device_test',
+        }),
+      });
+      const data = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(data.success).toBe(true);
+      expect(data.vault_id).toBe('vault_push');
+      expect(server.getPushTokenStore().get('vault_push')?.token).toBe('ExpoPushToken[abc123_DEF-456]');
+    });
+
+    it('rejects unsupported push token formats', async () => {
+      const response = await fetch(`http://127.0.0.1:${testPort}/v1/devices/push-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vault_id: 'vault_push',
+          token: 'plain-secret-token',
+          platform: 'android',
+        }),
+      });
+
+      expect(response.status).toBe(400);
+    });
+
     it('should reject request for unconnected vault', async () => {
       const envelope = createTestEnvelope({ vault_id: 'vault_not_connected' });
 

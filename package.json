@@ -6,6 +6,7 @@
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "preinstall": "node scripts/check-node-version.mjs && npx only-allow pnpm",
+    "prepare": "git config core.hooksPath .githooks || true",
     "build": "pnpm -r --filter @dcprotocol/core run build && pnpm -r run build",
     "dev:cli": "pnpm -r --filter @dcprotocol/core run build && pnpm --filter @dcprotocol/vault run dev --",
     "test": "pnpm -r run test",

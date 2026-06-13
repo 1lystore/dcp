@@ -4,6 +4,15 @@
   "private": true,
   "description": "Telegram notification service for DCP - deployable infrastructure",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1lystore/dcp.git",
+    "directory": "packages/dcp-telegram"
+  },
+  "homepage": "https://github.com/1lystore/dcp#readme",
+  "bugs": {
+    "url": "https://github.com/1lystore/dcp/issues"
+  },
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
@@ -45,6 +54,6 @@
   "engines": {
     "node": ">=22 <23"
   },
-  "author": "DCP Team",
-  "license": "MIT"
+  "author": "DCP Protocol",
+  "license": "Apache-2.0"
 }

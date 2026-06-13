@@ -20,7 +20,9 @@ import * as path from 'path';
 import * as os from 'os';
 import { DcpClient, DcpError, generateSigningKeyPair } from '@dcprotocol/client';
 
-const DEFAULT_RELAY_URL = 'wss://relay.dcp.1ly.store';
+// No hosted default in OSS — self-hosters supply their own relay via --relay or
+// the DCP_RELAY_URL env var. Empty means "not configured" and is rejected below.
+const DEFAULT_RELAY_URL = process.env.DCP_RELAY_URL || '';
 
 // ============================================================================
 // Command Definition
@@ -29,7 +31,7 @@ const DEFAULT_RELAY_URL = 'wss://relay.dcp.1ly.store';
 export const proxyCommand = new Command('proxy')
   .description('Run a local proxy for remote agents (Tier 3)')
   .option('-v, --vault <id>', 'Vault ID to proxy for (required)')
-  .option('-r, --relay <url>', `Relay URL (default: ${DEFAULT_RELAY_URL})`)
+  .option('-r, --relay <url>', 'Relay URL (required; or set DCP_RELAY_URL)')
   .option('-k, --hpke-key <key>', 'Vault HPKE public key (base64)')
   .option('-p, --port <port>', 'Local port to listen on (default: 8420)', '8420')
   .option('-s, --service-id <id>', 'Service identity (required for relay access)')
@@ -144,6 +146,14 @@ export async function runProxy(options: ProxyOptions): Promise<void> {
   }
 
   const relayUrl = options.relay || process.env.DCP_RELAY_URL || DEFAULT_RELAY_URL;
+
+  if (!relayUrl) {
+    console.error(
+      'No relay URL configured. Pass --relay=<wss://your-relay> or set DCP_RELAY_URL ' +
+        '(self-host your own @dcprotocol/relay).'
+    );
+    process.exit(1);
+  }
 
   // Service identity (required for relay)
   let serviceId = options.serviceId || process.env.DCP_SERVICE_ID;

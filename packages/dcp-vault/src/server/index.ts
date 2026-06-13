@@ -468,8 +468,20 @@ function normalizeAmount(amount?: string | number): number | undefined {
 // Telegram Notification Helpers (Option B: Cloud Service)
 // ============================================================================
 
-// Cloud webhook URL - desktop calls this, cloud service sends to Telegram
-const TELEGRAM_CLOUD_URL = process.env.DCP_TELEGRAM_CLOUD_URL || 'https://telegram.dcp.1ly.store';
+// Cloud webhook URL - desktop calls this, cloud service sends to Telegram.
+// No hosted default in OSS: self-hosters run their OWN @dcprotocol/telegram service
+// (BYO bot token) and set DCP_TELEGRAM_CLOUD_URL. Managed products set it explicitly.
+// Empty = Telegram cloud notifications disabled until configured.
+const TELEGRAM_CLOUD_URL = process.env.DCP_TELEGRAM_CLOUD_URL || '';
+
+/**
+ * Whether a Telegram cloud endpoint is configured. In OSS there is no hosted
+ * default, so cloud notifications/pairing are inert until the operator points
+ * DCP_TELEGRAM_CLOUD_URL at their own @dcprotocol/telegram service.
+ */
+function isTelegramCloudConfigured(): boolean {
+  return Boolean(TELEGRAM_CLOUD_URL);
+}
 
 /**
  * Categorize a request based on action and scope
@@ -547,8 +559,8 @@ async function dispatchTelegramNotification(consent: {
   try {
     // Check if Telegram is enabled (just needs to be paired, no local bot token needed)
     const telegramConfig = storage.getTelegramConfig();
-    if (!telegramConfig || !telegramConfig.enabled) {
-      console.log('[TG] Skipping - not enabled');
+    if (!telegramConfig || !telegramConfig.enabled || !isTelegramCloudConfigured()) {
+      console.log('[TG] Skipping - not enabled or cloud URL not configured');
       return;
     }
     if (!telegramConfig.notify_consent) {
@@ -674,8 +686,8 @@ async function dispatchBudgetExceededNotification(params: {
   try {
     // Check if Telegram is enabled
     const telegramConfig = storage.getTelegramConfig();
-    if (!telegramConfig || !telegramConfig.enabled) {
-      console.log('[TG] Skipping budget notification - not enabled');
+    if (!telegramConfig || !telegramConfig.enabled || !isTelegramCloudConfigured()) {
+      console.log('[TG] Skipping budget notification - not enabled or cloud URL not configured');
       return;
     }
 
@@ -879,7 +891,12 @@ async function acknowledgeRemoteApproval(commandId: string, result: string): Pro
 
 async function pollRemoteApprovals(): Promise<void> {
   const telegramConfig = storage.getTelegramConfig();
-  if (!telegramConfig || !telegramConfig.enabled || !telegramConfig.notify_consent) {
+  if (
+    !telegramConfig ||
+    !telegramConfig.enabled ||
+    !telegramConfig.notify_consent ||
+    !isTelegramCloudConfigured()
+  ) {
     return;
   }
 
@@ -4444,6 +4461,13 @@ async function buildServer(): Promise<FastifyInstance> {
   server.post('/v1/telegram/pair/start', async (request, reply) => {
     requireOwnerToken(request);
 
+    if (!isTelegramCloudConfigured()) {
+      throw new VaultError(
+        'INTERNAL_ERROR',
+        'Telegram cloud not configured. Set DCP_TELEGRAM_CLOUD_URL to your own @dcprotocol/telegram service.'
+      );
+    }
+
     // Get vault identity for signing (protocol spec)
     const identity = await ensureRelayIdentity();
     const vaultId = identity.vaultId;
@@ -4521,6 +4545,10 @@ async function buildServer(): Promise<FastifyInstance> {
    */
   server.get('/v1/telegram/pair/status', async (request, reply) => {
     requireOwnerToken(request);
+
+    if (!isTelegramCloudConfigured()) {
+      return { paired: false, error: 'Telegram cloud not configured' };
+    }
 
     const identity = await ensureRelayIdentity();
     const vaultId = identity.vaultId;
@@ -4643,6 +4671,13 @@ async function buildServer(): Promise<FastifyInstance> {
 
     if (!config.enabled) {
       throw new VaultError('INTERNAL_ERROR', 'Telegram notifications are disabled');
+    }
+
+    if (!isTelegramCloudConfigured()) {
+      throw new VaultError(
+        'INTERNAL_ERROR',
+        'Telegram cloud not configured. Set DCP_TELEGRAM_CLOUD_URL to your own @dcprotocol/telegram service.'
+      );
     }
 
     // Check rate limit

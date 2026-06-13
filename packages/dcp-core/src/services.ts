@@ -140,14 +140,19 @@ export function isValidPublicKey(key: string): boolean {
 // ============================================================================
 
 /**
- * Default relay URL for DCP
+ * Default relay URL for DCP.
+ *
+ * Open source ships with NO hosted default — self-hosters point this at their
+ * OWN relay via the `DCP_RELAY_URL` env var (or pass an explicit URL at the call
+ * site). Managed products configure this explicitly. Empty string means
+ * "relay not configured" and callers should require an explicit URL.
  */
-export const DEFAULT_RELAY_URL = 'wss://relay.dcp.1ly.store';
+export const DEFAULT_RELAY_URL = process.env.DCP_RELAY_URL || '';
 
 /**
- * Alternative relay URLs
+ * Alternative relay URLs (env-configurable; no hosted defaults in OSS).
  */
 export const RELAY_URLS = {
-  primary: 'wss://relay.dcp.1ly.store',
-  fallback: 'wss://relay.dcprotocol.org',
+  primary: process.env.DCP_RELAY_URL || '',
+  fallback: process.env.DCP_RELAY_FALLBACK_URL || '',
 };

@@ -157,6 +157,14 @@ export interface VaultConnection {
   ws?: unknown; // WebSocket reference
 }
 
+export interface PushTokenRegistration {
+  vault_id: string;
+  token: string;
+  platform?: 'ios' | 'android' | 'web' | 'unknown';
+  device_id?: string;
+  updated_at: number;
+}
+
 // ============================================================================
 // Error Types (from protocol spec section 7.3)
 // ============================================================================
@@ -219,6 +227,8 @@ export interface RelayConfig {
   rateLimitPerMinute: number;
   /** Rate limit window in ms (default: 60000 = 1 minute) */
   rateLimitWindowMs: number;
+  /** Expo push API endpoint. Empty disables outbound push delivery. */
+  expoPushUrl: string;
 }
 
 export const DEFAULT_RELAY_CONFIG: RelayConfig = {
@@ -231,6 +241,7 @@ export const DEFAULT_RELAY_CONFIG: RelayConfig = {
   debug: false,
   rateLimitPerMinute: 60,
   rateLimitWindowMs: 60_000,
+  expoPushUrl: 'https://exp.host/--/api/v2/push/send',
 };
 
 // ============================================================================
@@ -302,5 +313,90 @@ export interface PairingApprovalStatus {
   status: 'pending' | 'approved' | 'denied' | 'expired' | 'not_found';
   agent_id?: string;
   vault_id?: string;
+  error?: string;
+}
+
+// ============================================================================
+// DCP Mobile Pairing Types (Agent QR → Mobile approval → Agent polling)
+// ============================================================================
+
+export type MobileAgentClient =
+  | 'claude-desktop'
+  | 'cursor'
+  | 'vscode'
+  | 'hermes'
+  | 'openclaw'
+  | 'mcp'
+  | 'custom'
+  | 'hosted';
+
+export type MobileAgentEnvironment = 'local' | 'vps' | 'hosted' | 'dev';
+
+export type MobileDcpScope =
+  | 'read:wallet.address'
+  | 'sign:solana'
+  | 'vault_get_address'
+  | 'vault_budget_check'
+  | 'vault_sign_tx'
+  | 'vault_sign_message';
+
+export interface MobilePairingBudget {
+  daily: number;
+  currency: 'SOL' | 'USDC' | '1LY';
+  approval_threshold: number;
+}
+
+export interface MobilePairingInvite {
+  type: 'dcp_agent_pairing';
+  version: '1.0';
+  relay_url: string;
+  invite_id: string;
+  requested_agent_id: string;
+  agent_public_key: string;
+  agent_name: string;
+  agent_client: MobileAgentClient;
+  environment: MobileAgentEnvironment;
+  requested_scopes: MobileDcpScope[];
+  requested_budget: MobilePairingBudget;
+  created_at: string;
+  expires_at: string;
+  nonce: string;
+  signature?: string;
+}
+
+export interface MobilePairingApprovalRequest {
+  invite: MobilePairingInvite;
+  vault_id: string;
+  agent_id: string;
+  vault_hpke_public_key: string;
+  vault_signing_public_key: string;
+  approved_scopes: MobileDcpScope[];
+  approved_budget: MobilePairingBudget;
+}
+
+export interface MobilePairingRecord {
+  invite_id: string;
+  invite: MobilePairingInvite;
+  received_at: number;
+  status: 'pending' | 'approved' | 'denied' | 'expired';
+  vault_id?: string;
+  vault_hpke_public_key?: string;
+  vault_signing_public_key?: string;
+  agent_id?: string;
+  approved_scopes?: MobileDcpScope[];
+  approved_budget?: MobilePairingBudget;
+  resolved_at?: number;
+  denied_reason?: string;
+}
+
+export interface MobilePairingStatus {
+  status: 'pending' | 'approved' | 'denied' | 'expired' | 'not_found';
+  invite_id?: string;
+  agent_id?: string;
+  vault_id?: string;
+  vault_hpke_public_key?: string;
+  vault_signing_public_key?: string;
+  approved_scopes?: MobileDcpScope[];
+  approved_budget?: MobilePairingBudget;
   error?: string;
 }

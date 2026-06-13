@@ -96,3 +96,8 @@ temp/
 # Local test configs (may contain secrets)
 test-*.json
 *.local.json
+
+# Operator-specific deployment configs (our hosted infra — not part of OSS).
+# Self-hosters: copy fly.toml.example / fly.telegram.toml.example and set your own app name.
+fly.toml
+fly.telegram.toml

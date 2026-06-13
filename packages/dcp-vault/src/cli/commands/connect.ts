@@ -48,7 +48,7 @@ export const connectCommand = new Command('connect')
   .option('-u, --url <url>', 'Service connection endpoint (for custom services)')
   .option('-a, --auth-url <url>', 'Service auth URL (for custom services)')
   .option('--no-browser', 'Do not open browser automatically')
-  .option('-r, --relay-url <url>', 'Relay URL to use (default: wss://relay.dcp.1ly.store)')
+  .option('-r, --relay-url <url>', 'Relay URL to use (required; or set DCP_RELAY_URL)')
   .action(async (serviceId: string, options) => {
     try {
       await connectToService(serviceId, options);
@@ -119,6 +119,14 @@ async function connectToService(
   // Generate vault ID and HPKE keypair if not already present
   const { vaultId, hpkePublicKey } = await getOrCreateVaultIdentity(storage);
   const relayUrl = options.relayUrl || DEFAULT_RELAY_URL;
+
+  if (!relayUrl) {
+    console.error(
+      'No relay URL configured. Pass --relay-url=<wss://your-relay> or set DCP_RELAY_URL ' +
+        '(self-host your own @dcprotocol/relay).'
+    );
+    process.exit(1);
+  }
 
   console.log(`  ${dim('Vault ID:')}  ${vaultId}`);
   console.log(`  ${dim('Relay:')}     ${relayUrl}`);

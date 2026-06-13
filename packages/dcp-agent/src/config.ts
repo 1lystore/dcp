@@ -13,7 +13,7 @@ import {
   generateSigningKeyPair,
   type SignedPairingGrant,
 } from '@dcprotocol/core';
-import { AgentConfig, AgentError } from './types.js';
+import { AgentConfig, AgentError, type MobilePairingApprovalStatus, type MobilePendingConfig } from './types.js';
 
 // ============================================================================
 // Constants
@@ -149,6 +149,56 @@ export function saveConfig(config: AgentConfig): void {
   ensureConfigDir();
   const configPath = getConfigPath(config.agent_id);
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+}
+
+/**
+ * Save pending mobile pairing material.
+ *
+ * This is not a usable AgentConfig yet. The mobile vault must approve the
+ * invite and return vault identity before this can be promoted to a runtime
+ * agent config.
+ */
+export function saveMobilePendingConfig(config: MobilePendingConfig): void {
+  ensureConfigDir();
+  const safeInviteId = config.invite_id.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const configPath = path.join(CONFIG_DIR, `${safeInviteId}.mobile-pending.json`);
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+}
+
+export function promoteMobilePendingConfig(
+  pending: MobilePendingConfig,
+  approval: MobilePairingApprovalStatus
+): AgentConfig {
+  if (
+    approval.status !== 'approved' ||
+    !approval.agent_id ||
+    !approval.vault_id ||
+    !approval.vault_hpke_public_key ||
+    !approval.vault_signing_public_key
+  ) {
+    throw new AgentError('INVALID_GRANT', 'Mobile pairing approval is incomplete');
+  }
+
+  const config: AgentConfig = {
+    agent_id: approval.agent_id,
+    agent_name: pending.invite.agent_name,
+    vault_id: approval.vault_id,
+    mode: 'mcp',
+    vault_hpke_public_key: approval.vault_hpke_public_key,
+    vault_signing_public_key: approval.vault_signing_public_key,
+    relay_url: pending.invite.relay_url,
+    service_keypair: pending.service_keypair,
+    paired_at: new Date().toISOString(),
+    grant_expires_at: pending.invite.expires_at,
+  };
+
+  saveConfig(config);
+  const safeInviteId = pending.invite_id.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const pendingPath = path.join(CONFIG_DIR, `${safeInviteId}.mobile-pending.json`);
+  if (fs.existsSync(pendingPath)) {
+    fs.unlinkSync(pendingPath);
+  }
+  return config;
 }
 
 /**

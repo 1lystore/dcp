@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+#
+# DCP pre-push guard.
+#
+# OSS must never push private/premium code (one-way dependency: private -> OSS).
+# This runs the publish guard, which (a) verifies package publish config and
+# (b) scans tracked files for premium markers. A non-zero exit blocks the push.
+#
+# Bypass (use only when you are SURE): git push --no-verify
+
+set -e
+
+echo "[pre-push] Running DCP publish guard (premium-leak + publish-config check)..."
+
+# Resolve repo root so the hook works regardless of CWD.
+ROOT="$(git rev-parse --show-toplevel)"
+
+if ! node "$ROOT/scripts/publish-guard.mjs"; then
+  echo ""
+  echo "[pre-push] BLOCKED: publish guard failed. Fix the issues above before pushing."
+  echo "[pre-push] (Override only if you are certain: git push --no-verify)"
+  exit 1
+fi
+
+echo "[pre-push] Publish guard passed."
