@@ -181,6 +181,58 @@ else
 fi
 
 # =============================================================================
+# Test 13: Cloud-Connect — match-code is MANDATORY on approve (Rule #6)
+# =============================================================================
+echo "Test 13: Cloud-Connect approve requires a match code"
+if grep -n "presentedCode\|expectedCode\|constantTimeStrEqual" "${ROOT_DIR}/packages/dcp-vault/src/server/index.ts" > /dev/null 2>&1; then
+  pass "Cloud-Connect approve enforces a mandatory, constant-time match code"
+else
+  fail "Cloud-Connect approve match-code enforcement not found"
+fi
+
+# =============================================================================
+# Test 14: Cloud-Connect — PKCE is S256-only (no plain downgrade)
+# =============================================================================
+echo "Test 14: Relay OAuth PKCE is S256-only"
+if grep -rn "code_challenge_methods_supported" "${ROOT_DIR}/packages/dcp-relay/src/oauth/metadata.ts" | grep -q "S256" && \
+   ! grep -rn "'plain'" "${ROOT_DIR}/packages/dcp-relay/src/oauth/"*.ts > /dev/null 2>&1; then
+  pass "Relay advertises + enforces PKCE S256 only (no plain)"
+else
+  fail "Relay PKCE may allow plain or S256 not enforced"
+fi
+
+# =============================================================================
+# Test 15: Cloud-Connect — access tokens are DPoP + audience bound (Rules #2)
+# =============================================================================
+echo "Test 15: Relay access tokens are DPoP + audience bound"
+if grep -n "cnf" "${ROOT_DIR}/packages/dcp-relay/src/oauth/tokens.ts" | grep -q "jkt" && \
+   grep -qn "setAudience" "${ROOT_DIR}/packages/dcp-relay/src/oauth/tokens.ts"; then
+  pass "Access tokens bind cnf.jkt (DPoP) + audience (RFC 8707)"
+else
+  fail "Access tokens missing DPoP/audience binding"
+fi
+
+# =============================================================================
+# Test 16: Cloud-Connect — DPoP proofs are single-use (jti replay guard)
+# =============================================================================
+echo "Test 16: Relay DPoP proofs have a jti replay guard"
+if grep -qn "dpop_replay\|jtiGuard\|createJtiGuard" "${ROOT_DIR}/packages/dcp-relay/src/oauth/dpop.ts"; then
+  pass "DPoP proofs are single-use (jti replay guard)"
+else
+  fail "DPoP jti replay guard not found"
+fi
+
+# =============================================================================
+# Test 17: Cloud-Connect — refresh tokens rotate with reuse detection (Rule #3)
+# =============================================================================
+echo "Test 17: Refresh tokens rotate with reuse detection"
+if grep -qn "reuse_detected" "${ROOT_DIR}/packages/dcp-relay/src/oauth/store.ts"; then
+  pass "Refresh-token reuse is detected (whole-chain revoke)"
+else
+  fail "Refresh-token reuse detection not found"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 echo ""
