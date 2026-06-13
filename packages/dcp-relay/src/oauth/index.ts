@@ -59,11 +59,14 @@ export {
 
 export {
   UnavailableVaultBridge,
+  UnavailableMcpBridge,
   type VaultConnectBridge,
   type BridgeRedeemInput,
   type BridgeRedeemResult,
   type BridgeApprovalInput,
   type BridgeApprovalResult,
+  type McpDataBridge,
+  type AuthedMcpRequest,
 } from './bridge.js';
 
 export {

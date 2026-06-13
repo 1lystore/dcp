@@ -57,9 +57,14 @@ import {
   RefreshTokenStore,
   processConnect,
   processToken,
+  verifyAccessToken,
+  verifyDpopProof,
+  wwwAuthenticateChallenge,
+  UnavailableMcpBridge,
   type RelayOAuthKeys,
   type JtiReplayGuard,
   type VaultConnectBridge,
+  type McpDataBridge,
   type GrantDeps,
   type BridgeRedeemInput,
   type BridgeRedeemResult,
@@ -97,6 +102,10 @@ export class RelayServer {
   private oauthJti: JtiReplayGuard = createJtiGuard();
   /** Control-plane bridge to the vault that issued a connect-link (WS-backed in prod). */
   private vaultBridge: VaultConnectBridge;
+  /** Data-plane bridge that forwards authorized MCP requests to the vault. */
+  private mcpBridge: McpDataBridge;
+  /** Instant-revoke denylist of agent ids (kills live access tokens; Rule #7). */
+  private revokedAgents = new Set<string>();
   /** Pending cloud-connect control requests awaiting a vault reply (control_id -> waiter). */
   private pendingControl = new Map<
     string,
@@ -107,6 +116,7 @@ export class RelayServer {
     config: Partial<RelayConfig> & {
       authConfig?: AuthConfig;
       vaultBridge?: VaultConnectBridge;
+      mcpBridge?: McpDataBridge;
     } = {}
   ) {
     this.config = { ...DEFAULT_RELAY_CONFIG, ...config };
@@ -118,6 +128,7 @@ export class RelayServer {
         redeem: (input) => this.wsBridgeRedeem(input),
         approvalStatus: (input) => this.wsBridgeApprovalStatus(input),
       };
+    this.mcpBridge = config.mcpBridge ?? new UnavailableMcpBridge();
     this.messageStore = new MessageStore(this.config);
     this.connectionStore = new ConnectionStore();
     this.rateLimiter = new RateLimiter(
@@ -286,6 +297,16 @@ export class RelayServer {
     }
   }
 
+  /**
+   * Instantly revoke a cloud agent's access (Rule #7): denylist its access tokens
+   * AND kill its refresh-token chains. Called when the vault owner revokes.
+   */
+  revokeAgentAccess(agentId: string): void {
+    if (!agentId) return;
+    this.revokedAgents.add(agentId);
+    this.oauthRefresh.revokeByAgent(agentId);
+  }
+
   /** Assemble the per-request OAuth grant dependencies. */
   private async grantDeps(request: FastifyRequest): Promise<GrantDeps> {
     return {
@@ -438,6 +459,86 @@ export class RelayServer {
       if (result.status === 200) reply.header('cache-control', 'no-store');
       return result.body;
     });
+
+    // Per-vault MCP resource (Streamable HTTP). Verifies the DPoP-bound,
+    // audience-bound access token, then bridges the MCP request to the vault.
+    this.server.post<{ Params: { vaultId: string }; Body: unknown }>(
+      '/v/:vaultId/mcp',
+      async (request, reply) => {
+        const vaultId = request.params.vaultId;
+        const base = this.baseUrl(request);
+        const resource = `${base}/v/${vaultId}/mcp`;
+        const metadataUrl = `${base}/.well-known/oauth-protected-resource/v/${vaultId}/mcp`;
+        const unauthorized = (error: string, desc: string) => {
+          reply
+            .status(401)
+            .header(
+              'WWW-Authenticate',
+              wwwAuthenticateChallenge({ resourceMetadataUrl: metadataUrl, error, errorDescription: desc })
+            );
+          return { error, error_description: desc };
+        };
+
+        // 1. Bearer must be a DPoP-scheme access token.
+        const authz = (request.headers['authorization'] as string) || '';
+        const m = /^DPoP (.+)$/.exec(authz);
+        if (!m) return unauthorized('invalid_token', 'A DPoP-bound access token is required');
+        const accessToken = m[1].trim();
+        const proof = (request.headers['dpop'] as string) || '';
+        if (!proof) return unauthorized('invalid_token', 'A DPoP proof header is required');
+
+        // 2. Verify the access token (signature, issuer, audience == this vault).
+        const keys = await this.getOAuthKeys();
+        let claims;
+        try {
+          claims = await verifyAccessToken({
+            keys,
+            token: accessToken,
+            issuer: base,
+            expectedAudience: resource,
+          });
+        } catch {
+          return unauthorized('invalid_token', 'Access token invalid or for a different resource');
+        }
+        if (claims.vault_id !== vaultId) {
+          return unauthorized('invalid_token', 'Token is not valid for this vault');
+        }
+
+        // 3. Verify the DPoP proof for THIS request, bound to the token (ath + jkt).
+        let jkt: string;
+        try {
+          const d = await verifyDpopProof(proof, {
+            method: 'POST',
+            url: resource,
+            jtiGuard: this.oauthJti,
+            accessToken,
+          });
+          jkt = d.jkt;
+        } catch {
+          return unauthorized('invalid_token', 'DPoP proof invalid');
+        }
+        if (jkt !== claims.cnf.jkt) {
+          return unauthorized('invalid_token', 'DPoP key does not match the token binding');
+        }
+
+        // 4. Instant-revoke denylist (Rule #7).
+        if (this.revokedAgents.has(claims.sub)) {
+          return unauthorized('invalid_token', 'Access has been revoked');
+        }
+
+        // 5. Authorized — bridge to the vault. The vault still enforces per-action
+        //    on-device consent for anything sensitive.
+        const result = await this.mcpBridge.forward({
+          vaultId,
+          agentId: claims.sub,
+          scope: claims.scope,
+          jkt,
+          body: request.body,
+        });
+        reply.status(result.status);
+        return result.body as unknown;
+      }
+    );
 
     // Stats (for monitoring)
     this.server.get('/stats', async () => ({

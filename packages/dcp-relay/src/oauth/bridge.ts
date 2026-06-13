@@ -60,3 +60,35 @@ export class UnavailableVaultBridge implements VaultConnectBridge {
     return { status: 'unknown' };
   }
 }
+
+/**
+ * Data-plane bridge: forward an AUTHORIZED MCP request to the vault. The facade
+ * has already verified the access token (audience) + DPoP proof; this carries the
+ * authenticated agent identity so the vault can apply the right scopes/budget and
+ * pop an on-device consent for sensitive actions.
+ */
+export interface AuthedMcpRequest {
+  vaultId: string;
+  /** Authenticated agent id (the access token subject). */
+  agentId: string;
+  /** Granted scope (space-delimited) from the access token. */
+  scope: string;
+  /** DPoP key thumbprint the token is bound to. */
+  jkt: string;
+  /** The MCP JSON-RPC request body. */
+  body: unknown;
+}
+
+export interface McpDataBridge {
+  forward(req: AuthedMcpRequest): Promise<{ status: number; body: unknown }>;
+}
+
+/** Default MCP data bridge — not wired yet; signals the data plane is unavailable. */
+export class UnavailableMcpBridge implements McpDataBridge {
+  async forward(): Promise<{ status: number; body: unknown }> {
+    return {
+      status: 503,
+      body: { error: 'data_plane_unavailable', error_description: 'MCP bridge not configured' },
+    };
+  }
+}
