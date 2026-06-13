@@ -60,6 +60,12 @@ import {
   parseVpsPairingInvite,
   verifyPairingGrantWithKey,
   decodePairingGrant,
+  createConnectLink,
+  verifyConnectLinkWithKey,
+  decodeConnectLink,
+  isConnectLink,
+  generateMatchCode,
+  hpkeFingerprint,
   canonicalJson,
   DEFAULT_RELAY_URL as CORE_DEFAULT_RELAY_URL,
 } from '@dcprotocol/core';
@@ -3098,6 +3104,388 @@ async function buildServer(): Promise<FastifyInstance> {
 
     return { denied: true };
   });
+
+  // ============================================================================
+  // Cloud-Connect (Cloud Agent Connect: paste-a-URL + on-device approval)
+  // ============================================================================
+  // Flow: owner issues a one-time, key-pinned connect-link -> the agent redeems
+  // it (creating a PENDING agent + match-code) -> owner approves on-device (verifies
+  // the match-code) -> the agent polls and mints its session token. Permissions and
+  // budget live ONLY in the vault DB; the link carries no authority. See PRD §6.
+
+  /** Derive server-side request facts for the on-device approval (Rule #6). */
+  const deriveSourceFacts = (
+    request: FastifyRequest
+  ): { source_ip?: string; source_host?: string } => {
+    // request.ip is derived by Fastify from the socket (not an attacker header).
+    const source_ip = request.ip || undefined;
+    const source_host =
+      (request.headers['host'] as string | undefined) || undefined;
+    return { source_ip, source_host };
+  };
+
+  /**
+   * Issue a one-time, key-pinned connect-link (owner only).
+   * Auto-approve defaults OFF / $0 (Rule #5). Permissions stored only in vault DB.
+   */
+  server.post<{
+    Body: {
+      name?: string;
+      scopes?: string[];
+      budget?: { daily?: number; currency?: string; auto_approve_under?: number };
+    };
+  }>('/v1/cloud-connect/links', async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+      });
+    }
+
+    const body = request.body || {};
+    const name = (body.name || '').trim() || 'Cloud agent';
+    const scopes = Array.isArray(body.scopes) ? body.scopes.filter((s) => typeof s === 'string') : [];
+    // Rule #5: cloud agents start with NO standing auto-approve and $0 budget.
+    const budget = {
+      daily: Math.max(0, Number(body.budget?.daily ?? 0)) || 0,
+      currency: body.budget?.currency || 'USD',
+      auto_approve_under: Math.max(0, Number(body.budget?.auto_approve_under ?? 0)) || 0,
+    };
+
+    const identity = await ensureRelayIdentity();
+    const agentId = `agent_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    const hpkeB64 = identity.hpkeKeyPair.publicKey.toString('base64');
+    const signB64 = identity.signingKeyPair.publicKey.toString('base64');
+    const relayUrl = identity.relayUrl || DEFAULT_RELAY_URL || CORE_DEFAULT_RELAY_URL || '';
+
+    const link = createConnectLink(
+      {
+        vault_id: identity.vaultId,
+        agent_id: agentId,
+        agent_name: name,
+        mode: 'mcp',
+        relay_url: relayUrl,
+        vault_hpke_public_key: hpkeB64,
+        vault_signing_public_key: signB64,
+      },
+      identity.signingKeyPair.privateKey
+    );
+
+    storage.createCloudConnectLink({
+      link_id: link.link_id,
+      secret: link.secret,
+      agent_id: agentId,
+      name,
+      permission_scopes: scopes,
+      budget,
+      expires_at: link.expires_at,
+    });
+
+    return {
+      connect_link: link.token,
+      link_id: link.link_id,
+      agent_id: agentId,
+      name,
+      scopes,
+      budget,
+      vault_id: identity.vaultId,
+      vault_hpke_fingerprint: link.vault_hpke_fingerprint,
+      relay_url: relayUrl,
+      created_at: link.created_at,
+      expires_at: link.expires_at,
+    };
+  });
+
+  /**
+   * Redeem a connect-link (called by the agent; authed by the link itself).
+   * Creates a PENDING agent (inert until approved — Rule #8) + a match-code.
+   */
+  server.post<{ Body: { connect_link?: string; agent_public_key?: string } }>(
+    '/v1/cloud-connect/redeem',
+    async (request, reply) => {
+      const body = request.body || {};
+      const token = (body.connect_link || '').trim();
+      const agentPublicKey = (body.agent_public_key || '').trim();
+
+      if (!token || !isConnectLink(token)) {
+        return reply.status(400).send({
+          error: { code: 'INVALID_CONNECT_LINK', message: 'A valid connect_link is required' },
+        });
+      }
+      if (!agentPublicKey || !isValidPublicKey(agentPublicKey)) {
+        return reply.status(400).send({
+          error: {
+            code: 'INVALID_AGENT_KEY',
+            message: 'A valid agent_public_key (base64 Ed25519) is required',
+          },
+        });
+      }
+
+      const identity = await ensureRelayIdentity();
+
+      // Verify against the vault's OWN signing key (never trust the embedded key).
+      const payload = verifyConnectLinkWithKey(token, identity.signingKeyPair.publicKey);
+      if (!payload) {
+        return reply.status(400).send({
+          error: {
+            code: 'INVALID_CONNECT_LINK',
+            message: 'Connect link is invalid, tampered, or expired',
+          },
+        });
+      }
+      if (payload.vault_id !== identity.vaultId) {
+        return reply.status(400).send({
+          error: { code: 'WRONG_VAULT', message: 'Connect link is for a different vault' },
+        });
+      }
+
+      // Rule #1: the pinned HPKE key in the link must match this vault's real key.
+      const actualHpke = identity.hpkeKeyPair.publicKey.toString('base64');
+      if (
+        payload.vault_hpke_public_key !== actualHpke ||
+        payload.vault_hpke_fingerprint !== hpkeFingerprint(actualHpke)
+      ) {
+        return reply.status(400).send({
+          error: { code: 'KEY_PIN_MISMATCH', message: 'Pinned vault key does not match' },
+        });
+      }
+
+      const matchCode = generateMatchCode();
+      const { source_ip, source_host } = deriveSourceFacts(request);
+
+      const result = storage.redeemCloudConnectLink({
+        link_id: payload.link_id,
+        secret: payload.secret,
+        redeemer_public_key: agentPublicKey,
+        match_code: matchCode,
+        mode: 'mcp',
+        source_ip,
+        source_host,
+      });
+
+      if (!result.ok) {
+        const code = result.reason || 'REDEEM_FAILED';
+        const status = code === 'LINK_NOT_FOUND' ? 404 : 400;
+        return reply.status(status).send({
+          error: { code, message: `Connect link could not be redeemed (${code})` },
+        });
+      }
+
+      return {
+        status: 'pending_approval',
+        agent_id: result.agent_id,
+        match_code: result.match_code,
+        vault_id: identity.vaultId,
+        vault_hpke_public_key: actualHpke,
+        vault_hpke_fingerprint: hpkeFingerprint(actualHpke),
+        message:
+          'Approve this connection on your DCP device. Confirm the match code shown here matches the one on your device.',
+      };
+    }
+  );
+
+  /**
+   * Agent status poll (authed by the connect-link secret). Returns the current
+   * state; once approved, mints the session token EXACTLY ONCE (never stored as
+   * plaintext) and returns the vault keys + scopes/budget for the agent.
+   */
+  server.post<{ Body: { connect_link?: string } }>(
+    '/v1/cloud-connect/status',
+    async (request, reply) => {
+      const token = (request.body?.connect_link || '').trim();
+      if (!token || !isConnectLink(token)) {
+        return reply.status(400).send({
+          error: { code: 'INVALID_CONNECT_LINK', message: 'A valid connect_link is required' },
+        });
+      }
+
+      // Decode (no expiry gate — the agent may legitimately poll post-approval).
+      const decoded = decodeConnectLink(token);
+      if (!decoded) {
+        return reply.status(400).send({
+          error: { code: 'INVALID_CONNECT_LINK', message: 'Connect link is malformed' },
+        });
+      }
+
+      const identity = await ensureRelayIdentity();
+      if (decoded.payload.vault_id !== identity.vaultId) {
+        return reply.status(400).send({
+          error: { code: 'WRONG_VAULT', message: 'Connect link is for a different vault' },
+        });
+      }
+
+      const linkId = decoded.payload.link_id;
+      // Authenticate the poller via the single-use secret (constant-time compare).
+      if (!storage.verifyCloudConnectSecret(linkId, decoded.payload.secret)) {
+        return reply.status(403).send({
+          error: { code: 'UNAUTHORIZED', message: 'Connect link secret does not match' },
+        });
+      }
+
+      const link = storage.getCloudConnectLink(linkId);
+      if (!link) {
+        return reply.status(404).send({
+          error: { code: 'LINK_NOT_FOUND', message: 'Connect link not found' },
+        });
+      }
+
+      if (link.status === 'revoked') return { status: 'revoked' };
+      if (link.status === 'expired') return { status: 'expired' };
+      if (link.status === 'pending') return { status: 'pending_redeem' };
+      if (link.status === 'redeemed') {
+        return { status: 'pending_approval', match_code: link.match_code };
+      }
+
+      // status === 'consumed' (owner approved) -> mint token once.
+      const agent = storage.getAgentConnection(link.agent_id);
+      if (!agent || agent.status !== 'active') {
+        return { status: 'revoked' };
+      }
+      if (agent.token_hash) {
+        return { status: 'approved', token_already_issued: true, agent_id: link.agent_id };
+      }
+
+      const sessionToken = crypto.randomBytes(32).toString('base64url');
+      const sessionTokenHash = crypto.createHash('sha256').update(sessionToken).digest('hex');
+      storage.markAgentPaired(link.agent_id, sessionTokenHash, link.redeemer_public_key);
+
+      const relayUrl = identity.relayUrl || DEFAULT_RELAY_URL || CORE_DEFAULT_RELAY_URL || '';
+      return {
+        status: 'approved',
+        agent_id: link.agent_id,
+        session_token: sessionToken,
+        vault_id: identity.vaultId,
+        vault_hpke_public_key: identity.hpkeKeyPair.publicKey.toString('base64'),
+        vault_signing_public_key: identity.signingKeyPair.publicKey.toString('base64'),
+        relay_url: relayUrl,
+        scopes: link.permission_scopes,
+        budget: link.budget,
+      };
+    }
+  );
+
+  /** List connect-links awaiting on-device approval (owner only). Rule #6 facts. */
+  server.get('/v1/cloud-connect/pending', async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+      });
+    }
+    const pending = storage.listPendingCloudConnectApprovals();
+    return {
+      pending: pending.map((l) => ({
+        agent_id: l.agent_id,
+        link_id: l.link_id,
+        name: l.name,
+        scopes: l.permission_scopes,
+        budget: l.budget,
+        match_code: l.match_code,
+        source_ip: l.source_ip,
+        source_host: l.source_host,
+        agent_fingerprint: l.redeemer_public_key
+          ? hpkeFingerprint(l.redeemer_public_key)
+          : undefined,
+        redeemed_at: l.redeemed_at,
+        created_at: l.created_at,
+      })),
+    };
+  });
+
+  /** List all connect-links for management (owner only). */
+  server.get('/v1/cloud-connect/links', async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+      });
+    }
+    return { links: storage.listCloudConnectLinks() };
+  });
+
+  /** Approve a pending cloud-connect (owner only; verifies match-code if provided). */
+  server.post<{ Params: { agentId: string }; Body: { match_code?: string } }>(
+    '/v1/cloud-connect/pending/:agentId/approve',
+    async (request, reply) => {
+      if (!isOwnerRequest(request)) {
+        return reply.status(403).send({
+          error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+        });
+      }
+      const link = storage.getCloudConnectLinkByAgent(request.params.agentId);
+      if (!link || link.status !== 'redeemed') {
+        return reply.status(404).send({
+          error: {
+            code: 'PENDING_NOT_FOUND',
+            message: 'No pending cloud-connect approval for this agent',
+          },
+        });
+      }
+      if (
+        request.body?.match_code &&
+        link.match_code &&
+        request.body.match_code.trim().toUpperCase() !== link.match_code.toUpperCase()
+      ) {
+        return reply.status(400).send({
+          error: { code: 'MATCH_CODE_MISMATCH', message: 'Match code does not match' },
+        });
+      }
+      const result = storage.approveCloudConnectLink(link.link_id);
+      if (!result.ok) {
+        return reply.status(400).send({
+          error: { code: result.reason || 'APPROVE_FAILED', message: 'Approval failed' },
+        });
+      }
+      return { approved: true, agent_id: result.agent_id, name: link.name };
+    }
+  );
+
+  /** Deny a pending cloud-connect (owner only). */
+  server.post<{ Params: { agentId: string } }>(
+    '/v1/cloud-connect/pending/:agentId/deny',
+    async (request, reply) => {
+      if (!isOwnerRequest(request)) {
+        return reply.status(403).send({
+          error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+        });
+      }
+      const link = storage.getCloudConnectLinkByAgent(request.params.agentId);
+      if (!link) {
+        return reply.status(404).send({
+          error: { code: 'PENDING_NOT_FOUND', message: 'No cloud-connect link for this agent' },
+        });
+      }
+      const result = storage.denyCloudConnectLink(link.link_id);
+      if (!result.ok) {
+        return reply.status(400).send({
+          error: { code: result.reason || 'DENY_FAILED', message: 'Deny failed' },
+        });
+      }
+      return { denied: true, agent_id: result.agent_id };
+    }
+  );
+
+  /** Instantly revoke a bound cloud agent + its link (owner only — Rule #7). */
+  server.post<{ Params: { agentId: string } }>(
+    '/v1/cloud-connect/agents/:agentId/revoke',
+    async (request, reply) => {
+      if (!isOwnerRequest(request)) {
+        return reply.status(403).send({
+          error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+        });
+      }
+      const link = storage.getCloudConnectLinkByAgent(request.params.agentId);
+      if (!link) {
+        // No link record — still revoke the agent connection if it exists.
+        const ok = storage.revokeAgentConnection(request.params.agentId);
+        if (!ok) {
+          return reply.status(404).send({
+            error: { code: 'AGENT_NOT_FOUND', message: 'Agent not found' },
+          });
+        }
+        return { revoked: true, agent_id: request.params.agentId };
+      }
+      const result = storage.revokeCloudConnectLink(link.link_id);
+      return { revoked: true, agent_id: result.agent_id };
+    }
+  );
 
   // ============================================================================
   // Trusted Services (Owner Only)
