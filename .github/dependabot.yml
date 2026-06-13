@@ -23,17 +23,6 @@ updates:
       interval: monthly
     open-pull-requests-limit: 1
 
-  - package-ecosystem: cargo
-    directory: /packages/dcp-desktop/src-tauri
-    schedule:
-      interval: monthly
-    open-pull-requests-limit: 2
-    groups:
-      cargo-minor-and-patch:
-        update-types:
-          - minor
-          - patch
-
   - package-ecosystem: pip
     directory: /sdks/python
     schedule:
