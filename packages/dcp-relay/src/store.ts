@@ -50,6 +50,7 @@ export class MessageStore {
       rateLimitPerMinute: config.rateLimitPerMinute ?? 60,
       rateLimitWindowMs: config.rateLimitWindowMs ?? 60_000,
       expoPushUrl: config.expoPushUrl ?? 'https://exp.host/--/api/v2/push/send',
+      publicUrl: config.publicUrl ?? '',
     };
 
     // Start cleanup interval

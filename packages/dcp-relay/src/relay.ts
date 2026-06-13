@@ -46,6 +46,17 @@ import {
 } from './types.js';
 import { MessageStore, ConnectionStore, RateLimiter, PairingClaimStore, MobilePairingStore, PushTokenStore } from './store.js';
 import { authenticateRegistration, authenticateRequest, closeAuth, type AuthConfig } from './auth.js';
+import {
+  initOAuthKeys,
+  authorizationServerMetadata,
+  protectedResourceMetadata,
+  createJtiGuard,
+  ClientStore,
+  AuthSessionStore,
+  RefreshTokenStore,
+  type RelayOAuthKeys,
+  type JtiReplayGuard,
+} from './oauth/index.js';
 
 // ============================================================================
 // Relay Server
@@ -68,6 +79,13 @@ export class RelayServer {
   private clientRequestsBySocket: Map<WebSocket, Set<string>> = new Map();
   /** invite_id -> vault_id mapping (populated when vault registers) */
   private inviteVaultMap: Map<string, string> = new Map();
+
+  // --- OAuth 2.1 Authorization Server (Cloud-Connect) ---
+  private oauthKeysPromise: Promise<RelayOAuthKeys> | null = null;
+  private oauthClients = new ClientStore();
+  private oauthSessions = new AuthSessionStore();
+  private oauthRefresh = new RefreshTokenStore();
+  private oauthJti: JtiReplayGuard = createJtiGuard();
 
   constructor(config: Partial<RelayConfig> & { authConfig?: AuthConfig } = {}) {
     this.config = { ...DEFAULT_RELAY_CONFIG, ...config };
@@ -148,6 +166,31 @@ export class RelayServer {
   }
 
   // --------------------------------------------------------------------------
+  // OAuth helpers (Cloud-Connect)
+  // --------------------------------------------------------------------------
+
+  /** Lazily initialise + memoize the OAuth signing keys (async, sync constructor). */
+  private getOAuthKeys(): Promise<RelayOAuthKeys> {
+    if (!this.oauthKeysPromise) {
+      this.oauthKeysPromise = initOAuthKeys({
+        privateJwk: process.env.DCP_RELAY_OAUTH_PRIVATE_JWK,
+      });
+    }
+    return this.oauthKeysPromise;
+  }
+
+  /**
+   * Public base URL (OAuth issuer / MCP resource origin). Prefers the configured
+   * publicUrl; otherwise derives from the request (dev/local). No trailing slash.
+   */
+  private baseUrl(request: FastifyRequest): string {
+    if (this.config.publicUrl) return this.config.publicUrl.replace(/\/+$/, '');
+    const proto = (request.headers['x-forwarded-proto'] as string) || request.protocol || 'http';
+    const host = request.headers['host'] || `${this.config.host}:${this.config.port}`;
+    return `${proto}://${host}`;
+  }
+
+  // --------------------------------------------------------------------------
   // HTTP Routes (REST + Long-Poll)
   // --------------------------------------------------------------------------
 
@@ -158,6 +201,71 @@ export class RelayServer {
       version: RELAY_VERSION,
       timestamp: new Date().toISOString(),
     }));
+
+    // ----------------------------------------------------------------------
+    // OAuth 2.1 discovery + client management (Cloud-Connect)
+    // ----------------------------------------------------------------------
+
+    // Authorization Server Metadata (RFC 8414).
+    this.server.get('/.well-known/oauth-authorization-server', async (request, reply) => {
+      reply.header('cache-control', 'public, max-age=300');
+      return authorizationServerMetadata({ issuer: this.baseUrl(request) });
+    });
+
+    // Protected Resource Metadata (RFC 9728) for a per-vault MCP resource.
+    this.server.get<{ Params: { vaultId: string } }>(
+      '/.well-known/oauth-protected-resource/v/:vaultId/mcp',
+      async (request, reply) => {
+        const base = this.baseUrl(request);
+        reply.header('cache-control', 'public, max-age=300');
+        return protectedResourceMetadata({
+          resource: `${base}/v/${request.params.vaultId}/mcp`,
+          authorizationServers: [base],
+        });
+      }
+    );
+
+    // JWKS — public verification keys for issued access tokens.
+    this.server.get('/oauth/jwks', async (_request, reply) => {
+      const keys = await this.getOAuthKeys();
+      reply.header('cache-control', 'public, max-age=3600');
+      return keys.jwks();
+    });
+
+    // Dynamic Client Registration (RFC 7591). Public clients only; the real
+    // authorization gate is the on-device approval at the vault (Rule #8).
+    this.server.post<{
+      Body: { client_name?: string; redirect_uris?: string[] };
+    }>('/oauth/register', async (request, reply) => {
+      const body = request.body || {};
+      const client = this.oauthClients.register({
+        client_name: body.client_name,
+        redirect_uris: body.redirect_uris,
+      });
+      reply.status(201);
+      return {
+        client_id: client.client_id,
+        client_name: client.client_name,
+        redirect_uris: client.redirect_uris,
+        token_endpoint_auth_method: 'none',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+      };
+    });
+
+    // Token revocation (RFC 7009). Revokes the refresh-token chain. Always 200.
+    this.server.post<{ Body: { token?: string } }>(
+      '/oauth/revoke',
+      async (request, reply) => {
+        const token = request.body?.token;
+        if (token) {
+          const chain = this.oauthRefresh.chainFor(token);
+          if (chain) this.oauthRefresh.revokeChain(chain);
+        }
+        reply.status(200);
+        return {};
+      }
+    );
 
     // Stats (for monitoring)
     this.server.get('/stats', async () => ({

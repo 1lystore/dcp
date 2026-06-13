@@ -229,6 +229,13 @@ export interface RelayConfig {
   rateLimitWindowMs: number;
   /** Expo push API endpoint. Empty disables outbound push delivery. */
   expoPushUrl: string;
+  /**
+   * Public base URL of this relay (the OAuth issuer / MCP resource origin),
+   * e.g. https://relay.dcp.1ly.store. Used to build OAuth discovery metadata and
+   * audience-bound token identifiers. Empty = derive from the request's Host
+   * header (fine for local/dev; set explicitly in production).
+   */
+  publicUrl: string;
 }
 
 export const DEFAULT_RELAY_CONFIG: RelayConfig = {
@@ -242,6 +249,7 @@ export const DEFAULT_RELAY_CONFIG: RelayConfig = {
   rateLimitPerMinute: 60,
   rateLimitWindowMs: 60_000,
   expoPushUrl: 'https://exp.host/--/api/v2/push/send',
+  publicUrl: '',
 };
 
 // ============================================================================
