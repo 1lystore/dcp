@@ -6110,6 +6110,226 @@ async function redeemCloudConnectOverRelay(ctrl: {
   return { ok: true, agent_id: result.agent_id, match_code: result.match_code };
 }
 
+// ============================================================================
+// Cloud-Connect MCP handler (the data plane for relay-fronted cloud agents)
+// ============================================================================
+// A thin MCP JSON-RPC shell that DELEGATES tool calls to the vault's own REST
+// endpoints (same path as handleRelayRequest -> server.inject), so scope, budget,
+// and ON-DEVICE CONSENT are enforced exactly as for every other agent. The cloud
+// agent was authenticated at the relay (DPoP + audience); here we bind the call to
+// THAT agent's identity so sensitive actions still require an on-device tap.
+
+const MCP_PROTOCOL_VERSION = '2024-11-05';
+
+/** Tool schemas advertised to cloud agents. Mirrors the @dcprotocol/agent set. */
+const CLOUD_CONNECT_MCP_TOOLS = [
+  {
+    name: 'vault_get_address',
+    description: 'Get the wallet public address for a chain (read-only).',
+    inputSchema: {
+      type: 'object',
+      properties: { chain: { type: 'string', enum: ['solana'], default: 'solana' } },
+    },
+  },
+  {
+    name: 'vault_budget_check',
+    description: 'Check whether an amount is within the agent budget (read-only).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        amount: { type: 'number' },
+        currency: { type: 'string' },
+        chain: { type: 'string' },
+      },
+      required: ['amount', 'currency'],
+    },
+  },
+  {
+    name: 'vault_read',
+    description: 'Read a credential/data scope (gated by scope + on-device consent).',
+    inputSchema: {
+      type: 'object',
+      properties: { scope: { type: 'string' }, fields: { type: 'array', items: { type: 'string' } } },
+      required: ['scope'],
+    },
+  },
+  {
+    name: 'vault_sign_tx',
+    description: 'Sign a transaction (requires on-device approval; never auto-signs).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chain: { type: 'string', enum: ['solana'] },
+        unsigned_tx: { type: 'string' },
+        description: { type: 'string' },
+        amount: { type: 'number' },
+        currency: { type: 'string' },
+        destination: { type: 'string' },
+        idempotency_key: { type: 'string' },
+      },
+      required: ['chain', 'unsigned_tx'],
+    },
+  },
+  {
+    name: 'vault_sign_message',
+    description: 'Sign an arbitrary message (requires on-device approval).',
+    inputSchema: {
+      type: 'object',
+      properties: { chain: { type: 'string' }, message: { type: 'string' } },
+      required: ['chain', 'message'],
+    },
+  },
+  {
+    name: 'vault_sign_x402',
+    description: 'Sign an x402 payment payload (requires on-device approval).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        network: { type: 'string' },
+        payload: { type: 'string' },
+        amount: { type: 'number' },
+        currency: { type: 'string' },
+      },
+      required: ['network', 'payload'],
+    },
+  },
+  {
+    name: 'vault_write',
+    description: 'Write a credential/data scope (gated by scope + on-device consent).',
+    inputSchema: {
+      type: 'object',
+      properties: { scope: { type: 'string' }, value: {} },
+      required: ['scope'],
+    },
+  },
+];
+
+/** Map an MCP tool call to the vault's REST endpoint (same surface as handleRelayRequest). */
+function mcpToolToRest(
+  name: string,
+  args: Record<string, unknown>
+): { method: 'GET' | 'POST'; url: string; body?: Record<string, unknown> } | null {
+  switch (name) {
+    case 'vault_get_address':
+      return { method: 'GET', url: `/address/${(args.chain as string) || 'solana'}` };
+    case 'vault_budget_check':
+      return {
+        method: 'GET',
+        url: `/budget/check?amount=${args.amount ?? ''}&currency=${args.currency ?? ''}&chain=${args.chain ?? ''}`,
+      };
+    case 'vault_read':
+      return { method: 'POST', url: '/v1/vault/read', body: { ...args } };
+    case 'vault_write':
+      return { method: 'POST', url: '/v1/vault/write', body: { ...args } };
+    case 'vault_sign_tx':
+      return { method: 'POST', url: '/v1/vault/sign', body: { ...args } };
+    case 'vault_sign_message':
+      return { method: 'POST', url: '/v1/vault/sign_message', body: { ...args } };
+    case 'vault_sign_x402':
+      return { method: 'POST', url: '/v1/vault/sign_x402', body: { ...args } };
+    default:
+      return null;
+  }
+}
+
+interface JsonRpcRequest {
+  jsonrpc?: string;
+  id?: unknown;
+  method?: string;
+  params?: Record<string, unknown>;
+}
+
+/**
+ * Handle an MCP JSON-RPC request from a relay-fronted cloud agent.
+ * Returns { status, body } where body is the JSON-RPC response (or null for
+ * notifications). Tool calls delegate to the vault's REST endpoints bound to the
+ * authenticated agent's identity (scope + budget + on-device consent enforced).
+ */
+export async function handleCloudConnectMcp(
+  server: FastifyInstance,
+  agentId: string,
+  rawBody: unknown
+): Promise<{ status: number; body: unknown }> {
+  const req = (rawBody || {}) as JsonRpcRequest;
+  const id = req.id ?? null;
+  const rpcError = (code: number, message: string, status = 200) => ({
+    status,
+    body: { jsonrpc: '2.0', id, error: { code, message } },
+  });
+  const rpcResult = (result: unknown) => ({ status: 200, body: { jsonrpc: '2.0', id, result } });
+
+  // The cloud agent must be bound + active (defense-in-depth alongside the relay).
+  const agent = storage.getAgentConnection(agentId);
+  if (!agent || agent.status !== 'active') {
+    return rpcError(-32001, 'Agent is not authorized', 200);
+  }
+
+  const method = req.method;
+  if (!method) return rpcError(-32600, 'Invalid Request');
+
+  if (method === 'initialize') {
+    return rpcResult({
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: { tools: {} },
+      serverInfo: { name: 'dcp-vault', version: PACKAGE_VERSION },
+    });
+  }
+  if (method === 'notifications/initialized') {
+    return { status: 202, body: null }; // notification: no response
+  }
+  if (method === 'ping') {
+    return rpcResult({});
+  }
+  if (method === 'tools/list') {
+    return rpcResult({ tools: CLOUD_CONNECT_MCP_TOOLS });
+  }
+  if (method === 'tools/call') {
+    const params = (req.params || {}) as { name?: string; arguments?: Record<string, unknown> };
+    const name = params.name || '';
+    const args = params.arguments || {};
+
+    if (name === 'vault_scope_guide') {
+      return rpcResult({
+        content: [
+          {
+            type: 'text',
+            text: `Your granted scopes: ${agent.permission_scopes.join(', ') || '(none)'}\nSensitive actions require on-device approval.`,
+          },
+        ],
+      });
+    }
+
+    const route = mcpToolToRest(name, args);
+    if (!route) return rpcError(-32601, `Unknown tool: ${name}`);
+
+    // Bind the call to THIS authenticated cloud agent (scope/budget/consent).
+    const body = { ...(route.body || {}), agent_name: agent.name };
+    const injected = await server.inject({
+      method: route.method,
+      url: route.url,
+      payload: route.method === 'POST' ? JSON.stringify(body) : undefined,
+      headers: { 'content-type': 'application/json' },
+    });
+
+    let payload: unknown;
+    try {
+      payload = injected.payload ? JSON.parse(injected.payload) : {};
+    } catch {
+      payload = { raw: injected.payload };
+    }
+    // Surface vault errors (incl. "consent required") as a tool result the agent
+    // can act on, rather than a transport error. The vault never signs without
+    // an on-device tap — a sensitive call returns a pending-consent result here.
+    const isError = injected.statusCode >= 400;
+    return rpcResult({
+      content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+      isError,
+    });
+  }
+
+  return rpcError(-32601, `Unsupported method: ${method}`);
+}
+
 /** Report a cloud agent's approval status to the relay (for the device-flow poll). */
 function cloudConnectStatusOverRelay(agentId?: string): Record<string, unknown> {
   if (!agentId) return { status: 'unknown' };
@@ -6177,11 +6397,12 @@ async function startRelayClient(server: FastifyInstance): Promise<void> {
   relayClient.on('cloudConnectControl', async (raw: unknown) => {
     const ctrl = raw as {
       control_id?: string;
-      kind?: 'redeem' | 'status';
+      kind?: 'redeem' | 'status' | 'mcp';
       connect_link?: string;
       redeemer_key?: string;
       source_ip?: string;
       agent_id?: string;
+      body?: unknown;
     };
     if (!ctrl?.control_id || !relayClient) return;
     try {
@@ -6193,13 +6414,19 @@ async function startRelayClient(server: FastifyInstance): Promise<void> {
           ctrl.control_id,
           cloudConnectStatusOverRelay(ctrl.agent_id)
         );
+      } else if (ctrl.kind === 'mcp') {
+        const { status, body } = await handleCloudConnectMcp(server, ctrl.agent_id || '', ctrl.body);
+        relayClient.sendCloudConnectResult(ctrl.control_id, { status, body });
       }
     } catch (err) {
       console.error('[Vault] Cloud-Connect control error:', err);
-      relayClient.sendCloudConnectResult(
-        ctrl.control_id,
-        ctrl.kind === 'redeem' ? { ok: false, reason: 'internal_error' } : { status: 'unknown' }
-      );
+      const fallback: Record<string, unknown> =
+        ctrl.kind === 'redeem'
+          ? { ok: false, reason: 'internal_error' }
+          : ctrl.kind === 'mcp'
+            ? { status: 500, body: { jsonrpc: '2.0', id: null, error: { code: -32603, message: 'internal_error' } } }
+            : { status: 'unknown' };
+      relayClient.sendCloudConnectResult(ctrl.control_id, fallback);
     }
   });
 
