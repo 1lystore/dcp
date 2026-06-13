@@ -25,7 +25,7 @@ export interface DcpClientConfig {
   /** Vault ID for relay mode (required for relay, can be from env DCP_VAULT_ID) */
   vaultId?: string;
 
-  /** Relay server URL (default: from env DCP_RELAY_URL or wss://relay.dcp.1ly.store) */
+  /** Relay server URL (from env DCP_RELAY_URL, or pass explicitly; no hosted default in OSS) */
   relayUrl?: string;
 
   /** Vault HPKE public key for relay encryption (from env DCP_VAULT_HPKE_PUBLIC_KEY) */
@@ -373,7 +373,11 @@ export interface EnvelopeAad {
 // ============================================================================
 
 export const DEFAULT_LOCAL_URL = 'http://127.0.0.1:8420';
-export const DEFAULT_RELAY_URL = 'wss://relay.dcp.1ly.store';
+// No hosted default in OSS — configure via DCP_RELAY_URL or pass relayUrl explicitly.
+// Empty means "relay not configured"; callers must supply a URL.
+// Guarded for browser bundles where `process` is undefined.
+export const DEFAULT_RELAY_URL =
+  (typeof process !== 'undefined' && process.env?.DCP_RELAY_URL) || '';
 export const DEFAULT_TIMEOUT_MS = 30000;
 export const DEFAULT_LOCAL_CHECK_TIMEOUT_MS = 100;
 export const RELAY_VERSION = '1';

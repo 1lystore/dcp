@@ -12,7 +12,10 @@ import type {
 
 export const MOBILE_PAIRING_TYPE = 'dcp_agent_pairing';
 export const MOBILE_PAIRING_VERSION = '1.0';
-export const DEFAULT_MOBILE_RELAY_URL = 'https://relay.dcp.1ly.store';
+// No hosted default in OSS — configure via DCP_MOBILE_RELAY_URL / DCP_RELAY_URL or
+// pass relayUrl explicitly. Empty means "relay not configured".
+export const DEFAULT_MOBILE_RELAY_URL =
+  process.env.DCP_MOBILE_RELAY_URL || process.env.DCP_RELAY_URL || '';
 
 const SUPPORTED_CLIENTS = new Set<MobileAgentClient>([
   'claude-desktop',

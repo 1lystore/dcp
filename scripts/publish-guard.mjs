@@ -21,13 +21,96 @@
  * - @dcprotocol/relay-client
  */
 
-import { readFileSync, readdirSync, existsSync } from 'fs';
-import { join, dirname } from 'path';
+import { readFileSync, readdirSync, existsSync, statSync } from 'fs';
+import { join, dirname, relative, extname, basename } from 'path';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 const rootDir = join(__dirname, '..');
 const packagesDir = join(rootDir, 'packages');
+
+// ============================================================================
+// Premium-leak guard
+// ============================================================================
+// This OSS repo must NEVER contain or reference private/premium code. The
+// dependency direction is one-way (private -> OSS). If any of these markers
+// appear in the tree, a backwards leak has happened and we must NOT publish.
+// See docs/open-core-architecture.md.
+const PREMIUM_MARKERS = [
+  { re: /dcp-premium-cloud/i, label: 'premium cloud host (dcp-premium-cloud)' },
+  { re: /\bDCP_PREMIUM[A-Z0-9_]*/, label: 'premium env var (DCP_PREMIUM_*)' },
+  { re: /\.dcp\/premium\b/, label: 'premium home path (~/.dcp/premium)' },
+  { re: /\bdcp_premium\b/, label: 'private repo reference (dcp_premium)' },
+  { re: /MOBILE_CONSENT_RELAY_URL/, label: 'premium mobile-consent relay constant' },
+  { re: /startMobileConsentBridge/, label: 'premium mobile-consent bridge symbol' },
+  { re: /PremiumDesktopDeviceState/, label: 'premium desktop device-state symbol' },
+  { re: /dcp-mobile-consent-bridge/, label: 'premium consent-bridge artifact' },
+  { re: /dcp-premium-bridge/, label: 'premium desktop bridge artifact' },
+];
+
+// Only scan source-ish text files.
+const SCAN_EXTENSIONS = new Set([
+  '.ts',
+  '.tsx',
+  '.js',
+  '.cjs',
+  '.mjs',
+  '.json',
+  '.toml',
+  '.yml',
+  '.yaml',
+  '.sh',
+  '.md',
+  '.rs',
+]);
+
+// The push surface = files git actually tracks. Scanning this set (not the working
+// tree) ignores gitignored local config/build output and precisely matches what
+// would be pushed/published. Falls back to an empty list outside a git checkout.
+function listTrackedFiles() {
+  try {
+    const out = execSync('git ls-files -z', {
+      cwd: rootDir,
+      encoding: 'utf-8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return out.split('\0').filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function scanForPremiumMarkers(hits) {
+  for (const rel of listTrackedFiles()) {
+    const full = join(rootDir, rel);
+    // Never scan the guard itself (it defines the markers) or built bundles.
+    if (full === __filename) continue;
+    if (basename(full).endsWith('-bundle.cjs')) continue;
+    if (!SCAN_EXTENSIONS.has(extname(rel))) continue;
+    let content;
+    try {
+      if (statSync(full).size > 2 * 1024 * 1024) continue; // skip huge files
+      content = readFileSync(full, 'utf-8');
+    } catch {
+      continue;
+    }
+    const lines = content.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      for (const marker of PREMIUM_MARKERS) {
+        if (marker.re.test(lines[i])) {
+          hits.push({
+            file: rel,
+            line: i + 1,
+            label: marker.label,
+            text: lines[i].trim().slice(0, 120),
+          });
+        }
+      }
+    }
+  }
+}
 
 // Packages that must NOT be published in Phase 1
 const PARKED_PACKAGES = [
@@ -94,6 +177,13 @@ function main() {
   console.log('Checking package configurations...\n');
 
   const errors = [];
+
+  // Premium-leak scan: fail hard if any private/premium marker is in tracked files.
+  const premiumHits = [];
+  scanForPremiumMarkers(premiumHits);
+  for (const hit of premiumHits) {
+    errors.push(`PREMIUM LEAK: ${hit.file}:${hit.line} — ${hit.label}\n        > ${hit.text}`);
+  }
   const warnings = [];
   const publishable = [];
   const parked = [];

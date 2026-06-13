@@ -412,7 +412,10 @@ describe('Public Key Utilities', () => {
 });
 
 describe('Relay Constants', () => {
-  it('should have default relay URL', () => {
-    expect(DEFAULT_RELAY_URL).toBe('wss://relay.dcp.1ly.store');
+  it('should default to no hosted relay in OSS (configure via DCP_RELAY_URL)', () => {
+    // OSS ships without a hosted default so it never freeloads managed infra.
+    // Value comes from DCP_RELAY_URL at import time; unset in tests => ''.
+    expect(DEFAULT_RELAY_URL).toBe(process.env.DCP_RELAY_URL || '');
+    expect(DEFAULT_RELAY_URL).not.toContain('1ly.store');
   });
 });

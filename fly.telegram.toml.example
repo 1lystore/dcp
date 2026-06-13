@@ -1,4 +1,14 @@
-app = 'telegram-dcp-1lystore'
+# fly.telegram.toml — example Fly.io config for self-hosting the DCP Telegram service.
+#
+# Copy to `fly.telegram.toml`, set your own `app` name, then deploy with:
+#   fly deploy -c fly.telegram.toml
+# `fly.telegram.toml` is gitignored so your deployment config stays private.
+#
+# Bring your OWN Telegram bot token (from @BotFather):
+#   fly secrets set DCP_TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+# See https://fly.io/docs/reference/configuration/
+
+app = 'your-dcp-telegram-app'
 primary_region = 'iad'
 
 [build]
