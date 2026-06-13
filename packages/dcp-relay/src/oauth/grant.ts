@@ -51,12 +51,26 @@ function resourceFor(issuer: string, vaultId: string): string {
   return `${issuer.replace(/\/+$/, '')}/v/${vaultId}/mcp`;
 }
 
+/** Call the optional link-less pairing bridge, normalising "not wired" to an error. */
+async function requestPairingOrError(
+  deps: GrantDeps,
+  input: { vaultId: string; redeemerKey: string; sourceIp?: string; clientName?: string; scope?: string }
+): Promise<import('./bridge.js').BridgeRedeemResult> {
+  if (!deps.bridge.requestPairing) return { ok: false, reason: 'pairing_unsupported' };
+  return deps.bridge.requestPairing(input);
+}
+
 // ----------------------------------------------------------------------------
 // /oauth/connect — redeem a connect-link, open an authorization session
 // ----------------------------------------------------------------------------
 
 export interface ConnectRequest {
-  connectLink: string;
+  /** Connect-link token (Model B). Omit for the link-less paste-URL flow (Model A). */
+  connectLink?: string;
+  /** Link-less flow: the vault addressed by the MCP URL (from the `resource` param). */
+  vaultId?: string;
+  /** Untrusted client display name (DCR), surfaced in the on-device approval. */
+  clientName?: string;
   codeChallenge: string;
   codeChallengeMethod?: string;
   dpopProof: string;
@@ -72,9 +86,15 @@ export async function processConnect(
   deps: GrantDeps,
   req: ConnectRequest
 ): Promise<GrantResponse> {
-  const routing = parseConnectLinkRouting(req.connectLink);
-  if (!routing) {
-    return oauthError(400, 'invalid_request', 'connect_link is missing or malformed');
+  // Model B (connect-link) carries vault routing in the token; Model A (paste-URL)
+  // carries it in the resource-derived vaultId. Exactly one must be present.
+  const routing = req.connectLink ? parseConnectLinkRouting(req.connectLink) : null;
+  const vaultId = routing?.vault_id || req.vaultId;
+  if (!vaultId) {
+    return oauthError(400, 'invalid_request', 'connect_link or a vault resource is required');
+  }
+  if (req.connectLink && !routing) {
+    return oauthError(400, 'invalid_request', 'connect_link is malformed');
   }
   if (!req.codeChallenge || (req.codeChallengeMethod ?? 'S256') !== 'S256') {
     return oauthError(400, 'invalid_request', 'PKCE code_challenge with method S256 is required');
@@ -93,28 +113,40 @@ export async function processConnect(
     return oauthError(400, 'invalid_dpop_proof', 'DPoP proof invalid');
   }
 
-  const redeem = await deps.bridge.redeem({
-    vaultId: routing.vault_id,
-    connectLink: req.connectLink,
-    redeemerKey: jkt,
-    sourceIp: req.sourceIp,
-  });
+  const redeem = routing
+    ? await deps.bridge.redeem({
+        vaultId,
+        connectLink: req.connectLink!,
+        redeemerKey: jkt,
+        sourceIp: req.sourceIp,
+      })
+    : await requestPairingOrError(deps, {
+        vaultId,
+        redeemerKey: jkt,
+        sourceIp: req.sourceIp,
+        clientName: req.clientName,
+        scope: req.scope,
+      });
 
   if (!redeem.ok) {
     if (redeem.reason === 'vault_unreachable') {
       return oauthError(503, 'temporarily_unavailable', 'The target vault is offline');
     }
-    return oauthError(400, 'invalid_grant', `connect-link could not be redeemed (${redeem.reason || 'failed'})`);
+    if (redeem.reason === 'pairing_unsupported') {
+      return oauthError(400, 'invalid_request', 'This vault requires a connect-link');
+    }
+    const what = routing ? 'connect-link could not be redeemed' : 'pairing was refused';
+    return oauthError(400, 'invalid_grant', `${what} (${redeem.reason || 'failed'})`);
   }
 
   const session = deps.sessions.create({
-    vault_id: routing.vault_id,
-    link_id: routing.link_id,
+    vault_id: vaultId,
+    link_id: routing?.link_id || `url:${redeem.agentId || ''}`,
     agent_id: redeem.agentId,
     agent_jkt: jkt,
     code_challenge: req.codeChallenge,
     scope: req.scope || '',
-    audience: resourceFor(deps.issuer, routing.vault_id),
+    audience: resourceFor(deps.issuer, vaultId),
     match_code: redeem.matchCode,
     client_id: req.clientId,
   });
@@ -142,7 +174,12 @@ export async function processConnect(
 // code. The DPoP key is bound later at /token (TOFU). PKCE is mandatory.
 
 export interface AuthorizeRequest {
-  connectLink: string;
+  /** Connect-link token (Model B). Omit for the link-less paste-URL flow (Model A). */
+  connectLink?: string;
+  /** Link-less flow: the vault addressed by the MCP URL (from the `resource` param). */
+  vaultId?: string;
+  /** Untrusted client display name (DCR), surfaced in the on-device approval. */
+  clientName?: string;
   codeChallenge: string;
   codeChallengeMethod?: string;
   sourceIp?: string;
@@ -162,18 +199,30 @@ export async function processAuthorize(
   deps: GrantDeps,
   req: AuthorizeRequest
 ): Promise<AuthorizeResult> {
-  const routing = parseConnectLinkRouting(req.connectLink);
-  if (!routing) return { ok: false, status: 400, error: 'invalid_connect_link' };
+  const routing = req.connectLink ? parseConnectLinkRouting(req.connectLink) : null;
+  const vaultId = routing?.vault_id || req.vaultId;
+  if (!vaultId) return { ok: false, status: 400, error: 'invalid_connect_link' };
+  if (req.connectLink && !routing) return { ok: false, status: 400, error: 'invalid_connect_link' };
   if (!req.codeChallenge || (req.codeChallengeMethod ?? 'S256') !== 'S256') {
     return { ok: false, status: 400, error: 'pkce_s256_required' };
   }
 
-  const redeem = await deps.bridge.redeem({
-    vaultId: routing.vault_id,
-    connectLink: req.connectLink,
-    redeemerKey: `browser:${routing.link_id}`,
-    sourceIp: req.sourceIp,
-  });
+  // The browser auth-code flow binds the DPoP key later at /token (TOFU), so we
+  // pass a placeholder redeemer key here for both models.
+  const redeem = routing
+    ? await deps.bridge.redeem({
+        vaultId,
+        connectLink: req.connectLink!,
+        redeemerKey: `browser:${routing.link_id}`,
+        sourceIp: req.sourceIp,
+      })
+    : await requestPairingOrError(deps, {
+        vaultId,
+        redeemerKey: 'browser-tofu',
+        sourceIp: req.sourceIp,
+        clientName: req.clientName,
+        scope: req.scope,
+      });
   if (!redeem.ok) {
     return {
       ok: false,
@@ -183,13 +232,13 @@ export async function processAuthorize(
   }
 
   const session = deps.sessions.create({
-    vault_id: routing.vault_id,
-    link_id: routing.link_id,
+    vault_id: vaultId,
+    link_id: routing?.link_id || `url:${redeem.agentId || ''}`,
     agent_id: redeem.agentId,
     agent_jkt: '', // bound at /token on first use (TOFU)
     code_challenge: req.codeChallenge,
     scope: req.scope || '',
-    audience: resourceFor(deps.issuer, routing.vault_id),
+    audience: resourceFor(deps.issuer, vaultId),
     match_code: redeem.matchCode,
     client_id: req.clientId,
   });
@@ -234,18 +283,24 @@ export interface TokenRequest {
 }
 
 export async function processToken(deps: GrantDeps, req: TokenRequest): Promise<GrantResponse> {
-  // Every token request must carry a fresh DPoP proof bound to this endpoint.
-  let jkt: string;
-  try {
-    const dpop = await verifyDpopProof(req.dpopProof, {
-      method: req.method,
-      url: req.url,
-      jtiGuard: deps.jtiGuard,
-    });
-    jkt = dpop.jkt;
-  } catch (e) {
-    if (e instanceof DpopError) return oauthError(400, 'invalid_dpop_proof', e.message);
-    return oauthError(400, 'invalid_dpop_proof', 'DPoP proof invalid');
+  // DPoP is PREFERRED but OPTIONAL. If the client sends a proof we verify it and
+  // sender-bind the issued token (cnf.jkt). If it doesn't (Bearer-only clients —
+  // the current reality for Hermes / Claude.ai / ChatGPT), we proceed and issue a
+  // plain Bearer token. The token stays audience-bound, short-lived, scoped, and
+  // revocable, and the vault still gates every sensitive action on on-device consent.
+  let jkt: string | undefined;
+  if (req.dpopProof) {
+    try {
+      const dpop = await verifyDpopProof(req.dpopProof, {
+        method: req.method,
+        url: req.url,
+        jtiGuard: deps.jtiGuard,
+      });
+      jkt = dpop.jkt;
+    } catch (e) {
+      if (e instanceof DpopError) return oauthError(400, 'invalid_dpop_proof', e.message);
+      return oauthError(400, 'invalid_dpop_proof', 'DPoP proof invalid');
+    }
   }
 
   if (req.grantType === DEVICE_CODE_GRANT) {
@@ -268,7 +323,7 @@ const accessTtl = (deps: GrantDeps) => deps.accessTtlSec ?? DEFAULT_ACCESS_TOKEN
 async function processDeviceCodeGrant(
   deps: GrantDeps,
   req: TokenRequest,
-  jkt: string
+  jkt: string | undefined
 ): Promise<GrantResponse> {
   if (!req.deviceCode || !req.codeVerifier) {
     return oauthError(400, 'invalid_request', 'device_code and code_verifier are required');
@@ -278,11 +333,18 @@ async function processDeviceCodeGrant(
   if (session.status === 'expired') return oauthError(400, 'expired_token');
   if (session.status === 'issued') return oauthError(400, 'invalid_grant', 'device_code already used');
 
-  // Bind the DPoP key: device-flow set it at /connect; browser auth-code binds it
-  // here on first use (TOFU). Either way, subsequent calls must match.
-  const boundJkt = deps.sessions.bindJkt(session.session_id, jkt);
-  if (boundJkt !== jkt) {
-    return oauthError(400, 'invalid_grant', 'DPoP key does not match the authorization session');
+  // Bind the DPoP key when the client uses DPoP: device-flow set it at /connect;
+  // browser auth-code binds it here on first use (TOFU). Subsequent calls must
+  // match. Bearer-only clients (no proof) skip binding and get a Bearer token.
+  if (jkt) {
+    const boundJkt = deps.sessions.bindJkt(session.session_id, jkt);
+    if (boundJkt !== jkt) {
+      return oauthError(400, 'invalid_grant', 'DPoP key does not match the authorization session');
+    }
+  } else if (session.agent_jkt) {
+    // The session was opened expecting a DPoP key (set at /connect) but the token
+    // request omitted the proof — refuse the downgrade.
+    return oauthError(400, 'invalid_dpop_proof', 'This authorization requires a DPoP proof');
   }
   // PKCE binds connect -> token.
   if (!verifyPkceS256(req.codeVerifier, session.code_challenge)) {
@@ -325,7 +387,7 @@ async function processDeviceCodeGrant(
     status: 200,
     body: {
       access_token: access,
-      token_type: 'DPoP',
+      token_type: session.agent_jkt ? 'DPoP' : 'Bearer',
       expires_in: accessTtl(deps),
       refresh_token: refreshToken,
       scope,
@@ -336,7 +398,7 @@ async function processDeviceCodeGrant(
 async function processRefreshGrant(
   deps: GrantDeps,
   req: TokenRequest,
-  jkt: string
+  jkt: string | undefined
 ): Promise<GrantResponse> {
   if (!req.refreshToken) return oauthError(400, 'invalid_request', 'refresh_token is required');
 
@@ -344,9 +406,10 @@ async function processRefreshGrant(
   if (!rotated.ok || !rotated.context || !rotated.token) {
     return oauthError(400, 'invalid_grant', `refresh failed (${rotated.reason || 'unknown'})`);
   }
-  // The refresh must be presented with the SAME DPoP key it was bound to.
-  if (rotated.context.jkt !== jkt) {
-    // Suspicious: valid refresh token presented with a different key. Kill the chain.
+  // A DPoP-bound refresh token (context.jkt set) MUST be presented with the same
+  // key; presenting it with a different/absent key is reuse → kill the chain.
+  // Bearer-issued refresh tokens (no bound key) rotate without a proof.
+  if (rotated.context.jkt && rotated.context.jkt !== jkt) {
     const chain = deps.refresh.chainFor(rotated.token);
     if (chain) deps.refresh.revokeChain(chain);
     return oauthError(400, 'invalid_grant', 'DPoP key does not match the refresh token binding');
@@ -367,7 +430,7 @@ async function processRefreshGrant(
     status: 200,
     body: {
       access_token: access,
-      token_type: 'DPoP',
+      token_type: rotated.context.jkt ? 'DPoP' : 'Bearer',
       expires_in: accessTtl(deps),
       refresh_token: rotated.token,
       scope: rotated.context.scope,

@@ -65,6 +65,7 @@ export {
   type BridgeRedeemResult,
   type BridgeApprovalInput,
   type BridgeApprovalResult,
+  type BridgePairingInput,
   type McpDataBridge,
   type AuthedMcpRequest,
 } from './bridge.js';

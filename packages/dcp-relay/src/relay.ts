@@ -71,6 +71,7 @@ import {
   type BridgeRedeemResult,
   type BridgeApprovalInput,
   type BridgeApprovalResult,
+  type BridgePairingInput,
 } from './oauth/index.js';
 
 // ============================================================================
@@ -128,6 +129,7 @@ export class RelayServer {
       config.vaultBridge ?? {
         redeem: (input) => this.wsBridgeRedeem(input),
         approvalStatus: (input) => this.wsBridgeApprovalStatus(input),
+        requestPairing: (input) => this.wsBridgeRequestPairing(input),
       };
     // Default to the WS-backed MCP forwarder (vanilla clients: relay terminates
     // and forwards to the vault over /ws). DCP-aware agents wanting full E2E
@@ -162,6 +164,27 @@ export class RelayServer {
   // --------------------------------------------------------------------------
 
   async start(): Promise<void> {
+    // OAuth 2.1 token/registration/revocation requests are sent as
+    // `application/x-www-form-urlencoded` by standards-compliant clients
+    // (RFC 6749 §4.1.3 / Hermes / Claude.ai / ChatGPT). Fastify only parses JSON
+    // out of the box, so without this a real client's /oauth/token POST fails with
+    // 415 and the whole flow stalls. Parse form bodies into the same plain-object
+    // shape the JSON handlers expect (JSON parsing stays enabled for our own agents).
+    this.server.addContentTypeParser(
+      'application/x-www-form-urlencoded',
+      { parseAs: 'string' },
+      (_req: FastifyRequest, body: string | Buffer, done: (err: Error | null, value?: unknown) => void) => {
+        try {
+          const params = new URLSearchParams(typeof body === 'string' ? body : body.toString('utf8'));
+          const obj: Record<string, string> = {};
+          for (const [k, v] of params) obj[k] = v;
+          done(null, obj);
+        } catch (err) {
+          done(err as Error);
+        }
+      }
+    );
+
     await this.server.register(
       fastifyCors as unknown as FastifyPluginCallback<FastifyPluginOptions>,
       { origin: true }
@@ -233,7 +256,7 @@ export class RelayServer {
    */
   private sendCloudConnectControl(
     vaultId: string,
-    type: 'cloud_connect_redeem' | 'cloud_connect_status' | 'cloud_connect_mcp',
+    type: 'cloud_connect_redeem' | 'cloud_connect_status' | 'cloud_connect_mcp' | 'cloud_connect_pair',
     payload: Record<string, unknown>,
     timeoutMs = 10_000
   ): Promise<Record<string, unknown>> {
@@ -273,6 +296,26 @@ export class RelayServer {
         connect_link: input.connectLink,
         redeemer_key: input.redeemerKey,
         source_ip: input.sourceIp,
+      });
+      return {
+        ok: Boolean(res.ok),
+        agentId: res.agent_id as string | undefined,
+        matchCode: res.match_code as string | undefined,
+        reason: res.reason as string | undefined,
+      };
+    } catch {
+      return { ok: false, reason: 'vault_unreachable' };
+    }
+  }
+
+  /** Link-less pairing (paste-URL flow): ask the vault to open an on-device approval. */
+  private async wsBridgeRequestPairing(input: BridgePairingInput): Promise<BridgeRedeemResult> {
+    try {
+      const res = await this.sendCloudConnectControl(input.vaultId, 'cloud_connect_pair', {
+        redeemer_key: input.redeemerKey,
+        source_ip: input.sourceIp,
+        client_name: input.clientName,
+        scope: input.scope,
       });
       return {
         ok: Boolean(res.ok),
@@ -359,6 +402,18 @@ export class RelayServer {
     return `${proto}://${host}`;
   }
 
+  /**
+   * Extract the vault id from an MCP resource URL (`.../v/<vaultId>/mcp`), used by
+   * the link-less paste-URL flow (RFC 8707 `resource` parameter). Returns null if
+   * the string is not a well-formed per-vault MCP resource. Untrusted: the vault is
+   * still the authorization authority (it runs the on-device approval).
+   */
+  private vaultIdFromResource(resource: string | undefined): string | null {
+    if (!resource || typeof resource !== 'string') return null;
+    const m = /\/v\/([A-Za-z0-9_-]{8,})\/mcp\/?$/.exec(resource.trim());
+    return m ? m[1] : null;
+  }
+
   // --------------------------------------------------------------------------
   // HTTP Routes (REST + Long-Poll)
   // --------------------------------------------------------------------------
@@ -436,11 +491,12 @@ export class RelayServer {
       }
     );
 
-    // Connect-link grant: redeem a connect-link -> open an authorization session.
-    // The agent then polls /oauth/token. (device-flow shape.)
+    // Device-flow grant: redeem a connect-link (Model B) OR open a link-less pairing
+    // from the MCP `resource` URL (Model A). The agent then polls /oauth/token.
     this.server.post<{
       Body: {
         connect_link?: string;
+        resource?: string;
         code_challenge?: string;
         code_challenge_method?: string;
         client_id?: string;
@@ -449,8 +505,16 @@ export class RelayServer {
     }>('/oauth/connect', async (request, reply) => {
       const body = request.body || {};
       const deps = await this.grantDeps(request);
+      const resourceVaultId = body.connect_link
+        ? null
+        : this.vaultIdFromResource(body.resource);
+      const clientName = body.client_id
+        ? this.oauthClients.get(body.client_id)?.client_name
+        : undefined;
       const result = await processConnect(deps, {
-        connectLink: body.connect_link || '',
+        connectLink: body.connect_link || undefined,
+        vaultId: resourceVaultId || undefined,
+        clientName,
         codeChallenge: body.code_challenge || '',
         codeChallengeMethod: body.code_challenge_method,
         dpopProof: (request.headers['dpop'] as string) || '',
@@ -529,8 +593,14 @@ export class RelayServer {
         `button{padding:10px 16px;margin-top:12px;font-size:15px;cursor:pointer}.muted{color:#666;font-size:13px}</style>` +
         `</head><body>${inner}</body></html>`;
 
-      // Step 1 — collect the connect-link if not supplied.
-      if (!q.connect_link) {
+      // The universal "paste-URL" flow (Model A): a standard MCP client arrives with
+      // a `resource` pointing at /v/<vaultId>/mcp and no connect-link. We derive the
+      // vault and open an on-device approval directly — no second secret to paste.
+      const resourceVaultId = this.vaultIdFromResource(q.resource);
+
+      // Step 1 — if there's neither a connect-link nor a resolvable vault resource,
+      // fall back to the connect-link form (Model B / hardened pairing).
+      if (!q.connect_link && !resourceVaultId) {
         return shell(
           `<h2>Connect a cloud agent to your DCP vault</h2>` +
             `<p class="muted">Open DCP → Connect → Cloud Agent, generate a connect-link, and paste it here.</p>` +
@@ -546,10 +616,14 @@ export class RelayServer {
         );
       }
 
-      // Step 2 — redeem + open a session; the page polls approval, then redirects.
+      // Step 2 — redeem (connect-link) or request pairing (URL) + open a session;
+      // the page polls approval, then redirects.
       const deps = await this.grantDeps(request);
+      const clientName = q.client_id ? this.oauthClients.get(q.client_id)?.client_name : undefined;
       const result = await processAuthorize(deps, {
         connectLink: q.connect_link,
+        vaultId: q.connect_link ? undefined : resourceVaultId || undefined,
+        clientName,
         codeChallenge: q.code_challenge || '',
         codeChallengeMethod: q.code_challenge_method,
         sourceIp: request.ip,
@@ -609,15 +683,35 @@ export class RelayServer {
           return { error, error_description: desc };
         };
 
-        // 1. Bearer must be a DPoP-scheme access token.
+        // 1. Accept either a DPoP-scheme or Bearer-scheme access token. DPoP is
+        //    preferred (sender-constrained); Bearer is accepted for clients that
+        //    don't implement DPoP (the current MCP-client reality).
         const authz = (request.headers['authorization'] as string) || '';
-        const m = /^DPoP (.+)$/.exec(authz);
-        if (!m) return unauthorized('invalid_token', 'A DPoP-bound access token is required');
-        const accessToken = m[1].trim();
+        const m = /^(DPoP|Bearer) (.+)$/.exec(authz);
+        if (!m) return unauthorized('invalid_token', 'A DPoP or Bearer access token is required');
+        const accessToken = m[2].trim();
         const proof = (request.headers['dpop'] as string) || '';
-        if (!proof) return unauthorized('invalid_token', 'A DPoP proof header is required');
 
-        // 2. Verify the access token (signature, issuer, audience == this vault).
+        // 2. If a DPoP proof is present, verify it (bound to this request + token)
+        //    to derive the key thumbprint. A DPoP-BOUND token (cnf.jkt) without a
+        //    proof is rejected inside verifyAccessToken (no Bearer downgrade).
+        let jkt: string | undefined;
+        if (proof) {
+          try {
+            const d = await verifyDpopProof(proof, {
+              method: 'POST',
+              url: resource,
+              jtiGuard: this.oauthJti,
+              accessToken,
+            });
+            jkt = d.jkt;
+          } catch {
+            return unauthorized('invalid_token', 'DPoP proof invalid');
+          }
+        }
+
+        // 3. Verify the access token (signature, issuer, audience == this vault).
+        //    When the token is DPoP-bound, this also enforces cnf.jkt === proof key.
         const keys = await this.getOAuthKeys();
         let claims;
         try {
@@ -626,29 +720,13 @@ export class RelayServer {
             token: accessToken,
             issuer: base,
             expectedAudience: resource,
+            expectedJkt: jkt,
           });
         } catch {
           return unauthorized('invalid_token', 'Access token invalid or for a different resource');
         }
         if (claims.vault_id !== vaultId) {
           return unauthorized('invalid_token', 'Token is not valid for this vault');
-        }
-
-        // 3. Verify the DPoP proof for THIS request, bound to the token (ath + jkt).
-        let jkt: string;
-        try {
-          const d = await verifyDpopProof(proof, {
-            method: 'POST',
-            url: resource,
-            jtiGuard: this.oauthJti,
-            accessToken,
-          });
-          jkt = d.jkt;
-        } catch {
-          return unauthorized('invalid_token', 'DPoP proof invalid');
-        }
-        if (jkt !== claims.cnf.jkt) {
-          return unauthorized('invalid_token', 'DPoP key does not match the token binding');
         }
 
         // 4. Instant-revoke denylist (Rule #7).
@@ -662,7 +740,7 @@ export class RelayServer {
           vaultId,
           agentId: claims.sub,
           scope: claims.scope,
-          jkt,
+          jkt: jkt || '',
           body: request.body,
         });
         reply.status(result.status);

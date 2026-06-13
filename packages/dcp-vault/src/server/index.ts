@@ -3386,6 +3386,75 @@ async function buildServer(): Promise<FastifyInstance> {
   );
 
   /** List connect-links awaiting on-device approval (owner only). Rule #6 facts. */
+  /**
+   * The universal connect URL for the paste-URL flow: the per-vault MCP endpoint a
+   * user pastes into any OAuth MCP client (Hermes/Claude.ai/ChatGPT). Derived from
+   * the relay's base URL (ws[s] → http[s]); the vault id routes to this vault.
+   */
+  server.get('/v1/cloud-connect/connect-url', async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+      });
+    }
+    const identity = await ensureRelayIdentity();
+    const wsUrl = identity.relayUrl || DEFAULT_RELAY_URL || CORE_DEFAULT_RELAY_URL || '';
+    const httpsBase = wsUrl
+      .replace(/^wss:/i, 'https:')
+      .replace(/^ws:/i, 'http:')
+      .replace(/\/+$/, '')
+      .replace(/\/ws$/i, '');
+    return {
+      vault_id: identity.vaultId,
+      mcp_url: httpsBase ? `${httpsBase}/v/${identity.vaultId}/mcp` : '',
+      relay_base: httpsBase,
+    };
+  });
+
+  /**
+   * Open (or close) the link-less pairing window (owner only). The paste-URL flow
+   * only opens on-device approvals while this window is open — opt-in, like
+   * Bluetooth pairing. POST { minutes } opens for N minutes (clamped 1..60);
+   * minutes<=0 closes immediately.
+   */
+  server.post<{ Body: { minutes?: number } }>(
+    '/v1/cloud-connect/pairing-mode',
+    async (request, reply) => {
+      if (!isOwnerRequest(request)) {
+        return reply.status(403).send({
+          error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+        });
+      }
+      const raw = Number(request.body?.minutes ?? 10);
+      const minutes = Number.isFinite(raw) ? Math.min(60, Math.max(0, raw)) : 10;
+      const acceptUntil = minutes > 0 ? Date.now() + minutes * 60 * 1000 : 0;
+      budget.setConfig('cloud_connect_accept_until', acceptUntil);
+      // Reset the rate-limit counter when (re)opening so a fresh window is clean.
+      if (minutes > 0) cloudConnectPairTimes = [];
+      return {
+        open: minutes > 0,
+        accept_until: acceptUntil,
+        seconds_remaining: minutes > 0 ? minutes * 60 : 0,
+      };
+    }
+  );
+
+  /** Report whether the link-less pairing window is currently open (owner only). */
+  server.get('/v1/cloud-connect/pairing-mode', async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+      });
+    }
+    const acceptUntil = cloudConnectPairingOpenUntil();
+    const open = acceptUntil > Date.now();
+    return {
+      open,
+      accept_until: acceptUntil,
+      seconds_remaining: open ? Math.round((acceptUntil - Date.now()) / 1000) : 0,
+    };
+  });
+
   server.get('/v1/cloud-connect/pending', async (request, reply) => {
     if (!isOwnerRequest(request)) {
       return reply.status(403).send({
@@ -6113,6 +6182,90 @@ async function redeemCloudConnectOverRelay(ctrl: {
   return { ok: true, agent_id: result.agent_id, match_code: result.match_code };
 }
 
+// --- Link-less ("paste-URL") pairing ---------------------------------------
+// A standard OAuth MCP client connected with JUST the vault's MCP URL (no
+// connect-link). The relay forwards the request here; we open the SAME on-device
+// approval a redeem would, gated by a short owner-opened "pairing window" + a
+// rate-limit (so a stranger who learns the vault id can at worst cause a bounded
+// number of approval prompts the owner must still tap — never a key release).
+
+const CLOUD_CONNECT_PAIR_MAX_PER_WINDOW = 5;
+const CLOUD_CONNECT_PAIR_WINDOW_MS = 10 * 60 * 1000;
+let cloudConnectPairTimes: number[] = [];
+
+function cloudConnectPairingOpenUntil(): number {
+  // Read the window FRESH from the config file (the source of truth — setConfig
+  // always persists), so it can be opened by the desktop, the CLI, or any owner
+  // tool in another process while this server runs. Fall back to in-memory config.
+  try {
+    const dir =
+      process.env.DCP_VAULT_DIR || process.env.VAULT_DIR || path.join(os.homedir(), '.dcp');
+    const file = path.join(dir, 'config.json');
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const v = Number(data?.cloud_connect_accept_until || 0);
+      if (Number.isFinite(v) && v > 0) return v;
+    }
+  } catch {
+    /* fall through to in-memory */
+  }
+  try {
+    return Number(budget.getConfig().cloud_connect_accept_until || 0) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function pairCloudConnectOverRelay(ctrl: {
+  redeemer_key?: string;
+  source_ip?: string;
+  client_name?: string;
+  scope?: string;
+}): Promise<Record<string, unknown>> {
+  // Gate 1 — the owner must have opened the pairing window (opt-in, like BT pairing).
+  const openUntil = cloudConnectPairingOpenUntil();
+  if (!openUntil || Date.now() > openUntil) {
+    return { ok: false, reason: 'PAIRING_NOT_OPEN' };
+  }
+  // Gate 2 — rate-limit link-less requests within the window.
+  const now = Date.now();
+  cloudConnectPairTimes = cloudConnectPairTimes.filter((t) => now - t < CLOUD_CONNECT_PAIR_WINDOW_MS);
+  if (cloudConnectPairTimes.length >= CLOUD_CONNECT_PAIR_MAX_PER_WINDOW) {
+    return { ok: false, reason: 'RATE_LIMITED' };
+  }
+  cloudConnectPairTimes.push(now);
+
+  // The relay must be reachable for routing; ensure our identity exists.
+  await ensureRelayIdentity();
+
+  const jkt = (ctrl.redeemer_key || '').trim() || 'browser-tofu';
+  const agentId = `agent_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  const linkId = `urlpair_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  const matchCode = generateMatchCode();
+  const name = ((ctrl.client_name || '').trim() || 'Cloud agent').slice(0, 80);
+  // Minimal default scope (read-only address) + $0 auto-approve (Rule #5). The
+  // owner can broaden scope/budget after approval; sensitive actions always need
+  // an explicit on-device consent regardless of scope.
+  const scopes = ['read:wallet.address'];
+  const budgetDef = { daily: 0, currency: 'USD', auto_approve_under: 0 };
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+  const result = storage.createCloudConnectPairingRequest({
+    link_id: linkId,
+    agent_id: agentId,
+    name,
+    permission_scopes: scopes,
+    budget: budgetDef,
+    redeemer_public_key: jkt,
+    match_code: matchCode,
+    source_ip: ctrl.source_ip,
+    source_host: 'url',
+    expires_at: expiresAt,
+  });
+  if (!result.ok) return { ok: false, reason: result.reason || 'PAIR_FAILED' };
+  return { ok: true, agent_id: agentId, match_code: matchCode };
+}
+
 // ============================================================================
 // Cloud-Connect MCP handler (the data plane for relay-fronted cloud agents)
 // ============================================================================
@@ -6400,10 +6553,12 @@ async function startRelayClient(server: FastifyInstance): Promise<void> {
   relayClient.on('cloudConnectControl', async (raw: unknown) => {
     const ctrl = raw as {
       control_id?: string;
-      kind?: 'redeem' | 'status' | 'mcp';
+      kind?: 'redeem' | 'pair' | 'status' | 'mcp';
       connect_link?: string;
       redeemer_key?: string;
       source_ip?: string;
+      client_name?: string;
+      scope?: string;
       agent_id?: string;
       body?: unknown;
     };
@@ -6411,6 +6566,9 @@ async function startRelayClient(server: FastifyInstance): Promise<void> {
     try {
       if (ctrl.kind === 'redeem') {
         const result = await redeemCloudConnectOverRelay(ctrl);
+        relayClient.sendCloudConnectResult(ctrl.control_id, result);
+      } else if (ctrl.kind === 'pair') {
+        const result = await pairCloudConnectOverRelay(ctrl);
         relayClient.sendCloudConnectResult(ctrl.control_id, result);
       } else if (ctrl.kind === 'status') {
         relayClient.sendCloudConnectResult(
@@ -6424,7 +6582,7 @@ async function startRelayClient(server: FastifyInstance): Promise<void> {
     } catch (err) {
       console.error('[Vault] Cloud-Connect control error:', err);
       const fallback: Record<string, unknown> =
-        ctrl.kind === 'redeem'
+        ctrl.kind === 'redeem' || ctrl.kind === 'pair'
           ? { ok: false, reason: 'internal_error' }
           : ctrl.kind === 'mcp'
             ? { status: 500, body: { jsonrpc: '2.0', id: null, error: { code: -32603, message: 'internal_error' } } }

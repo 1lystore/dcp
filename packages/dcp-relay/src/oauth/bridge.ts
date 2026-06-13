@@ -33,6 +33,26 @@ export interface BridgeRedeemResult {
   reason?: string;
 }
 
+/**
+ * Link-less pairing: a standard OAuth MCP client connected with JUST the vault's
+ * MCP URL (no connect-link secret). The relay asks the vault to open an on-device
+ * approval directly. The vault gates this on its "pairing window" + rate-limit and
+ * returns the same {agentId, matchCode} a redeem would.
+ */
+export interface BridgePairingInput {
+  /** Vault addressed by the MCP URL (routing target). */
+  vaultId: string;
+  /** Redeeming agent's DPoP JWK thumbprint (jkt), or a TOFU placeholder for the
+   *  browser auth-code flow where the key is bound later at /token. */
+  redeemerKey: string;
+  /** Server-derived source IP (for the on-device approval facts). */
+  sourceIp?: string;
+  /** Untrusted client display name (from Dynamic Client Registration). */
+  clientName?: string;
+  /** Requested scope (space-delimited); the vault decides what to actually grant. */
+  scope?: string;
+}
+
 export interface BridgeApprovalInput {
   vaultId: string;
   agentId: string;
@@ -49,6 +69,12 @@ export interface BridgeApprovalResult {
 export interface VaultConnectBridge {
   redeem(input: BridgeRedeemInput): Promise<BridgeRedeemResult>;
   approvalStatus(input: BridgeApprovalInput): Promise<BridgeApprovalResult>;
+  /**
+   * Open a link-less on-device approval (the paste-URL flow). Optional so existing
+   * (e.g. test) bridges keep working; when absent, the relay falls back to the
+   * connect-link form and the URL-only path returns a 'pairing_unsupported' error.
+   */
+  requestPairing?(input: BridgePairingInput): Promise<BridgeRedeemResult>;
 }
 
 /** Default bridge used when no vault control channel is wired — fails closed. */
@@ -58,6 +84,9 @@ export class UnavailableVaultBridge implements VaultConnectBridge {
   }
   async approvalStatus(): Promise<BridgeApprovalResult> {
     return { status: 'unknown' };
+  }
+  async requestPairing(): Promise<BridgeRedeemResult> {
+    return { ok: false, reason: 'vault_unreachable' };
   }
 }
 

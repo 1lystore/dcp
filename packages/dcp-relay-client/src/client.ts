@@ -470,6 +470,11 @@ export class RelayClient extends SimpleEmitter {
           this.emit('cloudConnectControl', { kind: 'redeem', ...(msg.payload as object) });
           break;
 
+        case 'cloud_connect_pair':
+          // Relay asking the vault to open a link-less (paste-URL) pairing.
+          this.emit('cloudConnectControl', { kind: 'pair', ...(msg.payload as object) });
+          break;
+
         case 'cloud_connect_status':
           // Relay asking the vault for an agent's approval status.
           this.emit('cloudConnectControl', { kind: 'status', ...(msg.payload as object) });

@@ -27,8 +27,14 @@ export interface IssueAccessTokenInput {
   vaultId: string;
   /** Granted scope string (space-delimited). */
   scope: string;
-  /** DPoP JWK thumbprint to sender-bind the token (cnf.jkt). */
-  jkt: string;
+  /**
+   * DPoP JWK thumbprint to sender-bind the token (cnf.jkt, RFC 9449). OPTIONAL:
+   * when the client supports DPoP we bind the token to its key (preferred —
+   * stops token replay). When omitted (the client is Bearer-only, as most current
+   * MCP clients are), we issue a plain Bearer token — still audience-bound, short-
+   * lived, scoped, and revocable, with on-device consent gating every sensitive op.
+   */
+  jkt?: string;
   ttlSec?: number;
 }
 
@@ -38,20 +44,22 @@ export interface AccessTokenClaims {
   aud: string;
   vault_id: string;
   scope: string;
-  cnf: { jkt: string };
+  /** Present only for DPoP-bound (sender-constrained) tokens. */
+  cnf?: { jkt: string };
   jti: string;
   iat: number;
   exp: number;
 }
 
-/** Issue a signed, DPoP-bound, audience-bound access token. */
+/** Issue a signed, audience-bound access token (DPoP-bound when a jkt is given). */
 export async function issueAccessToken(input: IssueAccessTokenInput): Promise<string> {
   const ttl = input.ttlSec ?? DEFAULT_ACCESS_TOKEN_TTL_SEC;
-  return new SignJWT({
+  const claims: Record<string, unknown> = {
     scope: input.scope,
     vault_id: input.vaultId,
-    cnf: { jkt: input.jkt },
-  })
+  };
+  if (input.jkt) claims.cnf = { jkt: input.jkt };
+  return new SignJWT(claims)
     .setProtectedHeader({ alg: input.keys.alg, kid: input.keys.kid, typ: 'at+jwt' })
     .setIssuer(input.issuer)
     .setSubject(input.subject)
@@ -101,12 +109,19 @@ export async function verifyAccessToken(
     throw new AccessTokenError('invalid_token', `Access token invalid: ${(e as Error).message}`);
   }
 
+  // DPoP-bound tokens carry cnf.jkt and MUST match the presented proof key. Bearer
+  // tokens (no cnf) are accepted without a proof — the caller decides whether a
+  // given resource requires sender-binding. A DPoP-bound token presented WITHOUT a
+  // proof key (expectedJkt undefined) is rejected, so a stolen DPoP token can't be
+  // downgraded to Bearer use.
   const cnf = payload.cnf as { jkt?: string } | undefined;
-  if (!cnf || typeof cnf.jkt !== 'string') {
-    throw new AccessTokenError('invalid_token', 'Access token is not DPoP-bound (missing cnf.jkt)');
-  }
-  if (input.expectedJkt !== undefined && cnf.jkt !== input.expectedJkt) {
-    throw new AccessTokenError('invalid_token', 'DPoP key does not match token binding (cnf.jkt)');
+  if (cnf && typeof cnf.jkt === 'string') {
+    if (input.expectedJkt === undefined) {
+      throw new AccessTokenError('invalid_token', 'DPoP-bound token requires a DPoP proof');
+    }
+    if (cnf.jkt !== input.expectedJkt) {
+      throw new AccessTokenError('invalid_token', 'DPoP key does not match token binding (cnf.jkt)');
+    }
   }
 
   return payload as unknown as AccessTokenClaims;

@@ -15,6 +15,7 @@ import {
   processConnect,
   processToken,
   verifyAccessToken,
+  jwkThumbprint,
   computeS256Challenge,
   DEVICE_CODE_GRANT,
   type GrantDeps,
@@ -127,16 +128,19 @@ describe('Cloud-Connect OAuth grant', () => {
     expect(tok.body.refresh_token).toBeTruthy();
     expect(tok.body.scope).toBe('read:wallet.address');
 
-    // The access token is bound to this vault's resource (audience).
+    // The access token is bound to this vault's resource (audience) AND, because
+    // the client used DPoP, sender-bound to its key — so verifying requires the jkt.
+    const agentJkt = await jwkThumbprint(agent.publicJwk);
     const claims = await verifyAccessToken({
       keys: deps.keys,
       token: tok.body.access_token as string,
       issuer: ISSUER,
       expectedAudience: RESOURCE,
+      expectedJkt: agentJkt,
     });
     expect(claims.vault_id).toBe(VAULT);
     expect(claims.sub).toBe('agent_1');
-    expect(claims.cnf.jkt).toBeTruthy();
+    expect(claims.cnf?.jkt).toBe(agentJkt);
   });
 
   it('rejects a reused device_code after issuance', async () => {

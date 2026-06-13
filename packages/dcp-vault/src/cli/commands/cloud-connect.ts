@@ -246,6 +246,65 @@ const listCommand = new Command('list')
     }
   });
 
+const urlCommand = new Command('url')
+  .description('Print the universal connect URL to paste into any cloud agent (no link needed)')
+  .option('-r, --relay <url>', 'Relay base URL (default: DCP_RELAY_URL / saved config)')
+  .action(async (options) => {
+    try {
+      const { budget } = openVault();
+      const identity = await loadIdentity(budget);
+      const relayUrl = options.relay || identity.relayUrl;
+      if (!relayUrl) {
+        error('No relay configured. Pass --relay <url> or set DCP_RELAY_URL.');
+        process.exit(1);
+      }
+      const url = mcpUrlFor(relayUrl, identity.vaultId);
+      console.log();
+      success('Universal connect URL — paste into any OAuth MCP client:');
+      console.log();
+      console.log(bold(url));
+      console.log();
+      console.log(dim('Examples:'));
+      console.log(dim(`  hermes mcp add dcp --url ${url} --auth oauth`));
+      console.log(dim('  Claude.ai / ChatGPT: add as a custom connector'));
+      console.log();
+      info('First open the pairing window: `dcp cloud-connect open` — then approve on this device.');
+      process.exit(0);
+    } catch (err) {
+      handleError(err);
+    }
+  });
+
+const openCommand = new Command('open')
+  .description('Open the pairing window so cloud agents can request to connect (paste-URL flow)')
+  .option('-m, --minutes <n>', 'Minutes to stay open (1–60, default 10)', '10')
+  .action(async (options) => {
+    try {
+      const { budget } = openVault();
+      const raw = Number(options.minutes);
+      const minutes = Number.isFinite(raw) ? Math.min(60, Math.max(1, raw)) : 10;
+      budget.setConfig('cloud_connect_accept_until', Date.now() + minutes * 60 * 1000);
+      success(`Pairing window open for ${minutes} min. New cloud agents can now request to connect.`);
+      info('Run `dcp cloud-connect pending` when an agent connects, then approve with the match code.');
+      process.exit(0);
+    } catch (err) {
+      handleError(err);
+    }
+  });
+
+const closeCommand = new Command('close')
+  .description('Close the pairing window (no new cloud agents can request to connect)')
+  .action(async () => {
+    try {
+      const { budget } = openVault();
+      budget.setConfig('cloud_connect_accept_until', 0);
+      success('Pairing window closed.');
+      process.exit(0);
+    } catch (err) {
+      handleError(err);
+    }
+  });
+
 const revokeCommand = new Command('revoke')
   .description('Instantly revoke a cloud agent')
   .argument('<agentId>', 'Agent id to revoke')
@@ -268,6 +327,9 @@ const revokeCommand = new Command('revoke')
 
 export const cloudConnectCommand = new Command('cloud-connect')
   .description('Connect cloud agents (OpenClaw/Hermes/Claude.ai) via a one-time link')
+  .addCommand(urlCommand)
+  .addCommand(openCommand)
+  .addCommand(closeCommand)
   .addCommand(linkCommand)
   .addCommand(pendingCommand)
   .addCommand(approveCommand)

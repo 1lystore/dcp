@@ -2595,6 +2595,89 @@ export class VaultStorage {
   }
 
   /**
+   * Create a LINK-LESS pairing request (the "paste-URL" Cloud-Connect flow).
+   *
+   * Unlike {@link redeemCloudConnectLink}, there is no pre-issued connect-link or
+   * secret: a standard OAuth MCP client connected with just the vault's MCP URL,
+   * and the relay forwarded the request here. We materialise the SAME on-device
+   * approval state a redeem produces — a row in 'redeemed' status plus a PENDING
+   * (inert) agent connection — so the existing approve/deny/status/revoke paths
+   * work unchanged. The only difference is provenance: secret_hash is empty (the
+   * row can never be redeemed as a link) and source_host marks it as URL-paired.
+   *
+   * Security note: the connect-link's HPKE key-pin (Rule #1) is intentionally
+   * absent here; the on-device match-code + human approval (Rules #6/#8) and the
+   * caller-side pairing window remain the gates. Budget defaults to $0 auto-approve
+   * (Rule #5). The agent stays inert until the owner approves.
+   */
+  createCloudConnectPairingRequest(input: {
+    link_id: string;
+    agent_id: string;
+    name: string;
+    permission_scopes: string[];
+    budget: { daily: number; currency: string; auto_approve_under: number };
+    redeemer_public_key: string;
+    match_code: string;
+    source_ip?: string;
+    source_host?: string;
+    expires_at: string;
+  }): { ok: boolean; reason?: string; agent_id: string; match_code: string } {
+    const txn = this.db.transaction(() => {
+      const now = new Date().toISOString();
+      // Inserted directly as 'redeemed': there is no secret to verify, so the
+      // pending->redeemed transition that protects link redemption does not apply.
+      // secret_hash='' ensures verifyCloudConnectSecret / redeem can never match it.
+      this.db
+        .prepare(
+          `INSERT INTO cloud_connect_links (
+            link_id, secret_hash, agent_id, name, permission_scopes,
+            budget_daily, budget_currency, budget_auto_approve_under,
+            status, match_code, redeemer_public_key, source_ip, source_host,
+            created_at, expires_at, redeemed_at
+          ) VALUES (?, '', ?, ?, ?, ?, ?, ?, 'redeemed', ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          input.link_id,
+          input.agent_id,
+          input.name,
+          JSON.stringify(input.permission_scopes),
+          input.budget.daily,
+          input.budget.currency,
+          input.budget.auto_approve_under,
+          input.match_code,
+          input.redeemer_public_key,
+          input.source_ip || null,
+          input.source_host || 'url',
+          now,
+          input.expires_at,
+          now
+        );
+
+      // Create the PENDING agent connection — no authority until approved (Rule #8).
+      this.createAgentConnection({
+        agent_id: input.agent_id,
+        name: input.name,
+        mode: 'mcp',
+        permission_scopes: input.permission_scopes,
+        budget: input.budget,
+      });
+
+      return { ok: true as const, agent_id: input.agent_id, match_code: input.match_code };
+    });
+
+    const result = txn();
+    this.logAudit('CONFIG', 'success', {
+      operation: 'cloud_connect_pairing_requested',
+      details: JSON.stringify({
+        link_id: input.link_id,
+        agent_id: input.agent_id,
+        source: input.source_host || 'url',
+      }),
+    });
+    return result;
+  }
+
+  /**
    * Approve a redeemed Cloud-Connect link: bind the agent's presented public key
    * and mark it active. The session token is minted separately when the agent
    * authenticates its status poll (so the plaintext token is never stored).

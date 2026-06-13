@@ -79,6 +79,7 @@ export type WsMessageType =
   | 'pairing_claim'   // New pairing claim from agent (relay → vault)
   | 'pairing_result'  // Pairing approval result from vault (vault → relay)
   | 'cloud_connect_redeem' // Cloud-Connect: relay asks vault to redeem a connect-link (relay → vault)
+  | 'cloud_connect_pair'   // Cloud-Connect: relay asks vault to open a link-less (paste-URL) pairing (relay → vault)
   | 'cloud_connect_status' // Cloud-Connect: relay asks vault for an agent's approval status (relay → vault)
   | 'cloud_connect_mcp'    // Cloud-Connect: relay forwards an authorized MCP request to the vault (relay → vault)
   | 'cloud_connect_revoke' // Cloud-Connect: vault tells relay to instantly revoke an agent (vault → relay)
