@@ -466,6 +466,11 @@ export class RelayClient extends SimpleEmitter {
           this.emit('cloudConnectControl', { kind: 'status', ...(msg.payload as object) });
           break;
 
+        case 'cloud_connect_mcp':
+          // Relay forwarding an authorized MCP request to the vault.
+          this.emit('cloudConnectControl', { kind: 'mcp', ...(msg.payload as object) });
+          break;
+
         default:
           if (this.config.debug) {
             console.log('Unknown message type:', msg.type);

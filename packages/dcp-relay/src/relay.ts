@@ -60,7 +60,6 @@ import {
   verifyAccessToken,
   verifyDpopProof,
   wwwAuthenticateChallenge,
-  UnavailableMcpBridge,
   type RelayOAuthKeys,
   type JtiReplayGuard,
   type VaultConnectBridge,
@@ -128,7 +127,10 @@ export class RelayServer {
         redeem: (input) => this.wsBridgeRedeem(input),
         approvalStatus: (input) => this.wsBridgeApprovalStatus(input),
       };
-    this.mcpBridge = config.mcpBridge ?? new UnavailableMcpBridge();
+    // Default to the WS-backed MCP forwarder (vanilla clients: relay terminates
+    // and forwards to the vault over /ws). DCP-aware agents wanting full E2E
+    // blindness use the existing encrypted /relay/request path instead.
+    this.mcpBridge = config.mcpBridge ?? { forward: (req) => this.wsMcpForward(req) };
     this.messageStore = new MessageStore(this.config);
     this.connectionStore = new ConnectionStore();
     this.rateLimiter = new RateLimiter(
@@ -229,7 +231,7 @@ export class RelayServer {
    */
   private sendCloudConnectControl(
     vaultId: string,
-    type: 'cloud_connect_redeem' | 'cloud_connect_status',
+    type: 'cloud_connect_redeem' | 'cloud_connect_status' | 'cloud_connect_mcp',
     payload: Record<string, unknown>,
     timeoutMs = 10_000
   ): Promise<Record<string, unknown>> {
@@ -294,6 +296,31 @@ export class RelayServer {
       };
     } catch {
       return { status: 'unknown' };
+    }
+  }
+
+  /** Forward an authorized MCP request to the vault over the WS control channel. */
+  private async wsMcpForward(req: {
+    vaultId: string;
+    agentId: string;
+    scope: string;
+    jkt: string;
+    body: unknown;
+  }): Promise<{ status: number; body: unknown }> {
+    try {
+      const res = await this.sendCloudConnectControl(
+        req.vaultId,
+        'cloud_connect_mcp',
+        { agent_id: req.agentId, scope: req.scope, jkt: req.jkt, body: req.body },
+        30_000
+      );
+      const status = typeof res.status === 'number' ? res.status : 200;
+      return { status, body: res.body ?? res };
+    } catch {
+      return {
+        status: 503,
+        body: { error: 'vault_unreachable', error_description: 'The vault did not respond' },
+      };
     }
   }
 

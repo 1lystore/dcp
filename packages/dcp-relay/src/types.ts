@@ -80,7 +80,8 @@ export type WsMessageType =
   | 'pairing_result'  // Pairing approval result from vault (vault → relay)
   | 'cloud_connect_redeem' // Cloud-Connect: relay asks vault to redeem a connect-link (relay → vault)
   | 'cloud_connect_status' // Cloud-Connect: relay asks vault for an agent's approval status (relay → vault)
-  | 'cloud_connect_result'; // Cloud-Connect: vault's reply to a redeem/status control message (vault → relay)
+  | 'cloud_connect_mcp'    // Cloud-Connect: relay forwards an authorized MCP request to the vault (relay → vault)
+  | 'cloud_connect_result'; // Cloud-Connect: vault's reply to a redeem/status/mcp control message (vault → relay)
 
 export interface WsMessage {
   type: WsMessageType;
