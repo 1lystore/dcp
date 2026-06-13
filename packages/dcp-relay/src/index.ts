@@ -86,6 +86,7 @@ interface RelayCliOptions {
   debug: boolean;
   rateLimitPerMinute: number;
   expoPushUrl: string;
+  publicUrl: string;
 }
 
 function parseArgs(): RelayCliOptions {
@@ -97,6 +98,9 @@ function parseArgs(): RelayCliOptions {
   let debug = process.env.DCP_RELAY_DEBUG === 'true' || false;
   let rateLimitPerMinute = parseInt(process.env.DCP_RELAY_RATE_LIMIT || '', 10) || DEFAULT_RELAY_CONFIG.rateLimitPerMinute;
   let expoPushUrl = process.env.DCP_EXPO_PUSH_URL ?? DEFAULT_RELAY_CONFIG.expoPushUrl;
+  // Public base URL (OAuth issuer / MCP resource origin) — set behind a tunnel/proxy
+  // so discovery metadata + token audience use the public https host, not localhost.
+  const publicUrl = process.env.DCP_RELAY_PUBLIC_URL ?? DEFAULT_RELAY_CONFIG.publicUrl;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -141,11 +145,11 @@ Examples:
     }
   }
 
-  return { port, host, debug, rateLimitPerMinute, expoPushUrl };
+  return { port, host, debug, rateLimitPerMinute, expoPushUrl, publicUrl };
 }
 
 async function main(): Promise<void> {
-  const { port, host, debug, rateLimitPerMinute, expoPushUrl } = parseArgs();
+  const { port, host, debug, rateLimitPerMinute, expoPushUrl, publicUrl } = parseArgs();
 
   const relay = new RelayServer({
     port,
@@ -154,6 +158,7 @@ async function main(): Promise<void> {
     enableLongPoll: true,
     rateLimitPerMinute,
     expoPushUrl,
+    publicUrl,
   });
 
   // Handle shutdown
