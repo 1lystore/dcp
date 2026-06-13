@@ -45,3 +45,14 @@ export {
   type AsMetadataOptions,
   type PrmOptions,
 } from './metadata.js';
+
+export {
+  ClientStore,
+  AuthSessionStore,
+  RefreshTokenStore,
+  type RegisteredClient,
+  type AuthSession,
+  type AuthSessionStatus,
+  type RefreshContext,
+  type RotateResult,
+} from './store.js';
