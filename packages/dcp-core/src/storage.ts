@@ -89,6 +89,13 @@ const KEY_FILE_MODE = 0o600;
 /** Non-secret marker used to distinguish a provisioned vault from bare schema tables */
 const INIT_MARKER_FILE = 'vault.initialized';
 
+/**
+ * Grace window in which a REDEEMED Cloud-Connect link may still be approved.
+ * After this, the redeemed-but-unapproved link expires so its match-code can't
+ * be approved indefinitely (anti stale-approval; Rule #4 short-expiry).
+ */
+export const CLOUD_CONNECT_APPROVAL_GRACE_MS = 15 * 60 * 1000;
+
 function generateId(): string {
   if (typeof randomUUID === 'function') {
     return randomUUID();
@@ -2595,29 +2602,40 @@ export class VaultStorage {
   approveCloudConnectLink(
     linkId: string
   ): { ok: boolean; reason?: string; agent_id?: string; redeemer_public_key?: string } {
-    const link = this.getCloudConnectLink(linkId);
-    if (!link) return { ok: false, reason: 'LINK_NOT_FOUND' };
-    if (link.status !== 'redeemed') {
-      return { ok: false, reason: `LINK_${link.status.toUpperCase()}` };
-    }
+    // Atomic: bind the agent and consume the link in one transaction, with the
+    // guarded status UPDATE done FIRST so a lost race never marks the agent paired.
+    const txn = this.db.transaction(() => {
+      const link = this.getCloudConnectLink(linkId);
+      if (!link) return { ok: false as const, reason: 'LINK_NOT_FOUND' };
+      if (link.status !== 'redeemed') {
+        return { ok: false as const, reason: `LINK_${link.status.toUpperCase()}` };
+      }
 
-    this.markAgentPaired(link.agent_id, undefined, link.redeemer_public_key);
+      const now = new Date().toISOString();
+      const upd = this.db
+        .prepare(
+          "UPDATE cloud_connect_links SET status='consumed', consumed_at=? WHERE link_id=? AND status='redeemed'"
+        )
+        .run(now, linkId);
+      if (upd.changes === 0) return { ok: false as const, reason: 'RACE' };
 
-    const now = new Date().toISOString();
-    const upd = this.db
-      .prepare(
-        "UPDATE cloud_connect_links SET status='consumed', consumed_at=? WHERE link_id=? AND status='redeemed'"
-      )
-      .run(now, linkId);
-    if (upd.changes === 0) return { ok: false, reason: 'RACE' };
+      this.markAgentPaired(link.agent_id, undefined, link.redeemer_public_key);
 
-    this.logAudit('GRANT', 'success', {
-      operation: 'cloud_connect_link_approved',
-      agentName: link.name,
-      details: JSON.stringify({ link_id: linkId, agent_id: link.agent_id }),
+      return {
+        ok: true as const,
+        agent_id: link.agent_id,
+        redeemer_public_key: link.redeemer_public_key,
+      };
     });
 
-    return { ok: true, agent_id: link.agent_id, redeemer_public_key: link.redeemer_public_key };
+    const result = txn();
+    if (result.ok) {
+      this.logAudit('GRANT', 'success', {
+        operation: 'cloud_connect_link_approved',
+        details: JSON.stringify({ link_id: linkId, agent_id: result.agent_id }),
+      });
+    }
+    return result;
   }
 
   /** Deny a pending/redeemed link (revokes any pending agent connection). */
@@ -2678,15 +2696,27 @@ export class VaultStorage {
     return this.hexDigestsEqual(row.secret_hash, presented);
   }
 
-  /** Mark expired (unredeemed) links. Returns the number updated. */
+  /**
+   * Lazily expire stale links. Covers both:
+   *  - unredeemed links past their bootstrap TTL, and
+   *  - redeemed-but-unapproved links past the approval grace window
+   * so a redeemed link's match-code can't be approved/polled indefinitely.
+   * Returns the number of links transitioned to 'expired'.
+   */
   expireStaleCloudConnectLinks(): number {
     const now = new Date().toISOString();
-    const r = this.db
+    const r1 = this.db
       .prepare(
         "UPDATE cloud_connect_links SET status='expired' WHERE status='pending' AND expires_at < ?"
       )
       .run(now);
-    return r.changes;
+    const graceCutoff = new Date(Date.now() - CLOUD_CONNECT_APPROVAL_GRACE_MS).toISOString();
+    const r2 = this.db
+      .prepare(
+        "UPDATE cloud_connect_links SET status='expired' WHERE status='redeemed' AND redeemed_at < ?"
+      )
+      .run(graceCutoff);
+    return r1.changes + r2.changes;
   }
 
   /**

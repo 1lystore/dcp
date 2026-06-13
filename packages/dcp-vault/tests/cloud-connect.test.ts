@@ -232,6 +232,62 @@ describe('Cloud-Connect', () => {
 
   // -- Security invariants ---------------------------------------------------
 
+  it('requires the match-code to approve — cannot be omitted (Rule #6)', async () => {
+    const issued = await issueLink();
+    const agentKeys = generateSigningKeyPair();
+    const redeem = JSON.parse(
+      (
+        await server.inject({
+          method: 'POST',
+          url: '/v1/cloud-connect/redeem',
+          payload: {
+            connect_link: issued.connect_link,
+            agent_public_key: agentKeys.publicKey.toString('base64'),
+          },
+        })
+      ).body
+    );
+    expect(redeem.status).toBe('pending_approval');
+
+    // Approve with NO match_code -> rejected.
+    const noCode = await server.inject({
+      method: 'POST',
+      url: `/v1/cloud-connect/pending/${issued.agent_id}/approve`,
+      headers: owner(),
+      payload: {},
+    });
+    expect(noCode.statusCode).toBe(400);
+    expect(JSON.parse(noCode.body).error.code).toBe('MATCH_CODE_MISMATCH');
+
+    // Approve with blank match_code -> rejected.
+    const blank = await server.inject({
+      method: 'POST',
+      url: `/v1/cloud-connect/pending/${issued.agent_id}/approve`,
+      headers: owner(),
+      payload: { match_code: '   ' },
+    });
+    expect(blank.statusCode).toBe(400);
+
+    // Still pending (not bound), and the on-device facts do NOT include a
+    // host taken from the attacker-controllable Host header (Rule #6).
+    const pending = JSON.parse(
+      (await server.inject({ method: 'GET', url: '/v1/cloud-connect/pending', headers: owner() }))
+        .body
+    ).pending;
+    const entry = pending.find((p: { agent_id: string }) => p.agent_id === issued.agent_id);
+    expect(entry).toBeTruthy();
+    expect(entry.source_host).toBeUndefined();
+
+    // Correct code -> approves.
+    const ok = await server.inject({
+      method: 'POST',
+      url: `/v1/cloud-connect/pending/${issued.agent_id}/approve`,
+      headers: owner(),
+      payload: { match_code: redeem.match_code },
+    });
+    expect(ok.statusCode).toBe(200);
+  });
+
   it('defaults to $0 budget / no auto-approve when omitted (Rule #5)', async () => {
     const issued = await issueLink({ budget: undefined });
     const pendingBudgetRes = await server.inject({

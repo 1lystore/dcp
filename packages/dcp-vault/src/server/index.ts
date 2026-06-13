@@ -3113,15 +3113,29 @@ async function buildServer(): Promise<FastifyInstance> {
   // the match-code) -> the agent polls and mints its session token. Permissions and
   // budget live ONLY in the vault DB; the link carries no authority. See PRD §6.
 
-  /** Derive server-side request facts for the on-device approval (Rule #6). */
+  /**
+   * Derive server-side request facts for the on-device approval (Rule #6).
+   * Only truly server-derived values count: request.ip comes from the socket.
+   * The Host header is attacker-controllable, so it is NOT surfaced as a fact
+   * (a verified host will be provided by the relay in P2). source_host stays
+   * undefined here by design.
+   */
   const deriveSourceFacts = (
     request: FastifyRequest
   ): { source_ip?: string; source_host?: string } => {
-    // request.ip is derived by Fastify from the socket (not an attacker header).
-    const source_ip = request.ip || undefined;
-    const source_host =
-      (request.headers['host'] as string | undefined) || undefined;
-    return { source_ip, source_host };
+    return { source_ip: request.ip || undefined, source_host: undefined };
+  };
+
+  /** Constant-time, length-safe equality for short ASCII codes (Rule #4/#6). */
+  const constantTimeStrEqual = (a: string, b: string): boolean => {
+    const ab = Buffer.from(a, 'utf8');
+    const bb = Buffer.from(b, 'utf8');
+    if (ab.length !== bb.length) return false;
+    try {
+      return crypto.timingSafeEqual(ab, bb);
+    } catch {
+      return false;
+    }
   };
 
   /**
@@ -3142,8 +3156,14 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     const body = request.body || {};
-    const name = (body.name || '').trim() || 'Cloud agent';
-    const scopes = Array.isArray(body.scopes) ? body.scopes.filter((s) => typeof s === 'string') : [];
+    // Bound owner-supplied strings to avoid storage bloat / abuse.
+    const name = ((body.name || '').trim() || 'Cloud agent').slice(0, 80);
+    const scopes = Array.isArray(body.scopes)
+      ? body.scopes
+          .filter((s) => typeof s === 'string')
+          .slice(0, 64)
+          .map((s) => s.slice(0, 128))
+      : [];
     // Rule #5: cloud agents start with NO standing auto-approve and $0 budget.
     const budget = {
       daily: Math.max(0, Number(body.budget?.daily ?? 0)) || 0,
@@ -3321,6 +3341,8 @@ async function buildServer(): Promise<FastifyInstance> {
         });
       }
 
+      // Lazily expire stale links (bootstrap TTL + approval grace) before acting.
+      storage.expireStaleCloudConnectLinks();
       const link = storage.getCloudConnectLink(linkId);
       if (!link) {
         return reply.status(404).send({
@@ -3370,6 +3392,7 @@ async function buildServer(): Promise<FastifyInstance> {
         error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
       });
     }
+    storage.expireStaleCloudConnectLinks();
     const pending = storage.listPendingCloudConnectApprovals();
     return {
       pending: pending.map((l) => ({
@@ -3400,7 +3423,7 @@ async function buildServer(): Promise<FastifyInstance> {
     return { links: storage.listCloudConnectLinks() };
   });
 
-  /** Approve a pending cloud-connect (owner only; verifies match-code if provided). */
+  /** Approve a pending cloud-connect (owner only; match-code mandatory). */
   server.post<{ Params: { agentId: string }; Body: { match_code?: string } }>(
     '/v1/cloud-connect/pending/:agentId/approve',
     async (request, reply) => {
@@ -3409,6 +3432,8 @@ async function buildServer(): Promise<FastifyInstance> {
           error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
         });
       }
+      // Expire over-age redeemed links first so a stale link can't be approved.
+      storage.expireStaleCloudConnectLinks();
       const link = storage.getCloudConnectLinkByAgent(request.params.agentId);
       if (!link || link.status !== 'redeemed') {
         return reply.status(404).send({
@@ -3418,13 +3443,17 @@ async function buildServer(): Promise<FastifyInstance> {
           },
         });
       }
-      if (
-        request.body?.match_code &&
-        link.match_code &&
-        request.body.match_code.trim().toUpperCase() !== link.match_code.toUpperCase()
-      ) {
+      // Rule #6: the initiation<->approval match-code is MANDATORY. Every redeemed
+      // link carries a server-generated code, so the owner must echo the code they
+      // visually verified against the agent side. Constant-time compare.
+      const presentedCode = (request.body?.match_code || '').trim().toUpperCase();
+      const expectedCode = (link.match_code || '').toUpperCase();
+      if (!presentedCode || !expectedCode || !constantTimeStrEqual(presentedCode, expectedCode)) {
         return reply.status(400).send({
-          error: { code: 'MATCH_CODE_MISMATCH', message: 'Match code does not match' },
+          error: {
+            code: 'MATCH_CODE_MISMATCH',
+            message: 'A matching match code is required to approve this connection',
+          },
         });
       }
       const result = storage.approveCloudConnectLink(link.link_id);
