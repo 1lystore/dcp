@@ -21,6 +21,7 @@ import type { FastifyPluginCallback, FastifyPluginOptions, RouteShorthandOptions
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
 import type { WebSocket } from 'ws';
+import { randomUUID } from 'crypto';
 import { ed25519 } from '@noble/curves/ed25519';
 import type {
   RelayConfig,
@@ -54,13 +55,16 @@ import {
   ClientStore,
   AuthSessionStore,
   RefreshTokenStore,
-  UnavailableVaultBridge,
   processConnect,
   processToken,
   type RelayOAuthKeys,
   type JtiReplayGuard,
   type VaultConnectBridge,
   type GrantDeps,
+  type BridgeRedeemInput,
+  type BridgeRedeemResult,
+  type BridgeApprovalInput,
+  type BridgeApprovalResult,
 } from './oauth/index.js';
 
 // ============================================================================
@@ -93,6 +97,11 @@ export class RelayServer {
   private oauthJti: JtiReplayGuard = createJtiGuard();
   /** Control-plane bridge to the vault that issued a connect-link (WS-backed in prod). */
   private vaultBridge: VaultConnectBridge;
+  /** Pending cloud-connect control requests awaiting a vault reply (control_id -> waiter). */
+  private pendingControl = new Map<
+    string,
+    { resolve: (v: Record<string, unknown>) => void; timer: ReturnType<typeof setTimeout> }
+  >();
 
   constructor(
     config: Partial<RelayConfig> & {
@@ -102,7 +111,13 @@ export class RelayServer {
   ) {
     this.config = { ...DEFAULT_RELAY_CONFIG, ...config };
     this.authConfig = config.authConfig ?? { requirePairingToken: false };
-    this.vaultBridge = config.vaultBridge ?? new UnavailableVaultBridge();
+    // Default to the WS-backed bridge (talks to the connected vault over /ws);
+    // tests inject a fake. UnavailableVaultBridge is only a typing fallback.
+    this.vaultBridge =
+      config.vaultBridge ?? {
+        redeem: (input) => this.wsBridgeRedeem(input),
+        approvalStatus: (input) => this.wsBridgeApprovalStatus(input),
+      };
     this.messageStore = new MessageStore(this.config);
     this.connectionStore = new ConnectionStore();
     this.rateLimiter = new RateLimiter(
@@ -170,6 +185,9 @@ export class RelayServer {
     this.clientRequestMap.clear();
     this.clientRequestsBySocket.clear();
 
+    for (const { timer } of this.pendingControl.values()) clearTimeout(timer);
+    this.pendingControl.clear();
+
     this.messageStore.close();
     this.rateLimiter.close();
     this.pairingClaimStore.close();
@@ -190,6 +208,82 @@ export class RelayServer {
       });
     }
     return this.oauthKeysPromise;
+  }
+
+  // --- Cloud-Connect control channel (relay -> vault over the /ws socket) ---
+
+  /**
+   * Send a cloud-connect control message to a connected vault and await its
+   * correlated reply. Rejects if the vault is offline or does not reply in time.
+   */
+  private sendCloudConnectControl(
+    vaultId: string,
+    type: 'cloud_connect_redeem' | 'cloud_connect_status',
+    payload: Record<string, unknown>,
+    timeoutMs = 10_000
+  ): Promise<Record<string, unknown>> {
+    const sock = this.wsConnections.get(vaultId);
+    if (!sock || sock.readyState !== 1) {
+      return Promise.reject(new Error('vault_offline'));
+    }
+    const controlId = randomUUID();
+    const promise = new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingControl.delete(controlId);
+        reject(new Error('control_timeout'));
+      }, timeoutMs);
+      this.pendingControl.set(controlId, { resolve, timer });
+    });
+    const msg: WsMessage = {
+      type,
+      payload: { control_id: controlId, ...payload },
+      timestamp: new Date().toISOString(),
+    };
+    sock.send(JSON.stringify(msg));
+    return promise;
+  }
+
+  /** Resolve a pending control request when the vault's reply arrives. */
+  private resolveControl(controlId: string, payload: Record<string, unknown>): void {
+    const waiter = this.pendingControl.get(controlId);
+    if (!waiter) return;
+    clearTimeout(waiter.timer);
+    this.pendingControl.delete(controlId);
+    waiter.resolve(payload);
+  }
+
+  private async wsBridgeRedeem(input: BridgeRedeemInput): Promise<BridgeRedeemResult> {
+    try {
+      const res = await this.sendCloudConnectControl(input.vaultId, 'cloud_connect_redeem', {
+        connect_link: input.connectLink,
+        redeemer_key: input.redeemerKey,
+        source_ip: input.sourceIp,
+      });
+      return {
+        ok: Boolean(res.ok),
+        agentId: res.agent_id as string | undefined,
+        matchCode: res.match_code as string | undefined,
+        reason: res.reason as string | undefined,
+      };
+    } catch {
+      return { ok: false, reason: 'vault_unreachable' };
+    }
+  }
+
+  private async wsBridgeApprovalStatus(input: BridgeApprovalInput): Promise<BridgeApprovalResult> {
+    try {
+      const res = await this.sendCloudConnectControl(input.vaultId, 'cloud_connect_status', {
+        agent_id: input.agentId,
+      });
+      const status = res.status as BridgeApprovalResult['status'];
+      return {
+        status: status || 'unknown',
+        scope: res.scope as string | undefined,
+        budget: res.budget as BridgeApprovalResult['budget'],
+      };
+    } catch {
+      return { status: 'unknown' };
+    }
   }
 
   /** Assemble the per-request OAuth grant dependencies. */
@@ -1289,6 +1383,15 @@ export class RelayServer {
 
         if (this.config.debug && updated) {
           console.log(`Pairing claim ${payload.claim_id} ${status} via WebSocket`);
+        }
+        break;
+      }
+
+      case 'cloud_connect_result': {
+        // Vault's reply to a cloud-connect redeem/status control message.
+        const payload = (msg.payload || {}) as { control_id?: string };
+        if (payload.control_id) {
+          this.resolveControl(payload.control_id, msg.payload as Record<string, unknown>);
         }
         break;
       }

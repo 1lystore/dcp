@@ -215,6 +215,18 @@ export class RelayClient extends SimpleEmitter {
   }
 
   /**
+   * Reply to a Cloud-Connect control message (redeem/status) from the relay.
+   * `controlId` correlates the reply to the relay's pending request.
+   */
+  sendCloudConnectResult(controlId: string, result: Record<string, unknown>): boolean {
+    return this.sendWsMessage({
+      type: 'cloud_connect_result',
+      payload: { control_id: controlId, vault_id: this.config.vaultId, ...result },
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /**
    * Cleanup resources
    */
   destroy(): void {
@@ -442,6 +454,16 @@ export class RelayClient extends SimpleEmitter {
         case 'pairing_claim':
           // Relay forwarding a VPS agent's pairing claim to the vault
           this.emit('pairingClaim', msg.payload as import('@dcprotocol/relay').StoredPairingClaim);
+          break;
+
+        case 'cloud_connect_redeem':
+          // Relay asking the vault to redeem a Cloud-Connect link for an agent.
+          this.emit('cloudConnectControl', { kind: 'redeem', ...(msg.payload as object) });
+          break;
+
+        case 'cloud_connect_status':
+          // Relay asking the vault for an agent's approval status.
+          this.emit('cloudConnectControl', { kind: 'status', ...(msg.payload as object) });
           break;
 
         default:

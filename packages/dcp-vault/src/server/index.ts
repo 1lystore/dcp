@@ -6067,6 +6067,66 @@ async function handleRelayRequest(
   return { response: response.payload || '', replyPublicKey };
 }
 
+/**
+ * Redeem a Cloud-Connect link on behalf of a cloud agent that connected via the
+ * relay's OAuth flow. Mirrors the HTTP /v1/cloud-connect/redeem, but the redeemer
+ * identity is the agent's DPoP key thumbprint (jkt) rather than an Ed25519 key —
+ * the relay enforces DPoP/audience binding; the vault records who redeemed and
+ * runs the on-device approval. The vault fully verifies the connect-link.
+ */
+async function redeemCloudConnectOverRelay(ctrl: {
+  connect_link?: string;
+  redeemer_key?: string;
+  source_ip?: string;
+}): Promise<Record<string, unknown>> {
+  const token = (ctrl.connect_link || '').trim();
+  if (!token || !isConnectLink(token)) return { ok: false, reason: 'INVALID_CONNECT_LINK' };
+  const jkt = (ctrl.redeemer_key || '').trim();
+  if (!jkt) return { ok: false, reason: 'INVALID_AGENT_KEY' };
+
+  const identity = await ensureRelayIdentity();
+  const payload = verifyConnectLinkWithKey(token, identity.signingKeyPair.publicKey);
+  if (!payload) return { ok: false, reason: 'INVALID_CONNECT_LINK' };
+  if (payload.vault_id !== identity.vaultId) return { ok: false, reason: 'WRONG_VAULT' };
+
+  const actualHpke = identity.hpkeKeyPair.publicKey.toString('base64');
+  if (
+    payload.vault_hpke_public_key !== actualHpke ||
+    payload.vault_hpke_fingerprint !== hpkeFingerprint(actualHpke)
+  ) {
+    return { ok: false, reason: 'KEY_PIN_MISMATCH' };
+  }
+
+  const matchCode = generateMatchCode();
+  const result = storage.redeemCloudConnectLink({
+    link_id: payload.link_id,
+    secret: payload.secret,
+    redeemer_public_key: jkt,
+    match_code: matchCode,
+    mode: 'mcp',
+    source_ip: ctrl.source_ip,
+  });
+  if (!result.ok) return { ok: false, reason: result.reason || 'REDEEM_FAILED' };
+  return { ok: true, agent_id: result.agent_id, match_code: result.match_code };
+}
+
+/** Report a cloud agent's approval status to the relay (for the device-flow poll). */
+function cloudConnectStatusOverRelay(agentId?: string): Record<string, unknown> {
+  if (!agentId) return { status: 'unknown' };
+  const agent = storage.getAgentConnection(agentId);
+  if (!agent) return { status: 'unknown' };
+  if (agent.status === 'revoked') return { status: 'revoked' };
+  if (agent.status === 'active') {
+    return {
+      status: 'approved',
+      scope: agent.permission_scopes.join(' '),
+      budget: agent.budget,
+    };
+  }
+  // 'pending' (redeemed, awaiting on-device approval) or 'stale'.
+  return { status: 'pending' };
+}
+
 async function startRelayClient(server: FastifyInstance): Promise<void> {
   const identity = await ensureRelayIdentity();
 
@@ -6110,6 +6170,37 @@ async function startRelayClient(server: FastifyInstance): Promise<void> {
     console.log(`[Vault] Verification phrase: ${claim.verification_phrase}`);
     // Store pending claim for Desktop approval
     pendingPairingClaims.set(claim.claim_id, claim);
+  });
+
+  // Handle Cloud-Connect control messages from the relay's OAuth flow
+  // (relay asks the vault to redeem a connect-link / report approval status).
+  relayClient.on('cloudConnectControl', async (raw: unknown) => {
+    const ctrl = raw as {
+      control_id?: string;
+      kind?: 'redeem' | 'status';
+      connect_link?: string;
+      redeemer_key?: string;
+      source_ip?: string;
+      agent_id?: string;
+    };
+    if (!ctrl?.control_id || !relayClient) return;
+    try {
+      if (ctrl.kind === 'redeem') {
+        const result = await redeemCloudConnectOverRelay(ctrl);
+        relayClient.sendCloudConnectResult(ctrl.control_id, result);
+      } else if (ctrl.kind === 'status') {
+        relayClient.sendCloudConnectResult(
+          ctrl.control_id,
+          cloudConnectStatusOverRelay(ctrl.agent_id)
+        );
+      }
+    } catch (err) {
+      console.error('[Vault] Cloud-Connect control error:', err);
+      relayClient.sendCloudConnectResult(
+        ctrl.control_id,
+        ctrl.kind === 'redeem' ? { ok: false, reason: 'internal_error' } : { status: 'unknown' }
+      );
+    }
   });
 
   let pendingEnvelope: { request_id: string; action_type: string; vault_id: string; version: string } | null = null;

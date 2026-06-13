@@ -77,7 +77,10 @@ export type WsMessageType =
   | 'ack'             // Acknowledgement
   | 'error'           // Error response
   | 'pairing_claim'   // New pairing claim from agent (relay → vault)
-  | 'pairing_result'; // Pairing approval result from vault (vault → relay)
+  | 'pairing_result'  // Pairing approval result from vault (vault → relay)
+  | 'cloud_connect_redeem' // Cloud-Connect: relay asks vault to redeem a connect-link (relay → vault)
+  | 'cloud_connect_status' // Cloud-Connect: relay asks vault for an agent's approval status (relay → vault)
+  | 'cloud_connect_result'; // Cloud-Connect: vault's reply to a redeem/status control message (vault → relay)
 
 export interface WsMessage {
   type: WsMessageType;
