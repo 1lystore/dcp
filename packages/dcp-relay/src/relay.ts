@@ -54,8 +54,13 @@ import {
   ClientStore,
   AuthSessionStore,
   RefreshTokenStore,
+  UnavailableVaultBridge,
+  processConnect,
+  processToken,
   type RelayOAuthKeys,
   type JtiReplayGuard,
+  type VaultConnectBridge,
+  type GrantDeps,
 } from './oauth/index.js';
 
 // ============================================================================
@@ -86,10 +91,18 @@ export class RelayServer {
   private oauthSessions = new AuthSessionStore();
   private oauthRefresh = new RefreshTokenStore();
   private oauthJti: JtiReplayGuard = createJtiGuard();
+  /** Control-plane bridge to the vault that issued a connect-link (WS-backed in prod). */
+  private vaultBridge: VaultConnectBridge;
 
-  constructor(config: Partial<RelayConfig> & { authConfig?: AuthConfig } = {}) {
+  constructor(
+    config: Partial<RelayConfig> & {
+      authConfig?: AuthConfig;
+      vaultBridge?: VaultConnectBridge;
+    } = {}
+  ) {
     this.config = { ...DEFAULT_RELAY_CONFIG, ...config };
     this.authConfig = config.authConfig ?? { requirePairingToken: false };
+    this.vaultBridge = config.vaultBridge ?? new UnavailableVaultBridge();
     this.messageStore = new MessageStore(this.config);
     this.connectionStore = new ConnectionStore();
     this.rateLimiter = new RateLimiter(
@@ -179,6 +192,18 @@ export class RelayServer {
     return this.oauthKeysPromise;
   }
 
+  /** Assemble the per-request OAuth grant dependencies. */
+  private async grantDeps(request: FastifyRequest): Promise<GrantDeps> {
+    return {
+      keys: await this.getOAuthKeys(),
+      sessions: this.oauthSessions,
+      refresh: this.oauthRefresh,
+      jtiGuard: this.oauthJti,
+      bridge: this.vaultBridge,
+      issuer: this.baseUrl(request),
+    };
+  }
+
   /**
    * Public base URL (OAuth issuer / MCP resource origin). Prefers the configured
    * publicUrl; otherwise derives from the request (dev/local). No trailing slash.
@@ -266,6 +291,59 @@ export class RelayServer {
         return {};
       }
     );
+
+    // Connect-link grant: redeem a connect-link -> open an authorization session.
+    // The agent then polls /oauth/token. (device-flow shape.)
+    this.server.post<{
+      Body: {
+        connect_link?: string;
+        code_challenge?: string;
+        code_challenge_method?: string;
+        client_id?: string;
+        scope?: string;
+      };
+    }>('/oauth/connect', async (request, reply) => {
+      const body = request.body || {};
+      const deps = await this.grantDeps(request);
+      const result = await processConnect(deps, {
+        connectLink: body.connect_link || '',
+        codeChallenge: body.code_challenge || '',
+        codeChallengeMethod: body.code_challenge_method,
+        dpopProof: (request.headers['dpop'] as string) || '',
+        method: 'POST',
+        url: `${this.baseUrl(request)}/oauth/connect`,
+        sourceIp: request.ip,
+        clientId: body.client_id,
+        scope: body.scope,
+      });
+      reply.status(result.status);
+      return result.body;
+    });
+
+    // Token endpoint: device_code poll + refresh_token rotation. DPoP required.
+    this.server.post<{
+      Body: {
+        grant_type?: string;
+        device_code?: string;
+        code_verifier?: string;
+        refresh_token?: string;
+      };
+    }>('/oauth/token', async (request, reply) => {
+      const body = request.body || {};
+      const deps = await this.grantDeps(request);
+      const result = await processToken(deps, {
+        grantType: body.grant_type || '',
+        deviceCode: body.device_code,
+        codeVerifier: body.code_verifier,
+        refreshToken: body.refresh_token,
+        dpopProof: (request.headers['dpop'] as string) || '',
+        method: 'POST',
+        url: `${this.baseUrl(request)}/oauth/token`,
+      });
+      reply.status(result.status);
+      if (result.status === 200) reply.header('cache-control', 'no-store');
+      return result.body;
+    });
 
     // Stats (for monitoring)
     this.server.get('/stats', async () => ({

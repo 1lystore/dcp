@@ -56,3 +56,28 @@ export {
   type RefreshContext,
   type RotateResult,
 } from './store.js';
+
+export {
+  UnavailableVaultBridge,
+  type VaultConnectBridge,
+  type BridgeRedeemInput,
+  type BridgeRedeemResult,
+  type BridgeApprovalInput,
+  type BridgeApprovalResult,
+} from './bridge.js';
+
+export {
+  parseConnectLinkRouting,
+  isConnectLinkToken,
+  type ConnectLinkRouting,
+} from './connect-link-lite.js';
+
+export {
+  processConnect,
+  processToken,
+  DEVICE_CODE_GRANT,
+  type GrantDeps,
+  type GrantResponse,
+  type ConnectRequest,
+  type TokenRequest,
+} from './grant.js';
