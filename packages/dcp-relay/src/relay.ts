@@ -122,11 +122,15 @@ export class RelayServer {
    */
   private vaultKeyBindings = new Map<string, { key: string; lastSeen: number }>();
   private readonly VAULT_BINDING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-  /** Pending cloud-connect control requests awaiting a vault reply (control_id -> waiter). */
+  /** Pending cloud-connect control requests awaiting a vault reply (control_id -> waiter).
+   *  `vaultId` records which vault the request was sent to, so only THAT vault's socket
+   *  may resolve it (a different vault cannot spoof another's control reply). */
   private pendingControl = new Map<
     string,
-    { resolve: (v: Record<string, unknown>) => void; timer: ReturnType<typeof setTimeout> }
+    { vaultId: string; resolve: (v: Record<string, unknown>) => void; timer: ReturnType<typeof setTimeout> }
   >();
+  /** agent_id -> owning vault_id, so cloud_connect_revoke can only revoke own agents. */
+  private agentVault = new Map<string, string>();
 
   constructor(
     config: Partial<RelayConfig> & {
@@ -284,7 +288,7 @@ export class RelayServer {
         this.pendingControl.delete(controlId);
         reject(new Error('control_timeout'));
       }, timeoutMs);
-      this.pendingControl.set(controlId, { resolve, timer });
+      this.pendingControl.set(controlId, { vaultId, resolve, timer });
     });
     const msg: WsMessage = {
       type,
@@ -295,10 +299,19 @@ export class RelayServer {
     return promise;
   }
 
-  /** Resolve a pending control request when the vault's reply arrives. */
-  private resolveControl(controlId: string, payload: Record<string, unknown>): void {
+  /**
+   * Resolve a pending control request when the vault's reply arrives. Only the vault
+   * the request was SENT to may resolve it — a reply from any other vault socket is
+   * ignored (prevents one vault spoofing another's control reply).
+   */
+  private resolveControl(
+    controlId: string,
+    payload: Record<string, unknown>,
+    fromVaultId: string | null
+  ): void {
     const waiter = this.pendingControl.get(controlId);
     if (!waiter) return;
+    if (fromVaultId !== waiter.vaultId) return; // not the vault we asked
     clearTimeout(waiter.timer);
     this.pendingControl.delete(controlId);
     waiter.resolve(payload);
@@ -311,9 +324,11 @@ export class RelayServer {
         redeemer_key: input.redeemerKey,
         source_ip: input.sourceIp,
       });
+      const agentId = res.agent_id as string | undefined;
+      if (res.ok && agentId) this.agentVault.set(agentId, input.vaultId);
       return {
         ok: Boolean(res.ok),
-        agentId: res.agent_id as string | undefined,
+        agentId,
         matchCode: res.match_code as string | undefined,
         reason: res.reason as string | undefined,
       };
@@ -331,9 +346,11 @@ export class RelayServer {
         client_name: input.clientName,
         scope: input.scope,
       });
+      const agentId = res.agent_id as string | undefined;
+      if (res.ok && agentId) this.agentVault.set(agentId, input.vaultId);
       return {
         ok: Boolean(res.ok),
-        agentId: res.agent_id as string | undefined,
+        agentId,
         matchCode: res.match_code as string | undefined,
         reason: res.reason as string | undefined,
       };
@@ -969,20 +986,10 @@ export class RelayServer {
       }
     );
 
-    // Vault resolves a pairing claim (approve/deny)
-    this.server.post<{
-      Params: { claimId: string };
-      Body: { action: 'approve' | 'deny'; agent_id?: string; vault_id: string };
-    }>(
-      '/v1/pairing-claims/:claimId/resolve',
-      async (request, reply) => {
-        return this.handlePairingResolve(
-          request.params.claimId,
-          request.body,
-          reply
-        );
-      }
-    );
+    // NOTE: the unauthenticated HTTP "/v1/pairing-claims/:claimId/resolve" route was
+    // removed (#3). Pairing approvals are pushed by the vault over its authenticated
+    // WS control channel (`pairing_result`, bound to the socket's vault), so an
+    // unauthenticated HTTP resolve was both unused and a spoofing vector.
 
     // Register an invite_id → vault_id mapping (called by vault on invite creation).
     // Only a vault with a LIVE, authenticated WS connection (vault_id bound to its
@@ -1501,46 +1508,6 @@ export class RelayServer {
     } satisfies PairingApprovalStatus);
   }
 
-  /**
-   * Handle pairing resolution from vault (approve/deny)
-   */
-  private async handlePairingResolve(
-    claimId: string,
-    body: { action: 'approve' | 'deny'; agent_id?: string; vault_id: string },
-    reply: FastifyReply
-  ): Promise<unknown> {
-    const { action, agent_id, vault_id } = body;
-
-    const claim = this.pairingClaimStore.getClaim(claimId);
-    if (!claim) {
-      return reply.status(404).send({ error: 'Claim not found' });
-    }
-
-    // Verify vault_id matches
-    if (claim.vault_id && claim.vault_id !== vault_id) {
-      return reply.status(403).send({ error: 'Vault ID mismatch' });
-    }
-
-    // Update claim status
-    const status = action === 'approve' ? 'approved' : 'denied';
-    const updated = this.pairingClaimStore.updateClaimStatus(claimId, status, agent_id);
-
-    if (!updated) {
-      return reply.status(500).send({ error: 'Failed to update claim status' });
-    }
-
-    if (this.config.debug) {
-      console.log(`Pairing claim ${claimId} ${status} by vault ${vault_id}`);
-    }
-
-    return reply.send({
-      success: true,
-      claim_id: claimId,
-      status,
-      agent_id,
-    });
-  }
-
   private async handleMobilePairingApprove(
     inviteId: string,
     body: MobilePairingApprovalRequest,
@@ -1610,9 +1577,14 @@ export class RelayServer {
       ws.on('message', (data: Buffer | string) => {
         try {
           const msg: WsMessage = JSON.parse(data.toString());
-          this.handleWsMessage(ws, msg, (id) => {
-            vaultId = id;
-          });
+          this.handleWsMessage(
+            ws,
+            msg,
+            (id) => {
+              vaultId = id;
+            },
+            () => vaultId
+          );
         } catch (err) {
           this.sendWsError(ws, 'RELAY_INVALID_ENVELOPE', 'Invalid message format');
         }
@@ -1665,7 +1637,8 @@ export class RelayServer {
   private handleWsMessage(
     ws: WebSocket,
     msg: WsMessage,
-    setVaultId: (id: string) => void
+    setVaultId: (id: string) => void,
+    getVaultId: () => string | null
   ): void {
     switch (msg.type) {
       case 'register': {
@@ -1809,6 +1782,18 @@ export class RelayServer {
           return;
         }
 
+        // The socket must be the registered vault it claims to be, and may only
+        // resolve a claim that targets ITS vault.
+        if (getVaultId() !== payload.vault_id) {
+          this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'pairing_result vault_id mismatch');
+          return;
+        }
+        const claimVault = this.pairingClaimStore.getClaim(payload.claim_id)?.vault_id;
+        if (claimVault && claimVault !== payload.vault_id) {
+          this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'claim does not belong to this vault');
+          return;
+        }
+
         const status = payload.action === 'approve' ? 'approved' : 'denied';
         const updated = this.pairingClaimStore.updateClaimStatus(
           payload.claim_id,
@@ -1834,18 +1819,23 @@ export class RelayServer {
       }
 
       case 'cloud_connect_result': {
-        // Vault's reply to a cloud-connect redeem/status control message.
+        // Vault's reply to a cloud-connect redeem/status control message. Only the
+        // vault the request was sent to may resolve it (checked in resolveControl).
         const payload = (msg.payload || {}) as { control_id?: string };
         if (payload.control_id) {
-          this.resolveControl(payload.control_id, msg.payload as Record<string, unknown>);
+          this.resolveControl(payload.control_id, msg.payload as Record<string, unknown>, getVaultId());
         }
         break;
       }
 
       case 'cloud_connect_revoke': {
         // Vault instructing the relay to instantly revoke a cloud agent (Rule #7).
+        // A vault may only revoke agents that belong to IT.
         const payload = (msg.payload || {}) as { agent_id?: string };
-        if (payload.agent_id) this.revokeAgentAccess(payload.agent_id);
+        const me = getVaultId();
+        if (payload.agent_id && me && this.agentVault.get(payload.agent_id) === me) {
+          this.revokeAgentAccess(payload.agent_id);
+        }
         break;
       }
 

@@ -283,6 +283,38 @@ else
 fi
 
 # =============================================================================
+# Test 23: Relay WS control messages are bound to the socket's vault
+# =============================================================================
+echo "Test 23: Relay WS control messages bound to vault"
+if grep -qn "fromVaultId !== waiter.vaultId" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts" \
+  && grep -qn "this.agentVault.get(payload.agent_id) === me" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts"; then
+  pass "cloud_connect_result/revoke + pairing_result are bound to the socket's vault"
+else
+  fail "WS control message vault-binding not found"
+fi
+
+# =============================================================================
+# Test 24: Unauthenticated HTTP pairing-claims resolve route removed
+# =============================================================================
+echo "Test 24: Unauthenticated pairing resolve route removed"
+if ! grep -qn "handlePairingResolve" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts"; then
+  pass "Unauthenticated /v1/pairing-claims/:claimId/resolve route is gone"
+else
+  fail "Unauthenticated pairing resolve handler still present"
+fi
+
+# =============================================================================
+# Test 25: Passphrase re-auth does not corrupt the cached master key
+# =============================================================================
+echo "Test 25: Side-effect-free passphrase verification"
+if grep -qn "verifyPassphrase" "${ROOT_DIR}/packages/dcp-core/src/storage.ts" \
+  && ! grep -qn "zeroize(mk); // verify only — don't keep the key around" "${ROOT_DIR}/packages/dcp-vault/src/server/index.ts"; then
+  pass "Owner re-auth uses verifyPassphrase (no master-key corruption)"
+else
+  fail "Side-effect-free passphrase verification not in place"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 echo ""

@@ -130,4 +130,14 @@ describe('Relay security regressions (#5 poll/respond auth, #6 vault_id binding)
     });
     expect(res.status).toBe(401);
   });
+
+  it('#3: the unauthenticated HTTP pairing-claims resolve route is removed', async () => {
+    const res = await fetch(`${base()}/v1/pairing-claims/claim_anything/resolve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'approve', vault_id: VAULT }),
+    });
+    // Route no longer exists → Fastify 404 (definitely not a 200 success).
+    expect(res.status).toBe(404);
+  });
 });

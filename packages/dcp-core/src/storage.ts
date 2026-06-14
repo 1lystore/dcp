@@ -708,6 +708,38 @@ export class VaultStorage {
   }
 
   /**
+   * Verify a passphrase WITHOUT unlocking or caching the key, and WITHOUT changing
+   * the vault's lock state. Returns true iff the passphrase decrypts the master key.
+   * Used for re-authentication (e.g. owner re-registration) where we must not mutate
+   * the cached master key. (Unlike unlock(), this never sets this.masterKey, so the
+   * decrypted copy can be safely zeroized.)
+   */
+  async verifyPassphrase(passphrase: string): Promise<boolean> {
+    let keyData = await this.loadMasterKeyFromKeychain();
+    if (!keyData) keyData = this.loadMasterKeyFromFile();
+    if (!keyData) return false;
+
+    const attempt = (data: { encryptedKey: Buffer; nonce: Buffer; salt: Buffer }): boolean => {
+      const wrappingKey = deriveKeyFromPassphrase(passphrase, data.salt);
+      try {
+        const mk = decrypt(data.encryptedKey, data.nonce, wrappingKey);
+        zeroize(mk); // verify only — never cache, never return the live key
+        return true;
+      } catch {
+        return false;
+      } finally {
+        zeroize(wrappingKey);
+      }
+    };
+
+    if (attempt(keyData)) return true;
+    // Stale keychain entry fallback: try the file.
+    const fileData = this.loadMasterKeyFromFile();
+    if (fileData) return attempt(fileData);
+    return false;
+  }
+
+  /**
    * Lock vault (zeroize master key from memory)
    */
   lock(): void {

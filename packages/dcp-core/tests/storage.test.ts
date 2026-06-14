@@ -526,6 +526,27 @@ describe('Storage Layer', () => {
 
       zeroize(correctKey);
     });
+
+    it('verifyPassphrase validates without changing lock state or corrupting the key', async () => {
+      const passphrase = 'verify-pass-123';
+      await storage.initializeMasterKey(passphrase);
+
+      // Correct + wrong passphrase results.
+      expect(await storage.verifyPassphrase(passphrase)).toBe(true);
+      expect(await storage.verifyPassphrase('nope')).toBe(false);
+
+      // Critical regression: verifyPassphrase must NOT zeroize/replace the cached
+      // master key (the original bug). The vault stays usable after verification.
+      expect(storage.isUnlocked()).toBe(true);
+      const key = storage.getMasterKey();
+      expect(key.length).toBe(32);
+      expect(key.every((b) => b === 0)).toBe(false); // not all-zero (not corrupted)
+
+      // While locked, verifyPassphrase still works and does not unlock the vault.
+      storage.lock();
+      expect(await storage.verifyPassphrase(passphrase)).toBe(true);
+      expect(storage.isUnlocked()).toBe(false);
+    });
   });
 
   describe('Telegram Configuration', () => {

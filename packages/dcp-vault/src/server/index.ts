@@ -36,7 +36,6 @@ import {
   BudgetEngine,
   getStorage,
   getBudgetEngine,
-  zeroize,
   VaultError,
   Chain,
   ItemType,
@@ -1900,13 +1899,9 @@ async function buildServer(): Promise<FastifyInstance> {
         existingOwner.desktop_id === desktop_id && existingOwner.public_key === public_key;
       let allowed = sameDevice || isOwnerRequest(request);
       if (!allowed && passphrase) {
-        try {
-          const mk = await storage.unlock(passphrase);
-          zeroize(mk); // verify only — don't keep the key around
-          allowed = true;
-        } catch {
-          allowed = false;
-        }
+        // Verify the passphrase WITHOUT changing the vault's lock state or touching
+        // the cached master key (verifyPassphrase decrypts a throwaway copy).
+        allowed = await storage.verifyPassphrase(passphrase);
       }
       if (!allowed) {
         return reply.status(403).send({
@@ -5855,16 +5850,33 @@ async function registerVpsInviteWithRelay(
   inviteId: string,
   vaultId: string
 ): Promise<void> {
-  const response = await fetch(`${relayHttpUrl(relayUrl)}/v1/invites/register`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ invite_id: inviteId, vault_id: vaultId }),
-  });
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`Relay invite registration failed: ${response.status}${body ? ` ${body}` : ''}`);
+  // The relay only accepts invite registration from a vault with a LIVE, authenticated
+  // WS connection (security #6/#7). The vault's WS may still be (re)connecting right
+  // after unlock, so wait for it to be connected, then retry a few times to ride out
+  // the registration ack race. This keeps the relay strict while avoiding a flaky fail.
+  const deadline = Date.now() + 8000;
+  while (relayClient && !relayClient.isConnected() && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 250));
   }
+
+  let lastErr = '';
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const response = await fetch(`${relayHttpUrl(relayUrl)}/v1/invites/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invite_id: inviteId, vault_id: vaultId }),
+      });
+      if (response.ok) return;
+      lastErr = `${response.status} ${(await response.text().catch(() => '')) || ''}`.trim();
+      // 401 = relay hasn't registered our WS yet; wait and retry.
+      if (response.status !== 401) break;
+    } catch (err) {
+      lastErr = err instanceof Error ? err.message : 'network error';
+    }
+    await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+  }
+  throw new Error(`Relay invite registration failed: ${lastErr || 'unknown'}`);
 }
 
 async function ensureRelayIdentity(): Promise<RelayIdentity> {
