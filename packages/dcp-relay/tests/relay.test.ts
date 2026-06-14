@@ -637,7 +637,21 @@ describe('RelayServer', () => {
   });
 
   describe('Request endpoint', () => {
-    it('registers mobile push tokens without exposing approval details', async () => {
+    it('registers mobile push tokens (with a signed proof of vault ownership)', async () => {
+      // Push-token registration now requires the vault to prove ownership of vault_id
+      // (signed proof, same scheme as registration) so a stranger can't hijack a
+      // victim's approval pushes.
+      const signPriv = ed25519.utils.randomPrivateKey();
+      const signPub = ed25519.getPublicKey(signPriv);
+      const timestamp = new Date().toISOString();
+      const nonce = randomBytes(32);
+      const message = Buffer.concat([
+        Buffer.from('vault_push', 'utf8'),
+        Buffer.from(timestamp, 'utf8'),
+        nonce,
+      ]);
+      const signature = ed25519.sign(message, signPriv);
+
       const response = await fetch(`http://127.0.0.1:${testPort}/v1/devices/push-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -646,6 +660,10 @@ describe('RelayServer', () => {
           token: 'ExpoPushToken[abc123_DEF-456]',
           platform: 'android',
           device_id: 'device_test',
+          signing_public_key: Buffer.from(signPub).toString('base64'),
+          timestamp,
+          nonce: nonce.toString('base64'),
+          signature: Buffer.from(signature).toString('base64'),
         }),
       });
       const data = await response.json();
@@ -654,6 +672,19 @@ describe('RelayServer', () => {
       expect(data.success).toBe(true);
       expect(data.vault_id).toBe('vault_push');
       expect(server.getPushTokenStore().get('vault_push')?.token).toBe('ExpoPushToken[abc123_DEF-456]');
+    });
+
+    it('rejects push token registration without a signed proof', async () => {
+      const response = await fetch(`http://127.0.0.1:${testPort}/v1/devices/push-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vault_id: 'vault_push_unauth',
+          token: 'ExpoPushToken[xyz789]',
+          platform: 'android',
+        }),
+      });
+      expect(response.status).toBe(401);
     });
 
     it('rejects unsupported push token formats', async () => {

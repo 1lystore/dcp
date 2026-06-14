@@ -316,6 +316,27 @@ else
 fi
 
 # =============================================================================
+# Test 26: WS unregister can only unregister the socket's own vault
+# =============================================================================
+echo "Test 26: WS unregister vault binding"
+if grep -qn "unregister vault_id mismatch" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts"; then
+  pass "WS unregister rejects evicting another vault's connection"
+else
+  fail "WS unregister vault-binding not found"
+fi
+
+# =============================================================================
+# Test 27: push-token registration requires signed vault ownership
+# =============================================================================
+echo "Test 27: Push-token registration auth"
+if grep -qn "A signed proof of vault ownership is required" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts" \
+  && grep -B6 "A signed proof of vault ownership is required" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts" | grep -qn "verifyVaultProof(request.body"; then
+  pass "push-token register requires a signed proof (no cross-tenant push hijack)"
+else
+  fail "push-token registration auth not found"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 echo ""

@@ -268,4 +268,29 @@ describe('Relay security regressions (#5 poll/respond auth, #6 vault_id binding)
       otherWs.close();
     }
   });
+
+  it('a socket cannot unregister ANOTHER vault (cross-tenant eviction)', async () => {
+    const victimKey = ed25519.utils.randomPrivateKey();
+    const attackerKey = ed25519.utils.randomPrivateKey();
+    const victimWs = await openRegisteredWs(port, signRegister('vault_evict_victim', victimKey));
+    const attackerWs = await openRegisteredWs(port, signRegister('vault_evict_attacker', attackerKey));
+
+    try {
+      // Attacker (registered as its own vault) tries to evict the victim's connection.
+      attackerWs.send(JSON.stringify({
+        type: 'unregister',
+        payload: { vault_id: 'vault_evict_victim' },
+        timestamp: new Date().toISOString(),
+      }));
+      const err = await waitForWsMessage(attackerWs, (msg) => msg.type === 'error');
+      expect(err.payload?.code).toBe('RELAY_UNAUTHORIZED');
+
+      // The victim is still connected (its id still counts in stats).
+      const stats = await (await fetch(`${base()}/stats`)).json();
+      expect(stats.connectedVaults).toBeGreaterThanOrEqual(2);
+    } finally {
+      victimWs.close();
+      attackerWs.close();
+    }
+  });
 });

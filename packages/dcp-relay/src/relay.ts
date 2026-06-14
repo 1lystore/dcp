@@ -131,6 +131,10 @@ export class RelayServer {
   >();
   /** agent_id -> owning vault_id, so cloud_connect_revoke can only revoke own agents. */
   private agentVault = new Map<string, string>();
+  /** Per-vault timestamps of forwarded link-less pair requests (anti prompt-spam). */
+  private pairRequestTimes = new Map<string, number[]>();
+  private readonly PAIR_REQ_WINDOW_MS = 60_000;
+  private readonly PAIR_REQ_MAX_PER_WINDOW = 5;
 
   constructor(
     config: Partial<RelayConfig> & {
@@ -339,6 +343,18 @@ export class RelayServer {
 
   /** Link-less pairing (paste-URL flow): ask the vault to open an on-device approval. */
   private async wsBridgeRequestPairing(input: BridgePairingInput): Promise<BridgeRedeemResult> {
+    // Rate-limit per target vault so an attacker who knows a vault_id can't spam the
+    // owner's device with approval prompts. (The vault also gates on its pairing
+    // window + its own limit; this stops the forwarding flood at the relay.)
+    const now = Date.now();
+    const hits = (this.pairRequestTimes.get(input.vaultId) || []).filter(
+      (t) => now - t < this.PAIR_REQ_WINDOW_MS
+    );
+    if (hits.length >= this.PAIR_REQ_MAX_PER_WINDOW) {
+      return { ok: false, reason: 'rate_limited' };
+    }
+    hits.push(now);
+    this.pairRequestTimes.set(input.vaultId, hits);
     try {
       const res = await this.sendCloudConnectControl(input.vaultId, 'cloud_connect_pair', {
         redeemer_key: input.redeemerKey,
@@ -1146,6 +1162,10 @@ export class RelayServer {
         token: string;
         platform?: 'ios' | 'android' | 'web' | 'unknown';
         device_id?: string;
+        signing_public_key?: string;
+        timestamp?: string;
+        nonce?: string;
+        signature?: string;
       };
     }>(
       '/v1/devices/push-token',
@@ -1156,6 +1176,14 @@ export class RelayServer {
         }
         if (!this.isExpoPushToken(token)) {
           return reply.status(400).send({ error: 'Unsupported push token format' });
+        }
+        // Only the vault owner may (over)write its push token — otherwise an attacker
+        // who knows a vault_id could redirect the victim's approval pushes to their
+        // own device (approval phishing + notification DoS). Signed proof required.
+        if (!this.verifyVaultProof(request.body, 'bind')) {
+          return reply
+            .status(401)
+            .send({ error: 'A signed proof of vault ownership is required' });
         }
 
         const record = this.pushTokenStore.register({
@@ -1786,12 +1814,18 @@ export class RelayServer {
       }
 
       case 'unregister': {
+        // A socket may only unregister ITSELF — not evict another vault's live
+        // connection. Without this, anyone could open /ws and unregister any vault
+        // by id (cross-tenant takedown of an online vault).
         const payload = msg.payload as { vault_id: string };
-        if (payload.vault_id) {
-          this.connectionStore.unregister(payload.vault_id);
-          this.wsConnections.delete(payload.vault_id);
-          setVaultId('');
+        const me = getVaultId();
+        if (!payload.vault_id || !me || payload.vault_id !== me) {
+          this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'unregister vault_id mismatch');
+          return;
         }
+        this.connectionStore.unregister(payload.vault_id);
+        this.wsConnections.delete(payload.vault_id);
+        setVaultId('');
         break;
       }
 
