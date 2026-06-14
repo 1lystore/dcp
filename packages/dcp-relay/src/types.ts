@@ -62,6 +62,13 @@ export interface RelayResponseEnvelope {
   encrypted_payload: string;
   /** Response timestamp */
   timestamp: string;
+  // Signed proof of vault ownership (required for the HTTP-fallback /relay/respond).
+  // The responder proves it owns `vault_id` (Ed25519 over vault_id||timestamp||nonce)
+  // and the relay checks that the original request was destined for that vault.
+  vault_id?: string;
+  signing_public_key?: string;
+  nonce?: string;
+  signature?: string;
 }
 
 // ============================================================================
@@ -137,6 +144,12 @@ export interface LongPollRequest {
   vault_id: string;
   timeout_ms?: number;
   last_message_id?: string;
+  // Signed proof of vault ownership (required for the HTTP-fallback poll). Same
+  // scheme as registration: Ed25519 over vault_id||timestamp||nonce.
+  signing_public_key?: string;
+  timestamp?: string;
+  nonce?: string;
+  signature?: string;
 }
 
 export interface LongPollResponse {

@@ -46,7 +46,13 @@ import {
   RELAY_VERSION,
 } from './types.js';
 import { MessageStore, ConnectionStore, RateLimiter, PairingClaimStore, MobilePairingStore, PushTokenStore } from './store.js';
-import { authenticateRegistration, authenticateRequest, closeAuth, type AuthConfig } from './auth.js';
+import {
+  authenticateRegistration,
+  authenticateRequest,
+  verifyRegistrationSignature,
+  closeAuth,
+  type AuthConfig,
+} from './auth.js';
 import {
   initOAuthKeys,
   authorizationServerMetadata,
@@ -108,6 +114,14 @@ export class RelayServer {
   private mcpBridge: McpDataBridge;
   /** Instant-revoke denylist of agent ids (kills live access tokens; Rule #7). */
   private revokedAgents = new Set<string>();
+  /**
+   * Trust-on-first-use binding of vault_id -> signing public key. The first key to
+   * register a vault_id owns it; a DIFFERENT key claiming that id is rejected. This
+   * stops an attacker who knows a vault_id from hijacking its routing or draining the
+   * HTTP-fallback queue. In-memory per relay instance (a restart re-binds on reconnect).
+   */
+  private vaultKeyBindings = new Map<string, { key: string; lastSeen: number }>();
+  private readonly VAULT_BINDING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   /** Pending cloud-connect control requests awaiting a vault reply (control_id -> waiter). */
   private pendingControl = new Map<
     string,
@@ -367,6 +381,69 @@ export class RelayServer {
         body: { error: 'vault_unreachable', error_description: 'The vault did not respond' },
       };
     }
+  }
+
+  /**
+   * Bind a vault_id to its signing key on first sight; on later sights require the
+   * SAME key. Returns false if a different key already owns the id (hijack attempt).
+   */
+  private bindOrVerifyVaultKey(vaultId: string, signingKey: string): boolean {
+    const now = Date.now();
+    for (const [k, v] of this.vaultKeyBindings) {
+      if (now - v.lastSeen > this.VAULT_BINDING_TTL_MS) this.vaultKeyBindings.delete(k);
+    }
+    const existing = this.vaultKeyBindings.get(vaultId);
+    if (!existing) {
+      this.vaultKeyBindings.set(vaultId, { key: signingKey, lastSeen: now });
+      return true;
+    }
+    if (existing.key !== signingKey) return false;
+    existing.lastSeen = now;
+    return true;
+  }
+
+  /** True iff `signingKey` is the bound owner of `vaultId`. */
+  private vaultKeyOwner(vaultId: string, signingKey: string): boolean {
+    const e = this.vaultKeyBindings.get(vaultId);
+    return !!e && e.key === signingKey;
+  }
+
+  /**
+   * Verify a registration-style signed proof that the caller owns `vault_id`, for the
+   * unauthenticated HTTP-fallback endpoints (poll/respond). Checks the Ed25519
+   * signature over vault_id||timestamp||nonce (single-use nonce) AND that the signing
+   * key is the bound owner of the vault. Fails closed on anything missing/invalid.
+   */
+  private verifyVaultProof(
+    p: {
+      vault_id?: string;
+      signing_public_key?: string;
+      timestamp?: string;
+      nonce?: string;
+      signature?: string;
+    },
+    mode: 'strict' | 'bind' = 'strict'
+  ): boolean {
+    if (!p.vault_id || !p.signing_public_key || !p.timestamp || !p.nonce || !p.signature) {
+      return false;
+    }
+    try {
+      verifyRegistrationSignature({
+        vault_id: p.vault_id,
+        public_key: '',
+        signing_public_key: p.signing_public_key,
+        timestamp: p.timestamp,
+        nonce: p.nonce,
+        signature: p.signature,
+      } as RegisterPayload);
+    } catch {
+      return false;
+    }
+    // 'strict': the vault must already be bound (via WS registration). 'bind': allow
+    // trust-on-first-use binding (for HTTP-only vaults that register status before WS).
+    return mode === 'bind'
+      ? this.bindOrVerifyVaultKey(p.vault_id, p.signing_public_key)
+      : this.vaultKeyOwner(p.vault_id, p.signing_public_key);
   }
 
   /**
@@ -907,13 +984,21 @@ export class RelayServer {
       }
     );
 
-    // Register an invite_id → vault_id mapping (called by vault on invite creation)
+    // Register an invite_id → vault_id mapping (called by vault on invite creation).
+    // Only a vault with a LIVE, authenticated WS connection (vault_id bound to its
+    // key via #6) may register an invite for itself — otherwise anyone could remap
+    // a pairing invite. The legit vault is always WS-connected when it does this.
     this.server.post<{ Body: { invite_id: string; vault_id: string } }>(
       '/v1/invites/register',
       async (request, reply) => {
         const { invite_id, vault_id } = request.body;
         if (!invite_id || !vault_id) {
           return reply.status(400).send({ error: 'Missing invite_id or vault_id' });
+        }
+        if (!this.wsConnections.has(vault_id)) {
+          return reply
+            .status(401)
+            .send({ error: 'vault_id is not connected; invite registration requires an authenticated vault connection' });
         }
         this.inviteVaultMap.set(invite_id, vault_id);
         return reply.send({ success: true });
@@ -1002,12 +1087,29 @@ export class RelayServer {
 
     this.server.post<{
       Params: { vaultId: string };
-      Body: { public_key: string; signing_public_key?: string };
+      Body: {
+        public_key: string;
+        signing_public_key?: string;
+        timestamp?: string;
+        nonce?: string;
+        signature?: string;
+      };
     }>(
       '/v1/mobile/vaults/:vaultId/online',
       async (request, reply) => {
         if (!request.body?.public_key) {
           return reply.status(400).send({ error: 'Missing public_key' });
+        }
+        // Require a signed proof that the caller owns this vault_id (anti-spoof).
+        // TOFU bind: an HTTP-only (mobile) vault may register status before any WS.
+        const ok = this.verifyVaultProof(
+          { vault_id: request.params.vaultId, ...request.body },
+          'bind'
+        );
+        if (!ok) {
+          return reply
+            .status(401)
+            .send({ error: 'A signed proof of vault ownership is required' });
         }
         this.connectionStore.register(request.params.vaultId, request.body.public_key);
         return reply.send({ success: true, vault_id: request.params.vaultId });
@@ -1193,6 +1295,15 @@ export class RelayServer {
     req: LongPollRequest,
     reply: FastifyReply
   ): Promise<unknown> {
+    // The HTTP-fallback poll exposes a vault's queued (encrypted) messages and marks
+    // them delivered, so it MUST prove ownership of the vault — otherwise anyone who
+    // knows a vault_id could drain the queue. Same signed scheme as registration.
+    if (!this.verifyVaultProof(req)) {
+      return reply
+        .status(401)
+        .send(new RelayError('RELAY_UNAUTHORIZED', 'A signed proof of vault ownership is required').toJSON());
+    }
+
     const timeoutMs = Math.min(req.timeout_ms ?? 30000, 60000);
     const startTime = Date.now();
 
@@ -1228,6 +1339,21 @@ export class RelayServer {
     response: RelayResponseEnvelope,
     reply: FastifyReply
   ): Promise<unknown> {
+    // Only the vault the request was destined for may post its response — otherwise
+    // an attacker could race a bogus response for any known request_id. Require a
+    // signed proof of vault ownership AND that the request actually targets that vault.
+    if (!this.verifyVaultProof(response)) {
+      return reply
+        .status(401)
+        .send(new RelayError('RELAY_UNAUTHORIZED', 'A signed proof of vault ownership is required').toJSON());
+    }
+    const targetVault = this.messageStore.getVaultIdForRequest(response.request_id);
+    if (!targetVault || targetVault !== response.vault_id) {
+      return reply
+        .status(403)
+        .send(new RelayError('RELAY_UNAUTHORIZED', 'Not the owner of this request').toJSON());
+    }
+
     const stored = this.messageStore.storeResponse(response.request_id, response);
     if (!stored) {
       return reply.status(404).send(
@@ -1564,6 +1690,17 @@ export class RelayServer {
           } else {
             this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'Authentication failed');
           }
+          return;
+        }
+
+        // Bind vault_id to this signing key (TOFU). A different key claiming an
+        // already-bound vault_id is a hijack attempt and is rejected.
+        if (!this.bindOrVerifyVaultKey(payload.vault_id, payload.signing_public_key)) {
+          this.sendWsError(
+            ws,
+            'RELAY_UNAUTHORIZED',
+            'vault_id is already registered to a different key'
+          );
           return;
         }
 

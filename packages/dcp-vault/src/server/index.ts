@@ -36,6 +36,7 @@ import {
   BudgetEngine,
   getStorage,
   getBudgetEngine,
+  zeroize,
   VaultError,
   Chain,
   ItemType,
@@ -1078,27 +1079,29 @@ async function buildServer(): Promise<FastifyInstance> {
     logger: loggerConfig,
   });
 
-  // CORS for desktop UI access (restrict to trusted origins)
+  // CORS for the desktop UI — restrict to the KNOWN desktop origins only.
+  // We deliberately do NOT allow arbitrary localhost origins: any local web page
+  // (a dev server, a malicious site's localhost listener) would otherwise be able
+  // to make cross-origin requests to the vault. Non-browser clients (CLI, agent)
+  // send no Origin and are unaffected. Extra origins can be added via
+  // DCP_EXTRA_CORS_ORIGINS (comma-separated) for unusual setups.
   const allowedOrigins = new Set([
     'tauri://localhost',
     'https://tauri.localhost',
+    'http://tauri.localhost', // Tauri on Windows/Linux
     'http://localhost:1420',
     'http://127.0.0.1:1420',
+    ...(process.env.DCP_EXTRA_CORS_ORIGINS || '')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean),
   ]);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   await server.register(cors as any, {
     origin: (origin: string | undefined, cb: (err: Error | null, allow: boolean) => void) => {
-      if (!origin) return cb(null, true); // non-browser clients
+      if (!origin) return cb(null, true); // non-browser clients (CLI, dcp-agent)
       if (allowedOrigins.has(origin)) return cb(null, true);
-      try {
-        const url = new URL(origin);
-        if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
-          return cb(null, true);
-        }
-      } catch {
-        // fall through
-      }
       return cb(new Error('Not allowed by CORS'), false);
     },
     methods: ['GET', 'POST', 'DELETE', 'PATCH'],
@@ -1868,9 +1871,10 @@ async function buildServer(): Promise<FastifyInstance> {
     Body: {
       desktop_id: string;
       public_key: string; // base64 encoded Ed25519 public key
+      passphrase?: string; // required to REPLACE an existing owner without an owner token
     };
-  }>('/v1/desktop/register', async (request) => {
-    const { desktop_id, public_key } = request.body;
+  }>('/v1/desktop/register', async (request, reply) => {
+    const { desktop_id, public_key, passphrase } = request.body;
 
     if (!desktop_id || !public_key) {
       throw new VaultError('INTERNAL_ERROR', 'desktop_id and public_key are required');
@@ -1884,6 +1888,35 @@ async function buildServer(): Promise<FastifyInstance> {
       }
     } catch {
       throw new VaultError('INTERNAL_ERROR', 'Invalid public key format');
+    }
+
+    // Owner-replacement guard: registration is open ONLY when no owner exists yet
+    // (first run). Once an owner is set, REPLACING it requires proof of ownership —
+    // a valid owner token, or the vault passphrase. An idempotent re-register of the
+    // SAME device + key (normal relaunch) is always allowed.
+    const existingOwner = budget.getConfig().desktop_owner;
+    if (existingOwner) {
+      const sameDevice =
+        existingOwner.desktop_id === desktop_id && existingOwner.public_key === public_key;
+      let allowed = sameDevice || isOwnerRequest(request);
+      if (!allowed && passphrase) {
+        try {
+          const mk = await storage.unlock(passphrase);
+          zeroize(mk); // verify only — don't keep the key around
+          allowed = true;
+        } catch {
+          allowed = false;
+        }
+      }
+      if (!allowed) {
+        return reply.status(403).send({
+          error: {
+            code: 'OWNER_AUTH_REQUIRED',
+            message:
+              'An owner is already registered. Replacing it requires the current owner token or the vault passphrase.',
+          },
+        });
+      }
     }
 
     // Store in config
@@ -4546,6 +4579,13 @@ async function buildServer(): Promise<FastifyInstance> {
       throw new VaultError('VAULT_LOCKED', 'Vault is locked. Please unlock first.');
     }
 
+    // Enforce agent identity + scope for named agents (mandatory signed request).
+    // No service_id (desktop / cloud-connect-via-consent) falls through to consent.
+    const agentAuth = verifyLocalAgentRequest(body as Record<string, unknown>, `sign:${chain}`);
+    if (!agentAuth.authorized && agentAuth.skipConsentFlow) {
+      throw new VaultError('SERVICE_SCOPE_VIOLATION', agentAuth.reason || 'Scope not permitted for this agent');
+    }
+
     const walletScope = `crypto.wallet.${chain}`;
 
     if (!effectiveSessionId) {
@@ -4700,6 +4740,14 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     const chain: Chain = 'solana';
+
+    // Enforce agent identity + scope for named agents (mandatory signed request).
+    // No service_id (desktop / cloud-connect-via-consent) falls through to consent.
+    const agentAuth = verifyLocalAgentRequest(request.body as Record<string, unknown>, `sign:${network}`);
+    if (!agentAuth.authorized && agentAuth.skipConsentFlow) {
+      throw new VaultError('SERVICE_SCOPE_VIOLATION', agentAuth.reason || 'Scope not permitted for this agent');
+    }
+
     const walletScope = `crypto.wallet.${chain}`;
 
     if (!effectiveSessionId) {
@@ -5566,6 +5614,23 @@ function verifyRelayServiceIdentity(
  * @param requestedScope - The scope being requested (e.g., "read:identity.email")
  * @returns Authorization result with agent info or denial reason
  */
+/**
+ * Replay guard for signed local-agent requests. Each (service_id + nonce) is
+ * single-use within the freshness window; entries older than the window are
+ * evicted lazily. Prevents replay of a captured valid signed request.
+ */
+const LOCAL_AGENT_NONCE_TTL_MS = 5 * 60 * 1000;
+const localAgentNonces = new Map<string, number>();
+function markLocalAgentNonce(key: string): boolean {
+  const now = Date.now();
+  for (const [k, t] of localAgentNonces) {
+    if (now - t > LOCAL_AGENT_NONCE_TTL_MS) localAgentNonces.delete(k);
+  }
+  if (localAgentNonces.has(key)) return false; // replay
+  localAgentNonces.set(key, now);
+  return true;
+}
+
 function verifyLocalAgentRequest(
   body: Record<string, unknown>,
   requestedScope: string
@@ -5617,39 +5682,56 @@ function verifyLocalAgentRequest(
     return { authorized: false, reason: `Agent '${serviceId}' has no registered public key`, skipConsentFlow: true };
   }
 
-  // Verify signature if provided
-  if (serviceSignature) {
-    // Build the payload that was signed (everything except the signature)
-    const { service_signature: _, ...payloadWithoutSig } = body;
+  // A signed request is MANDATORY for agent_/vps_ identities. The legitimate client
+  // (dcp-client) always signs (service_id + service_signature + timestamp + nonce);
+  // a named-agent request WITHOUT a valid signature is an impersonation attempt and is
+  // rejected outright — there is no unsigned fallback for an agent identity.
+  const nonce = body.nonce as string | undefined;
+  if (!serviceSignature || !timestamp || !nonce) {
+    storage.logAudit('DENY', 'denied', {
+      operation: 'local_agent_request',
+      details: JSON.stringify({ service_id: serviceId, reason: 'missing_signature' }),
+    });
+    return {
+      authorized: false,
+      reason: 'A signed request (service_signature, timestamp, nonce) is required for agent identities',
+      skipConsentFlow: true,
+    };
+  }
 
-    const signatureValid = verifyServiceSignature(
-      payloadWithoutSig,
-      serviceId,
-      serviceSignature,
-      agent.service_public_key
-    );
+  // Verify the Ed25519 signature over the canonical body (everything except the signature).
+  const { service_signature: _, ...payloadWithoutSig } = body;
+  const signatureValid = verifyServiceSignature(
+    payloadWithoutSig,
+    serviceId,
+    serviceSignature,
+    agent.service_public_key
+  );
+  if (!signatureValid) {
+    storage.logAudit('DENY', 'denied', {
+      operation: 'local_agent_request',
+      details: JSON.stringify({ service_id: serviceId, reason: 'invalid_signature' }),
+    });
+    return { authorized: false, reason: 'Invalid agent signature', skipConsentFlow: true };
+  }
 
-    if (!signatureValid) {
-      storage.logAudit('DENY', 'denied', {
-        operation: 'local_agent_request',
-        details: JSON.stringify({ service_id: serviceId, reason: 'invalid_signature' }),
-      });
-      return { authorized: false, reason: 'Invalid agent signature', skipConsentFlow: true };
-    }
+  // Timestamp freshness (5-minute window) — mandatory.
+  const requestTime = new Date(timestamp).getTime();
+  if (isNaN(requestTime) || Math.abs(Date.now() - requestTime) > 5 * 60 * 1000) {
+    storage.logAudit('DENY', 'denied', {
+      operation: 'local_agent_request',
+      details: JSON.stringify({ service_id: serviceId, reason: 'timestamp_expired' }),
+    });
+    return { authorized: false, reason: 'Request timestamp expired or invalid', skipConsentFlow: true };
+  }
 
-    // Check timestamp for replay protection (5 minute window)
-    if (timestamp) {
-      const requestTime = new Date(timestamp).getTime();
-      const now = Date.now();
-      const fiveMinutes = 5 * 60 * 1000;
-      if (Math.abs(now - requestTime) > fiveMinutes) {
-        storage.logAudit('DENY', 'denied', {
-          operation: 'local_agent_request',
-          details: JSON.stringify({ service_id: serviceId, reason: 'timestamp_expired' }),
-        });
-        return { authorized: false, reason: 'Request timestamp expired', skipConsentFlow: true };
-      }
-    }
+  // Replay protection: each (service_id, nonce) is single-use within the window.
+  if (!markLocalAgentNonce(`${serviceId}:${nonce}`)) {
+    storage.logAudit('DENY', 'denied', {
+      operation: 'local_agent_request',
+      details: JSON.stringify({ service_id: serviceId, reason: 'nonce_replay' }),
+    });
+    return { authorized: false, reason: 'Duplicate request (nonce already used)', skipConsentFlow: true };
   }
 
   // Check scope permissions. Empty permissions are request-only: authenticated,

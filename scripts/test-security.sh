@@ -233,6 +233,56 @@ else
 fi
 
 # =============================================================================
+# Test 18: Local agent requests require a mandatory signature (no unsigned bypass)
+# =============================================================================
+echo "Test 18: Local agent identity requires a signature"
+if grep -qn "A signed request (service_signature, timestamp, nonce) is required" "${ROOT_DIR}/packages/dcp-vault/src/server/index.ts"; then
+  pass "agent_/vps_ requests reject missing signatures (no unsigned fallback)"
+else
+  fail "Mandatory local-agent signature check not found"
+fi
+
+# =============================================================================
+# Test 19: Local signed requests have nonce replay protection
+# =============================================================================
+echo "Test 19: Local agent nonce replay protection"
+if grep -qn "markLocalAgentNonce" "${ROOT_DIR}/packages/dcp-vault/src/server/index.ts"; then
+  pass "Local signed requests are single-use (nonce replay guard)"
+else
+  fail "Local-agent nonce replay guard not found"
+fi
+
+# =============================================================================
+# Test 20: Owner registration cannot be silently overwritten
+# =============================================================================
+echo "Test 20: Owner registration guard"
+if grep -qn "Replacing it requires the current owner token or the vault passphrase" "${ROOT_DIR}/packages/dcp-vault/src/server/index.ts"; then
+  pass "desktop/register guards against unauthenticated owner replacement"
+else
+  fail "Owner-registration guard not found"
+fi
+
+# =============================================================================
+# Test 21: Relay binds vault_id to its signing key (anti-hijack)
+# =============================================================================
+echo "Test 21: Relay vault_id <-> key binding"
+if grep -qn "bindOrVerifyVaultKey" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts"; then
+  pass "Relay rejects a different key claiming an existing vault_id"
+else
+  fail "Relay vault_id binding not found"
+fi
+
+# =============================================================================
+# Test 22: Relay HTTP poll/respond require a signed proof of vault ownership
+# =============================================================================
+echo "Test 22: Relay poll/respond authentication"
+if grep -qn "A signed proof of vault ownership is required" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts"; then
+  pass "HTTP-fallback poll/respond require signed vault ownership"
+else
+  fail "Relay poll/respond auth not found"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 echo ""
