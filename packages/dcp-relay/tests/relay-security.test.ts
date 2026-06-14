@@ -12,6 +12,7 @@ import WebSocket from 'ws';
 import { ed25519 } from '@noble/curves/ed25519';
 import { randomBytes } from 'crypto';
 import { RelayServer } from '../src/relay.js';
+import { RELAY_VERSION, type RelayEnvelope } from '../src/types.js';
 
 const VAULT = 'vault_sec_regress_1';
 
@@ -53,6 +54,52 @@ function registerWs(port: number, payload: Record<string, unknown>): Promise<{ o
     });
     ws.on('error', () => done({ ok: false, error: 'ws_error' }));
     setTimeout(() => done({ ok: false, error: 'timeout' }), 3000);
+  });
+}
+
+function openRegisteredWs(
+  port: number,
+  payload: Record<string, unknown>
+): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    let settled = false;
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      try { ws.close(); } catch { /* noop */ }
+      reject(err);
+    };
+    ws.on('open', () => ws.send(JSON.stringify({ type: 'register', payload, timestamp: new Date().toISOString() })));
+    ws.on('message', (data: Buffer) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === 'ack' && msg.payload?.registered) {
+        settled = true;
+        resolve(ws);
+      }
+      if (msg.type === 'error') {
+        fail(new Error(msg.payload?.code || 'error'));
+      }
+    });
+    ws.on('error', fail);
+    setTimeout(() => fail(new Error('timeout')), 3000);
+  });
+}
+
+function waitForWsMessage(ws: WebSocket, predicate: (msg: any) => boolean): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.off('message', onMessage);
+      reject(new Error('timeout'));
+    }, 3000);
+    const onMessage = (data: Buffer) => {
+      const msg = JSON.parse(data.toString());
+      if (!predicate(msg)) return;
+      clearTimeout(timer);
+      ws.off('message', onMessage);
+      resolve(msg);
+    };
+    ws.on('message', onMessage);
   });
 }
 
@@ -139,5 +186,86 @@ describe('Relay security regressions (#5 poll/respond auth, #6 vault_id binding)
     });
     // Route no longer exists → Fastify 404 (definitely not a 200 success).
     expect(res.status).toBe(404);
+  });
+
+  it('#5: WS response from the wrong vault cannot race another vault request', async () => {
+    const ownerKey = ed25519.utils.randomPrivateKey();
+    const attackerKey = ed25519.utils.randomPrivateKey();
+    const ownerVault = 'vault_ws_response_owner';
+    const attackerVault = 'vault_ws_response_attacker';
+    const ownerWs = await openRegisteredWs(port, signRegister(ownerVault, ownerKey));
+    const attackerWs = await openRegisteredWs(port, signRegister(attackerVault, attackerKey));
+
+    try {
+      const envelope: RelayEnvelope = {
+        version: RELAY_VERSION,
+        vault_id: ownerVault,
+        request_id: `req_ws_owner_${Date.now()}`,
+        action_type: 'sign',
+        encrypted_payload: 'encrypted_request',
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      };
+      server.getMessageStore().storeMessage(envelope);
+
+      attackerWs.send(JSON.stringify({
+        type: 'response',
+        payload: {
+          version: RELAY_VERSION,
+          request_id: envelope.request_id,
+          encrypted_payload: 'attacker_response',
+          timestamp: new Date().toISOString(),
+        },
+        timestamp: new Date().toISOString(),
+      }));
+
+      const err = await waitForWsMessage(attackerWs, (msg) => msg.type === 'error');
+      expect(err.payload?.code).toBe('RELAY_UNAUTHORIZED');
+      expect(server.getMessageStore().getResponse(envelope.request_id)).toBeUndefined();
+
+      ownerWs.send(JSON.stringify({
+        type: 'response',
+        payload: {
+          version: RELAY_VERSION,
+          request_id: envelope.request_id,
+          encrypted_payload: 'owner_response',
+          timestamp: new Date().toISOString(),
+        },
+        timestamp: new Date().toISOString(),
+      }));
+
+      const ack = await waitForWsMessage(ownerWs, (msg) => msg.type === 'ack' && msg.payload?.stored);
+      expect(ack.payload?.request_id).toBe(envelope.request_id);
+      expect(server.getMessageStore().getResponse(envelope.request_id)?.encrypted_payload).toBe('owner_response');
+    } finally {
+      ownerWs.close();
+      attackerWs.close();
+    }
+  });
+
+  it('#7: WS revoke is vault-scoped even when the fresh agent ownership cache is absent', async () => {
+    const vaultKey = ed25519.utils.randomPrivateKey();
+    const otherKey = ed25519.utils.randomPrivateKey();
+    const vaultWs = await openRegisteredWs(port, signRegister('vault_revoke_owner', vaultKey));
+    const otherWs = await openRegisteredWs(port, signRegister('vault_revoke_other', otherKey));
+
+    try {
+      vaultWs.send(JSON.stringify({
+        type: 'cloud_connect_revoke',
+        payload: { vault_id: 'vault_revoke_owner', agent_id: 'agent_after_restart' },
+        timestamp: new Date().toISOString(),
+      }));
+      await new Promise((r) => setTimeout(r, 100));
+
+      otherWs.send(JSON.stringify({
+        type: 'cloud_connect_revoke',
+        payload: { vault_id: 'vault_revoke_owner', agent_id: 'agent_after_restart' },
+        timestamp: new Date().toISOString(),
+      }));
+      const err = await waitForWsMessage(otherWs, (msg) => msg.type === 'error');
+      expect(err.payload?.code).toBe('RELAY_UNAUTHORIZED');
+    } finally {
+      vaultWs.close();
+      otherWs.close();
+    }
   });
 });

@@ -287,8 +287,9 @@ fi
 # =============================================================================
 echo "Test 23: Relay WS control messages bound to vault"
 if grep -qn "fromVaultId !== waiter.vaultId" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts" \
-  && grep -qn "this.agentVault.get(payload.agent_id) === me" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts"; then
-  pass "cloud_connect_result/revoke + pairing_result are bound to the socket's vault"
+  && grep -qn "knownOwner && knownOwner !== me" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts" \
+  && grep -qn "revokeAgentAccess(payload.agent_id, me)" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts"; then
+  pass "cloud_connect_result/revoke + pairing_result are bound/scoped to the socket's vault"
 else
   fail "WS control message vault-binding not found"
 fi

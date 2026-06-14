@@ -195,6 +195,10 @@ describe('Cloud-Connect MCP data plane (E2E over WS)', () => {
 
     expect((await call()).status).toBe(200);
 
+    // Simulate a relay restart losing the fresh agent->vault cache. The vault's
+    // authenticated socket must still be able to revoke its own agent, scoped by vault.
+    (server as any).agentVault.clear();
+
     // The vault pushes a revoke; the relay must denylist the agent.
     vaultWs.send(
       JSON.stringify({

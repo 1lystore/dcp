@@ -463,14 +463,31 @@ export class RelayServer {
       : this.vaultKeyOwner(p.vault_id, p.signing_public_key);
   }
 
+  private revokedAgentKey(vaultId: string, agentId: string): string {
+    return `${vaultId}\0${agentId}`;
+  }
+
+  private isAgentRevoked(vaultId: string, agentId: string): boolean {
+    return (
+      this.revokedAgents.has(this.revokedAgentKey(vaultId, agentId)) ||
+      // Back-compat for direct test/internal callers that intentionally revoke globally.
+      this.revokedAgents.has(agentId)
+    );
+  }
+
   /**
    * Instantly revoke a cloud agent's access (Rule #7): denylist its access tokens
    * AND kill its refresh-token chains. Called when the vault owner revokes.
    */
-  revokeAgentAccess(agentId: string): void {
+  revokeAgentAccess(agentId: string, vaultId?: string): void {
     if (!agentId) return;
-    this.revokedAgents.add(agentId);
-    this.oauthRefresh.revokeByAgent(agentId);
+    if (vaultId) {
+      this.revokedAgents.add(this.revokedAgentKey(vaultId, agentId));
+      this.oauthRefresh.revokeByAgent(agentId, vaultId);
+    } else {
+      this.revokedAgents.add(agentId);
+      this.oauthRefresh.revokeByAgent(agentId);
+    }
   }
 
   /** Assemble the per-request OAuth grant dependencies. */
@@ -824,7 +841,7 @@ export class RelayServer {
         }
 
         // 4. Instant-revoke denylist (Rule #7).
-        if (this.revokedAgents.has(claims.sub)) {
+        if (this.isAgentRevoked(vaultId, claims.sub)) {
           return unauthorized('invalid_token', 'Access has been revoked');
         }
 
@@ -1745,7 +1762,17 @@ export class RelayServer {
           return;
         }
 
-        this.messageStore.storeResponse(response.request_id, response);
+        const targetVault = this.messageStore.getVaultIdForRequest(response.request_id);
+        if (!targetVault || targetVault !== getVaultId()) {
+          this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'Not the owner of this request');
+          return;
+        }
+
+        const stored = this.messageStore.storeResponse(response.request_id, response);
+        if (!stored) {
+          this.sendWsError(ws, 'RELAY_TIMEOUT', 'Original request not found or expired');
+          return;
+        }
         this.notifyClientResponse(response);
 
         // Send ack
@@ -1831,11 +1858,19 @@ export class RelayServer {
       case 'cloud_connect_revoke': {
         // Vault instructing the relay to instantly revoke a cloud agent (Rule #7).
         // A vault may only revoke agents that belong to IT.
-        const payload = (msg.payload || {}) as { agent_id?: string };
+        const payload = (msg.payload || {}) as { agent_id?: string; vault_id?: string };
         const me = getVaultId();
-        if (payload.agent_id && me && this.agentVault.get(payload.agent_id) === me) {
-          this.revokeAgentAccess(payload.agent_id);
+        if (!payload.agent_id || !me) return;
+        if (payload.vault_id && payload.vault_id !== me) {
+          this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'cloud_connect_revoke vault_id mismatch');
+          return;
         }
+        const knownOwner = this.agentVault.get(payload.agent_id);
+        if (knownOwner && knownOwner !== me) {
+          this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'agent does not belong to this vault');
+          return;
+        }
+        this.revokeAgentAccess(payload.agent_id, me);
         break;
       }
 

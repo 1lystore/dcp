@@ -262,10 +262,12 @@ export class RefreshTokenStore {
   }
 
   /** Revoke all chains bound to an agent (instant-revoke path, Rule #7). */
-  revokeByAgent(agentId: string): number {
+  revokeByAgent(agentId: string, vaultId?: string): number {
     const chains = new Set<string>();
     for (const rec of this.byHash.values()) {
-      if (rec.agent_id === agentId) chains.add(rec.chain_id);
+      if (rec.agent_id === agentId && (!vaultId || rec.vault_id === vaultId)) {
+        chains.add(rec.chain_id);
+      }
     }
     for (const c of chains) this.revokeChain(c);
     return chains.size;
