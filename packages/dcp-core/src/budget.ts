@@ -259,9 +259,15 @@ export class BudgetEngine {
     if (amount < 0) {
       throw new VaultError('INTERNAL_ERROR', 'Budget limit cannot be negative');
     }
-    // Guard against prototype-polluting currency keys (defensive — currency is a
-    // free-form string).
-    if (currency === '__proto__' || currency === 'constructor' || currency === 'prototype') {
+    // Guard both index keys against prototype pollution. `type` is a typed union
+    // but unchecked at runtime; `currency` is a free-form string. Reject the
+    // dangerous keys on BOTH so neither `config[type]` nor `[currency]` can reach
+    // Object.prototype.
+    const DANGEROUS = ['__proto__', 'constructor', 'prototype'];
+    if (type !== 'daily_budget' && type !== 'tx_limit' && type !== 'approval_threshold') {
+      throw new VaultError('INTERNAL_ERROR', 'Invalid budget type');
+    }
+    if (DANGEROUS.includes(currency)) {
       throw new VaultError('INTERNAL_ERROR', 'Invalid currency');
     }
 

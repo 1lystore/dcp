@@ -160,6 +160,9 @@ importers:
       '@fastify/cors':
         specifier: ^10.0.2
         version: 10.1.0
+      '@fastify/rate-limit':
+        specifier: ^10.0.0
+        version: 10.3.0
       '@fastify/websocket':
         specifier: ^11.0.1
         version: 11.2.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
