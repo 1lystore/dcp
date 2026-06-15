@@ -29,6 +29,7 @@ import { trustCommand } from './commands/trust.js';
 import { connectCommand } from './commands/connect.js';
 import { proxyCommand } from './commands/proxy.js';
 import { pairingCommand } from './commands/pairing.js';
+import { cloudConnectCommand } from './commands/cloud-connect.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -73,6 +74,7 @@ program.addCommand(trustCommand);
 program.addCommand(connectCommand);
 program.addCommand(proxyCommand);
 program.addCommand(pairingCommand);
+program.addCommand(cloudConnectCommand);
 
 // Parse arguments
 program.parse();

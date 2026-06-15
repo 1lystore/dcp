@@ -86,6 +86,7 @@ interface RelayCliOptions {
   debug: boolean;
   rateLimitPerMinute: number;
   expoPushUrl: string;
+  publicUrl: string;
 }
 
 function parseArgs(): RelayCliOptions {
@@ -97,6 +98,9 @@ function parseArgs(): RelayCliOptions {
   let debug = process.env.DCP_RELAY_DEBUG === 'true' || false;
   let rateLimitPerMinute = parseInt(process.env.DCP_RELAY_RATE_LIMIT || '', 10) || DEFAULT_RELAY_CONFIG.rateLimitPerMinute;
   let expoPushUrl = process.env.DCP_EXPO_PUSH_URL ?? DEFAULT_RELAY_CONFIG.expoPushUrl;
+  // Public base URL (OAuth issuer / MCP resource origin) — set behind a tunnel/proxy
+  // so discovery metadata + token audience use the public https host, not localhost.
+  const publicUrl = process.env.DCP_RELAY_PUBLIC_URL ?? DEFAULT_RELAY_CONFIG.publicUrl;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -141,11 +145,11 @@ Examples:
     }
   }
 
-  return { port, host, debug, rateLimitPerMinute, expoPushUrl };
+  return { port, host, debug, rateLimitPerMinute, expoPushUrl, publicUrl };
 }
 
 async function main(): Promise<void> {
-  const { port, host, debug, rateLimitPerMinute, expoPushUrl } = parseArgs();
+  const { port, host, debug, rateLimitPerMinute, expoPushUrl, publicUrl } = parseArgs();
 
   const relay = new RelayServer({
     port,
@@ -154,6 +158,7 @@ async function main(): Promise<void> {
     enableLongPoll: true,
     rateLimitPerMinute,
     expoPushUrl,
+    publicUrl,
   });
 
   // Handle shutdown
@@ -176,18 +181,21 @@ async function main(): Promise<void> {
   }
 }
 
-// Run only when executed directly, never when imported as a library.
-const argvEntry = process.argv[1] ? path.basename(process.argv[1]) : '';
+// Run only when this file is the process entry point — NEVER when imported or
+// bundled into another package (e.g. the desktop's vault bundle). We deliberately
+// do NOT use `require.main === module`: esbuild evaluates that to `true` inside a
+// bundle, which would make the relay server autostart and fight for port 8422.
+// Instead, key off the actual entry path: a relay binary name, or a path that runs
+// the relay's own dist/src directly.
+const argv1 = process.argv[1] || '';
+const argvEntry = argv1 ? path.basename(argv1) : '';
 const isDirectCliInvocation =
   argvEntry === 'dcp-relay' ||
   argvEntry === 'dcp-relay.js' ||
-  argvEntry === 'dcp-relay.mjs';
-const isMainModule =
-  (typeof require !== 'undefined' &&
-    typeof module !== 'undefined' &&
-    require.main === module) ||
-  isDirectCliInvocation;
+  argvEntry === 'dcp-relay.mjs' ||
+  /[\\/]dcp-relay[\\/](dist|src)[\\/]index\.(js|mjs|ts)$/.test(argv1) ||
+  /[\\/]@dcprotocol[\\/]relay[\\/]/.test(argv1);
 
-if (isMainModule) {
+if (isDirectCliInvocation) {
   main().catch(console.error);
 }

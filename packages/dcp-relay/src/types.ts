@@ -62,6 +62,13 @@ export interface RelayResponseEnvelope {
   encrypted_payload: string;
   /** Response timestamp */
   timestamp: string;
+  // Signed proof of vault ownership (required for the HTTP-fallback /relay/respond).
+  // The responder proves it owns `vault_id` (Ed25519 over vault_id||timestamp||nonce)
+  // and the relay checks that the original request was destined for that vault.
+  vault_id?: string;
+  signing_public_key?: string;
+  nonce?: string;
+  signature?: string;
 }
 
 // ============================================================================
@@ -77,7 +84,13 @@ export type WsMessageType =
   | 'ack'             // Acknowledgement
   | 'error'           // Error response
   | 'pairing_claim'   // New pairing claim from agent (relay → vault)
-  | 'pairing_result'; // Pairing approval result from vault (vault → relay)
+  | 'pairing_result'  // Pairing approval result from vault (vault → relay)
+  | 'cloud_connect_redeem' // Cloud-Connect: relay asks vault to redeem a connect-link (relay → vault)
+  | 'cloud_connect_pair'   // Cloud-Connect: relay asks vault to open a link-less (paste-URL) pairing (relay → vault)
+  | 'cloud_connect_status' // Cloud-Connect: relay asks vault for an agent's approval status (relay → vault)
+  | 'cloud_connect_mcp'    // Cloud-Connect: relay forwards an authorized MCP request to the vault (relay → vault)
+  | 'cloud_connect_revoke' // Cloud-Connect: vault tells relay to instantly revoke an agent (vault → relay)
+  | 'cloud_connect_result'; // Cloud-Connect: vault's reply to a redeem/status/mcp control message (vault → relay)
 
 export interface WsMessage {
   type: WsMessageType;
@@ -131,6 +144,12 @@ export interface LongPollRequest {
   vault_id: string;
   timeout_ms?: number;
   last_message_id?: string;
+  // Signed proof of vault ownership (required for the HTTP-fallback poll). Same
+  // scheme as registration: Ed25519 over vault_id||timestamp||nonce.
+  signing_public_key?: string;
+  timestamp?: string;
+  nonce?: string;
+  signature?: string;
 }
 
 export interface LongPollResponse {
@@ -229,6 +248,13 @@ export interface RelayConfig {
   rateLimitWindowMs: number;
   /** Expo push API endpoint. Empty disables outbound push delivery. */
   expoPushUrl: string;
+  /**
+   * Public base URL of this relay (the OAuth issuer / MCP resource origin),
+   * e.g. https://relay.dcp.1ly.store. Used to build OAuth discovery metadata and
+   * audience-bound token identifiers. Empty = derive from the request's Host
+   * header (fine for local/dev; set explicitly in production).
+   */
+  publicUrl: string;
 }
 
 export const DEFAULT_RELAY_CONFIG: RelayConfig = {
@@ -242,6 +268,7 @@ export const DEFAULT_RELAY_CONFIG: RelayConfig = {
   rateLimitPerMinute: 60,
   rateLimitWindowMs: 60_000,
   expoPushUrl: 'https://exp.host/--/api/v2/push/send',
+  publicUrl: '',
 };
 
 // ============================================================================

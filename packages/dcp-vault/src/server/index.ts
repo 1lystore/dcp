@@ -60,6 +60,12 @@ import {
   parseVpsPairingInvite,
   verifyPairingGrantWithKey,
   decodePairingGrant,
+  createConnectLink,
+  verifyConnectLinkWithKey,
+  decodeConnectLink,
+  isConnectLink,
+  generateMatchCode,
+  hpkeFingerprint,
   canonicalJson,
   DEFAULT_RELAY_URL as CORE_DEFAULT_RELAY_URL,
 } from '@dcprotocol/core';
@@ -1072,27 +1078,29 @@ async function buildServer(): Promise<FastifyInstance> {
     logger: loggerConfig,
   });
 
-  // CORS for desktop UI access (restrict to trusted origins)
+  // CORS for the desktop UI — restrict to the KNOWN desktop origins only.
+  // We deliberately do NOT allow arbitrary localhost origins: any local web page
+  // (a dev server, a malicious site's localhost listener) would otherwise be able
+  // to make cross-origin requests to the vault. Non-browser clients (CLI, agent)
+  // send no Origin and are unaffected. Extra origins can be added via
+  // DCP_EXTRA_CORS_ORIGINS (comma-separated) for unusual setups.
   const allowedOrigins = new Set([
     'tauri://localhost',
     'https://tauri.localhost',
+    'http://tauri.localhost', // Tauri on Windows/Linux
     'http://localhost:1420',
     'http://127.0.0.1:1420',
+    ...(process.env.DCP_EXTRA_CORS_ORIGINS || '')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean),
   ]);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   await server.register(cors as any, {
     origin: (origin: string | undefined, cb: (err: Error | null, allow: boolean) => void) => {
-      if (!origin) return cb(null, true); // non-browser clients
+      if (!origin) return cb(null, true); // non-browser clients (CLI, dcp-agent)
       if (allowedOrigins.has(origin)) return cb(null, true);
-      try {
-        const url = new URL(origin);
-        if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
-          return cb(null, true);
-        }
-      } catch {
-        // fall through
-      }
       return cb(new Error('Not allowed by CORS'), false);
     },
     methods: ['GET', 'POST', 'DELETE', 'PATCH'],
@@ -1862,9 +1870,10 @@ async function buildServer(): Promise<FastifyInstance> {
     Body: {
       desktop_id: string;
       public_key: string; // base64 encoded Ed25519 public key
+      passphrase?: string; // required to REPLACE an existing owner without an owner token
     };
-  }>('/v1/desktop/register', async (request) => {
-    const { desktop_id, public_key } = request.body;
+  }>('/v1/desktop/register', async (request, reply) => {
+    const { desktop_id, public_key, passphrase } = request.body;
 
     if (!desktop_id || !public_key) {
       throw new VaultError('INTERNAL_ERROR', 'desktop_id and public_key are required');
@@ -1878,6 +1887,31 @@ async function buildServer(): Promise<FastifyInstance> {
       }
     } catch {
       throw new VaultError('INTERNAL_ERROR', 'Invalid public key format');
+    }
+
+    // Owner-replacement guard: registration is open ONLY when no owner exists yet
+    // (first run). Once an owner is set, REPLACING it requires proof of ownership —
+    // a valid owner token, or the vault passphrase. An idempotent re-register of the
+    // SAME device + key (normal relaunch) is always allowed.
+    const existingOwner = budget.getConfig().desktop_owner;
+    if (existingOwner) {
+      const sameDevice =
+        existingOwner.desktop_id === desktop_id && existingOwner.public_key === public_key;
+      let allowed = sameDevice || isOwnerRequest(request);
+      if (!allowed && passphrase) {
+        // Verify the passphrase WITHOUT changing the vault's lock state or touching
+        // the cached master key (verifyPassphrase decrypts a throwaway copy).
+        allowed = await storage.verifyPassphrase(passphrase);
+      }
+      if (!allowed) {
+        return reply.status(403).send({
+          error: {
+            code: 'OWNER_AUTH_REQUIRED',
+            message:
+              'An owner is already registered. Replacing it requires the current owner token or the vault passphrase.',
+          },
+        });
+      }
     }
 
     // Store in config
@@ -2690,6 +2724,7 @@ async function buildServer(): Promise<FastifyInstance> {
   server.patch<{
     Params: { id: string };
     Body: {
+      name?: string;
       permission_scopes?: string[];
       budget?: {
         daily?: number;
@@ -2730,6 +2765,20 @@ async function buildServer(): Promise<FastifyInstance> {
       });
     }
 
+    // Validate name if provided (display-only rename; safe since connections key on agent_id)
+    let trimmedName: string | undefined;
+    if (body.name !== undefined) {
+      if (typeof body.name !== 'string' || body.name.trim().length === 0) {
+        return reply.status(400).send({
+          error: {
+            code: 'INVALID_REQUEST',
+            message: 'name must be a non-empty string',
+          },
+        });
+      }
+      trimmedName = body.name.trim().slice(0, 80);
+    }
+
     // Validate permission_scopes if provided
     if (body.permission_scopes !== undefined) {
       if (!Array.isArray(body.permission_scopes)) {
@@ -2755,12 +2804,16 @@ async function buildServer(): Promise<FastifyInstance> {
 
     // Build updates object
     const updates: {
+      name?: string;
       permission_scopes?: string[];
       budget_daily?: number;
       budget_currency?: string;
       budget_auto_approve_under?: number;
     } = {};
 
+    if (trimmedName !== undefined) {
+      updates.name = trimmedName;
+    }
     if (body.permission_scopes !== undefined) {
       // Normalize scopes to ensure they have proper read:/sign: prefix
       updates.permission_scopes = normalizePermissionScopes(
@@ -3098,6 +3151,489 @@ async function buildServer(): Promise<FastifyInstance> {
 
     return { denied: true };
   });
+
+  // ============================================================================
+  // Cloud-Connect (Cloud Agent Connect: paste-a-URL + on-device approval)
+  // ============================================================================
+  // Flow: owner issues a one-time, key-pinned connect-link -> the agent redeems
+  // it (creating a PENDING agent + match-code) -> owner approves on-device (verifies
+  // the match-code) -> the agent polls and mints its session token. Permissions and
+  // budget live ONLY in the vault DB; the link carries no authority. See PRD §6.
+
+  /**
+   * Derive server-side request facts for the on-device approval (Rule #6).
+   * Only truly server-derived values count: request.ip comes from the socket.
+   * The Host header is attacker-controllable, so it is NOT surfaced as a fact
+   * (a verified host will be provided by the relay in P2). source_host stays
+   * undefined here by design.
+   */
+  const deriveSourceFacts = (
+    request: FastifyRequest
+  ): { source_ip?: string; source_host?: string } => {
+    return { source_ip: request.ip || undefined, source_host: undefined };
+  };
+
+  /** Constant-time, length-safe equality for short ASCII codes (Rule #4/#6). */
+  const constantTimeStrEqual = (a: string, b: string): boolean => {
+    const ab = Buffer.from(a, 'utf8');
+    const bb = Buffer.from(b, 'utf8');
+    if (ab.length !== bb.length) return false;
+    try {
+      return crypto.timingSafeEqual(ab, bb);
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * Issue a one-time, key-pinned connect-link (owner only).
+   * Auto-approve defaults OFF / $0 (Rule #5). Permissions stored only in vault DB.
+   */
+  server.post<{
+    Body: {
+      name?: string;
+      scopes?: string[];
+      budget?: { daily?: number; currency?: string; auto_approve_under?: number };
+    };
+  }>('/v1/cloud-connect/links', async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+      });
+    }
+
+    const body = request.body || {};
+    // Bound owner-supplied strings to avoid storage bloat / abuse.
+    const name = ((body.name || '').trim() || 'Cloud agent').slice(0, 80);
+    const scopes = Array.isArray(body.scopes)
+      ? body.scopes
+          .filter((s) => typeof s === 'string')
+          .slice(0, 64)
+          .map((s) => s.slice(0, 128))
+      : [];
+    // Rule #5: cloud agents start with NO standing auto-approve and $0 budget.
+    const budget = {
+      daily: Math.max(0, Number(body.budget?.daily ?? 0)) || 0,
+      currency: body.budget?.currency || 'USD',
+      auto_approve_under: Math.max(0, Number(body.budget?.auto_approve_under ?? 0)) || 0,
+    };
+
+    const identity = await ensureRelayIdentity();
+    const agentId = `agent_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    const hpkeB64 = identity.hpkeKeyPair.publicKey.toString('base64');
+    const signB64 = identity.signingKeyPair.publicKey.toString('base64');
+    const relayUrl = identity.relayUrl || DEFAULT_RELAY_URL || CORE_DEFAULT_RELAY_URL || '';
+
+    const link = createConnectLink(
+      {
+        vault_id: identity.vaultId,
+        agent_id: agentId,
+        agent_name: name,
+        mode: 'mcp',
+        relay_url: relayUrl,
+        vault_hpke_public_key: hpkeB64,
+        vault_signing_public_key: signB64,
+      },
+      identity.signingKeyPair.privateKey
+    );
+
+    storage.createCloudConnectLink({
+      link_id: link.link_id,
+      secret: link.secret,
+      agent_id: agentId,
+      name,
+      permission_scopes: scopes,
+      budget,
+      expires_at: link.expires_at,
+    });
+
+    return {
+      connect_link: link.token,
+      link_id: link.link_id,
+      agent_id: agentId,
+      name,
+      scopes,
+      budget,
+      vault_id: identity.vaultId,
+      vault_hpke_fingerprint: link.vault_hpke_fingerprint,
+      relay_url: relayUrl,
+      created_at: link.created_at,
+      expires_at: link.expires_at,
+    };
+  });
+
+  /**
+   * Redeem a connect-link (called by the agent; authed by the link itself).
+   * Creates a PENDING agent (inert until approved — Rule #8) + a match-code.
+   */
+  server.post<{ Body: { connect_link?: string; agent_public_key?: string } }>(
+    '/v1/cloud-connect/redeem',
+    async (request, reply) => {
+      const body = request.body || {};
+      const token = (body.connect_link || '').trim();
+      const agentPublicKey = (body.agent_public_key || '').trim();
+
+      if (!token || !isConnectLink(token)) {
+        return reply.status(400).send({
+          error: { code: 'INVALID_CONNECT_LINK', message: 'A valid connect_link is required' },
+        });
+      }
+      if (!agentPublicKey || !isValidPublicKey(agentPublicKey)) {
+        return reply.status(400).send({
+          error: {
+            code: 'INVALID_AGENT_KEY',
+            message: 'A valid agent_public_key (base64 Ed25519) is required',
+          },
+        });
+      }
+
+      const identity = await ensureRelayIdentity();
+
+      // Verify against the vault's OWN signing key (never trust the embedded key).
+      const payload = verifyConnectLinkWithKey(token, identity.signingKeyPair.publicKey);
+      if (!payload) {
+        return reply.status(400).send({
+          error: {
+            code: 'INVALID_CONNECT_LINK',
+            message: 'Connect link is invalid, tampered, or expired',
+          },
+        });
+      }
+      if (payload.vault_id !== identity.vaultId) {
+        return reply.status(400).send({
+          error: { code: 'WRONG_VAULT', message: 'Connect link is for a different vault' },
+        });
+      }
+
+      // Rule #1: the pinned HPKE key in the link must match this vault's real key.
+      const actualHpke = identity.hpkeKeyPair.publicKey.toString('base64');
+      if (
+        payload.vault_hpke_public_key !== actualHpke ||
+        payload.vault_hpke_fingerprint !== hpkeFingerprint(actualHpke)
+      ) {
+        return reply.status(400).send({
+          error: { code: 'KEY_PIN_MISMATCH', message: 'Pinned vault key does not match' },
+        });
+      }
+
+      const matchCode = generateMatchCode();
+      const { source_ip, source_host } = deriveSourceFacts(request);
+
+      const result = storage.redeemCloudConnectLink({
+        link_id: payload.link_id,
+        secret: payload.secret,
+        redeemer_public_key: agentPublicKey,
+        match_code: matchCode,
+        mode: 'mcp',
+        source_ip,
+        source_host,
+      });
+
+      if (!result.ok) {
+        const code = result.reason || 'REDEEM_FAILED';
+        const status = code === 'LINK_NOT_FOUND' ? 404 : 400;
+        return reply.status(status).send({
+          error: { code, message: `Connect link could not be redeemed (${code})` },
+        });
+      }
+
+      return {
+        status: 'pending_approval',
+        agent_id: result.agent_id,
+        match_code: result.match_code,
+        vault_id: identity.vaultId,
+        vault_hpke_public_key: actualHpke,
+        vault_hpke_fingerprint: hpkeFingerprint(actualHpke),
+        message:
+          'Approve this connection on your DCP device. Confirm the match code shown here matches the one on your device.',
+      };
+    }
+  );
+
+  /**
+   * Agent status poll (authed by the connect-link secret). Returns the current
+   * state; once approved, mints the session token EXACTLY ONCE (never stored as
+   * plaintext) and returns the vault keys + scopes/budget for the agent.
+   */
+  server.post<{ Body: { connect_link?: string } }>(
+    '/v1/cloud-connect/status',
+    async (request, reply) => {
+      const token = (request.body?.connect_link || '').trim();
+      if (!token || !isConnectLink(token)) {
+        return reply.status(400).send({
+          error: { code: 'INVALID_CONNECT_LINK', message: 'A valid connect_link is required' },
+        });
+      }
+
+      // Decode (no expiry gate — the agent may legitimately poll post-approval).
+      const decoded = decodeConnectLink(token);
+      if (!decoded) {
+        return reply.status(400).send({
+          error: { code: 'INVALID_CONNECT_LINK', message: 'Connect link is malformed' },
+        });
+      }
+
+      const identity = await ensureRelayIdentity();
+      if (decoded.payload.vault_id !== identity.vaultId) {
+        return reply.status(400).send({
+          error: { code: 'WRONG_VAULT', message: 'Connect link is for a different vault' },
+        });
+      }
+
+      const linkId = decoded.payload.link_id;
+      // Authenticate the poller via the single-use secret (constant-time compare).
+      if (!storage.verifyCloudConnectSecret(linkId, decoded.payload.secret)) {
+        return reply.status(403).send({
+          error: { code: 'UNAUTHORIZED', message: 'Connect link secret does not match' },
+        });
+      }
+
+      // Lazily expire stale links (bootstrap TTL + approval grace) before acting.
+      storage.expireStaleCloudConnectLinks();
+      const link = storage.getCloudConnectLink(linkId);
+      if (!link) {
+        return reply.status(404).send({
+          error: { code: 'LINK_NOT_FOUND', message: 'Connect link not found' },
+        });
+      }
+
+      if (link.status === 'revoked') return { status: 'revoked' };
+      if (link.status === 'expired') return { status: 'expired' };
+      if (link.status === 'pending') return { status: 'pending_redeem' };
+      if (link.status === 'redeemed') {
+        return { status: 'pending_approval', match_code: link.match_code };
+      }
+
+      // status === 'consumed' (owner approved) -> mint token once.
+      const agent = storage.getAgentConnection(link.agent_id);
+      if (!agent || agent.status !== 'active') {
+        return { status: 'revoked' };
+      }
+      if (agent.token_hash) {
+        return { status: 'approved', token_already_issued: true, agent_id: link.agent_id };
+      }
+
+      const sessionToken = crypto.randomBytes(32).toString('base64url');
+      const sessionTokenHash = crypto.createHash('sha256').update(sessionToken).digest('hex');
+      storage.markAgentPaired(link.agent_id, sessionTokenHash, link.redeemer_public_key);
+
+      const relayUrl = identity.relayUrl || DEFAULT_RELAY_URL || CORE_DEFAULT_RELAY_URL || '';
+      return {
+        status: 'approved',
+        agent_id: link.agent_id,
+        session_token: sessionToken,
+        vault_id: identity.vaultId,
+        vault_hpke_public_key: identity.hpkeKeyPair.publicKey.toString('base64'),
+        vault_signing_public_key: identity.signingKeyPair.publicKey.toString('base64'),
+        relay_url: relayUrl,
+        scopes: link.permission_scopes,
+        budget: link.budget,
+      };
+    }
+  );
+
+  /** List connect-links awaiting on-device approval (owner only). Rule #6 facts. */
+  /**
+   * The universal connect URL for the paste-URL flow: the per-vault MCP endpoint a
+   * user pastes into any OAuth MCP client (Hermes/Claude.ai/ChatGPT). Derived from
+   * the relay's base URL (ws[s] → http[s]); the vault id routes to this vault.
+   */
+  server.get('/v1/cloud-connect/connect-url', async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+      });
+    }
+    const identity = await ensureRelayIdentity();
+    const wsUrl = identity.relayUrl || DEFAULT_RELAY_URL || CORE_DEFAULT_RELAY_URL || '';
+    const httpsBase = wsUrl
+      .replace(/^wss:/i, 'https:')
+      .replace(/^ws:/i, 'http:')
+      .replace(/\/+$/, '')
+      .replace(/\/ws$/i, '');
+    return {
+      vault_id: identity.vaultId,
+      mcp_url: httpsBase ? `${httpsBase}/v/${identity.vaultId}/mcp` : '',
+      relay_base: httpsBase,
+    };
+  });
+
+  /**
+   * Open (or close) the link-less pairing window (owner only). The paste-URL flow
+   * only opens on-device approvals while this window is open — opt-in, like
+   * Bluetooth pairing. POST { minutes } opens for N minutes (clamped 1..60);
+   * minutes<=0 closes immediately.
+   */
+  server.post<{ Body: { minutes?: number } }>(
+    '/v1/cloud-connect/pairing-mode',
+    async (request, reply) => {
+      if (!isOwnerRequest(request)) {
+        return reply.status(403).send({
+          error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+        });
+      }
+      const raw = Number(request.body?.minutes ?? 10);
+      const minutes = Number.isFinite(raw) ? Math.min(60, Math.max(0, raw)) : 10;
+      const acceptUntil = minutes > 0 ? Date.now() + minutes * 60 * 1000 : 0;
+      budget.setConfig('cloud_connect_accept_until', acceptUntil);
+      // Reset the rate-limit counter when (re)opening so a fresh window is clean.
+      if (minutes > 0) cloudConnectPairTimes = [];
+      return {
+        open: minutes > 0,
+        accept_until: acceptUntil,
+        seconds_remaining: minutes > 0 ? minutes * 60 : 0,
+      };
+    }
+  );
+
+  /** Report whether the link-less pairing window is currently open (owner only). */
+  server.get('/v1/cloud-connect/pairing-mode', async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+      });
+    }
+    const acceptUntil = cloudConnectPairingOpenUntil();
+    const open = acceptUntil > Date.now();
+    return {
+      open,
+      accept_until: acceptUntil,
+      seconds_remaining: open ? Math.round((acceptUntil - Date.now()) / 1000) : 0,
+    };
+  });
+
+  server.get('/v1/cloud-connect/pending', async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+      });
+    }
+    storage.expireStaleCloudConnectLinks();
+    const pending = storage.listPendingCloudConnectApprovals();
+    return {
+      pending: pending.map((l) => ({
+        agent_id: l.agent_id,
+        link_id: l.link_id,
+        name: l.name,
+        scopes: l.permission_scopes,
+        budget: l.budget,
+        match_code: l.match_code,
+        source_ip: l.source_ip,
+        source_host: l.source_host,
+        agent_fingerprint: l.redeemer_public_key
+          ? hpkeFingerprint(l.redeemer_public_key)
+          : undefined,
+        redeemed_at: l.redeemed_at,
+        created_at: l.created_at,
+      })),
+    };
+  });
+
+  /** List all connect-links for management (owner only). */
+  server.get('/v1/cloud-connect/links', async (request, reply) => {
+    if (!isOwnerRequest(request)) {
+      return reply.status(403).send({
+        error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+      });
+    }
+    return { links: storage.listCloudConnectLinks() };
+  });
+
+  /** Approve a pending cloud-connect (owner only; match-code mandatory). */
+  server.post<{ Params: { agentId: string }; Body: { match_code?: string } }>(
+    '/v1/cloud-connect/pending/:agentId/approve',
+    async (request, reply) => {
+      if (!isOwnerRequest(request)) {
+        return reply.status(403).send({
+          error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+        });
+      }
+      // Expire over-age redeemed links first so a stale link can't be approved.
+      storage.expireStaleCloudConnectLinks();
+      const link = storage.getCloudConnectLinkByAgent(request.params.agentId);
+      if (!link || link.status !== 'redeemed') {
+        return reply.status(404).send({
+          error: {
+            code: 'PENDING_NOT_FOUND',
+            message: 'No pending cloud-connect approval for this agent',
+          },
+        });
+      }
+      // Rule #6: the initiation<->approval match-code is MANDATORY. Every redeemed
+      // link carries a server-generated code, so the owner must echo the code they
+      // visually verified against the agent side. Constant-time compare.
+      const presentedCode = (request.body?.match_code || '').trim().toUpperCase();
+      const expectedCode = (link.match_code || '').toUpperCase();
+      if (!presentedCode || !expectedCode || !constantTimeStrEqual(presentedCode, expectedCode)) {
+        return reply.status(400).send({
+          error: {
+            code: 'MATCH_CODE_MISMATCH',
+            message: 'A matching match code is required to approve this connection',
+          },
+        });
+      }
+      const result = storage.approveCloudConnectLink(link.link_id);
+      if (!result.ok) {
+        return reply.status(400).send({
+          error: { code: result.reason || 'APPROVE_FAILED', message: 'Approval failed' },
+        });
+      }
+      return { approved: true, agent_id: result.agent_id, name: link.name };
+    }
+  );
+
+  /** Deny a pending cloud-connect (owner only). */
+  server.post<{ Params: { agentId: string } }>(
+    '/v1/cloud-connect/pending/:agentId/deny',
+    async (request, reply) => {
+      if (!isOwnerRequest(request)) {
+        return reply.status(403).send({
+          error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+        });
+      }
+      const link = storage.getCloudConnectLinkByAgent(request.params.agentId);
+      if (!link) {
+        return reply.status(404).send({
+          error: { code: 'PENDING_NOT_FOUND', message: 'No cloud-connect link for this agent' },
+        });
+      }
+      const result = storage.denyCloudConnectLink(link.link_id);
+      if (!result.ok) {
+        return reply.status(400).send({
+          error: { code: result.reason || 'DENY_FAILED', message: 'Deny failed' },
+        });
+      }
+      return { denied: true, agent_id: result.agent_id };
+    }
+  );
+
+  /** Instantly revoke a bound cloud agent + its link (owner only — Rule #7). */
+  server.post<{ Params: { agentId: string } }>(
+    '/v1/cloud-connect/agents/:agentId/revoke',
+    async (request, reply) => {
+      if (!isOwnerRequest(request)) {
+        return reply.status(403).send({
+          error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+        });
+      }
+      const link = storage.getCloudConnectLinkByAgent(request.params.agentId);
+      if (!link) {
+        // No link record — still revoke the agent connection if it exists.
+        const ok = storage.revokeAgentConnection(request.params.agentId);
+        if (!ok) {
+          return reply.status(404).send({
+            error: { code: 'AGENT_NOT_FOUND', message: 'Agent not found' },
+          });
+        }
+        // Fast-fail at the relay too (denylist + kill refresh chains) — Rule #7.
+        relayClient?.sendCloudConnectRevoke(request.params.agentId);
+        return { revoked: true, agent_id: request.params.agentId };
+      }
+      const result = storage.revokeCloudConnectLink(link.link_id);
+      relayClient?.sendCloudConnectRevoke(result.agent_id || request.params.agentId);
+      return { revoked: true, agent_id: result.agent_id };
+    }
+  );
 
   // ============================================================================
   // Trusted Services (Owner Only)
@@ -3540,11 +4076,15 @@ async function buildServer(): Promise<FastifyInstance> {
     // Decrypt if it's not a CRITICAL item
     if (record.sensitivity === 'critical') {
       // Don't return critical data - return reference only
-      storage.logAudit('READ', 'success', {
-        agentName: agent_name,
-        scope,
-        operation: 'read_reference',
-      });
+      // Owner-mode reads (the desktop app reading your own data, e.g. for the
+      // greeting) are not "activity" — don't pollute the audit log with them.
+      if (!ownerMode) {
+        storage.logAudit('READ', 'success', {
+          agentName: agent_name,
+          scope,
+          operation: 'read_reference',
+        });
+      }
 
       return {
         scope,
@@ -3564,11 +4104,14 @@ async function buildServer(): Promise<FastifyInstance> {
     const decrypted = envelopeDecrypt(payload, masterKey);
     const data = JSON.parse(decrypted.toString('utf-8'));
 
-    storage.logAudit('READ', 'success', {
-      agentName: agent_name,
-      scope,
-      operation: 'read_data',
-    });
+    // Skip owner-mode reads (the app reading your own data) — not real activity.
+    if (!ownerMode) {
+      storage.logAudit('READ', 'success', {
+        agentName: agent_name,
+        scope,
+        operation: 'read_data',
+      });
+    }
 
     return {
       scope,
@@ -4057,6 +4600,13 @@ async function buildServer(): Promise<FastifyInstance> {
       throw new VaultError('VAULT_LOCKED', 'Vault is locked. Please unlock first.');
     }
 
+    // Enforce agent identity + scope for named agents (mandatory signed request).
+    // No service_id (desktop / cloud-connect-via-consent) falls through to consent.
+    const agentAuth = verifyLocalAgentRequest(body as Record<string, unknown>, `sign:${chain}`);
+    if (!agentAuth.authorized && agentAuth.skipConsentFlow) {
+      throw new VaultError('SERVICE_SCOPE_VIOLATION', agentAuth.reason || 'Scope not permitted for this agent');
+    }
+
     const walletScope = `crypto.wallet.${chain}`;
 
     if (!effectiveSessionId) {
@@ -4211,6 +4761,14 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     const chain: Chain = 'solana';
+
+    // Enforce agent identity + scope for named agents (mandatory signed request).
+    // No service_id (desktop / cloud-connect-via-consent) falls through to consent.
+    const agentAuth = verifyLocalAgentRequest(request.body as Record<string, unknown>, `sign:${network}`);
+    if (!agentAuth.authorized && agentAuth.skipConsentFlow) {
+      throw new VaultError('SERVICE_SCOPE_VIOLATION', agentAuth.reason || 'Scope not permitted for this agent');
+    }
+
     const walletScope = `crypto.wallet.${chain}`;
 
     if (!effectiveSessionId) {
@@ -5077,6 +5635,23 @@ function verifyRelayServiceIdentity(
  * @param requestedScope - The scope being requested (e.g., "read:identity.email")
  * @returns Authorization result with agent info or denial reason
  */
+/**
+ * Replay guard for signed local-agent requests. Each (service_id + nonce) is
+ * single-use within the freshness window; entries older than the window are
+ * evicted lazily. Prevents replay of a captured valid signed request.
+ */
+const LOCAL_AGENT_NONCE_TTL_MS = 5 * 60 * 1000;
+const localAgentNonces = new Map<string, number>();
+function markLocalAgentNonce(key: string): boolean {
+  const now = Date.now();
+  for (const [k, t] of localAgentNonces) {
+    if (now - t > LOCAL_AGENT_NONCE_TTL_MS) localAgentNonces.delete(k);
+  }
+  if (localAgentNonces.has(key)) return false; // replay
+  localAgentNonces.set(key, now);
+  return true;
+}
+
 function verifyLocalAgentRequest(
   body: Record<string, unknown>,
   requestedScope: string
@@ -5128,39 +5703,56 @@ function verifyLocalAgentRequest(
     return { authorized: false, reason: `Agent '${serviceId}' has no registered public key`, skipConsentFlow: true };
   }
 
-  // Verify signature if provided
-  if (serviceSignature) {
-    // Build the payload that was signed (everything except the signature)
-    const { service_signature: _, ...payloadWithoutSig } = body;
+  // A signed request is MANDATORY for agent_/vps_ identities. The legitimate client
+  // (dcp-client) always signs (service_id + service_signature + timestamp + nonce);
+  // a named-agent request WITHOUT a valid signature is an impersonation attempt and is
+  // rejected outright — there is no unsigned fallback for an agent identity.
+  const nonce = body.nonce as string | undefined;
+  if (!serviceSignature || !timestamp || !nonce) {
+    storage.logAudit('DENY', 'denied', {
+      operation: 'local_agent_request',
+      details: JSON.stringify({ service_id: serviceId, reason: 'missing_signature' }),
+    });
+    return {
+      authorized: false,
+      reason: 'A signed request (service_signature, timestamp, nonce) is required for agent identities',
+      skipConsentFlow: true,
+    };
+  }
 
-    const signatureValid = verifyServiceSignature(
-      payloadWithoutSig,
-      serviceId,
-      serviceSignature,
-      agent.service_public_key
-    );
+  // Verify the Ed25519 signature over the canonical body (everything except the signature).
+  const { service_signature: _, ...payloadWithoutSig } = body;
+  const signatureValid = verifyServiceSignature(
+    payloadWithoutSig,
+    serviceId,
+    serviceSignature,
+    agent.service_public_key
+  );
+  if (!signatureValid) {
+    storage.logAudit('DENY', 'denied', {
+      operation: 'local_agent_request',
+      details: JSON.stringify({ service_id: serviceId, reason: 'invalid_signature' }),
+    });
+    return { authorized: false, reason: 'Invalid agent signature', skipConsentFlow: true };
+  }
 
-    if (!signatureValid) {
-      storage.logAudit('DENY', 'denied', {
-        operation: 'local_agent_request',
-        details: JSON.stringify({ service_id: serviceId, reason: 'invalid_signature' }),
-      });
-      return { authorized: false, reason: 'Invalid agent signature', skipConsentFlow: true };
-    }
+  // Timestamp freshness (5-minute window) — mandatory.
+  const requestTime = new Date(timestamp).getTime();
+  if (isNaN(requestTime) || Math.abs(Date.now() - requestTime) > 5 * 60 * 1000) {
+    storage.logAudit('DENY', 'denied', {
+      operation: 'local_agent_request',
+      details: JSON.stringify({ service_id: serviceId, reason: 'timestamp_expired' }),
+    });
+    return { authorized: false, reason: 'Request timestamp expired or invalid', skipConsentFlow: true };
+  }
 
-    // Check timestamp for replay protection (5 minute window)
-    if (timestamp) {
-      const requestTime = new Date(timestamp).getTime();
-      const now = Date.now();
-      const fiveMinutes = 5 * 60 * 1000;
-      if (Math.abs(now - requestTime) > fiveMinutes) {
-        storage.logAudit('DENY', 'denied', {
-          operation: 'local_agent_request',
-          details: JSON.stringify({ service_id: serviceId, reason: 'timestamp_expired' }),
-        });
-        return { authorized: false, reason: 'Request timestamp expired', skipConsentFlow: true };
-      }
-    }
+  // Replay protection: each (service_id, nonce) is single-use within the window.
+  if (!markLocalAgentNonce(`${serviceId}:${nonce}`)) {
+    storage.logAudit('DENY', 'denied', {
+      operation: 'local_agent_request',
+      details: JSON.stringify({ service_id: serviceId, reason: 'nonce_replay' }),
+    });
+    return { authorized: false, reason: 'Duplicate request (nonce already used)', skipConsentFlow: true };
   }
 
   // Check scope permissions. Empty permissions are request-only: authenticated,
@@ -5284,16 +5876,33 @@ async function registerVpsInviteWithRelay(
   inviteId: string,
   vaultId: string
 ): Promise<void> {
-  const response = await fetch(`${relayHttpUrl(relayUrl)}/v1/invites/register`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ invite_id: inviteId, vault_id: vaultId }),
-  });
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`Relay invite registration failed: ${response.status}${body ? ` ${body}` : ''}`);
+  // The relay only accepts invite registration from a vault with a LIVE, authenticated
+  // WS connection (security #6/#7). The vault's WS may still be (re)connecting right
+  // after unlock, so wait for it to be connected, then retry a few times to ride out
+  // the registration ack race. This keeps the relay strict while avoiding a flaky fail.
+  const deadline = Date.now() + 8000;
+  while (relayClient && !relayClient.isConnected() && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 250));
   }
+
+  let lastErr = '';
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const response = await fetch(`${relayHttpUrl(relayUrl)}/v1/invites/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invite_id: inviteId, vault_id: vaultId }),
+      });
+      if (response.ok) return;
+      lastErr = `${response.status} ${(await response.text().catch(() => '')) || ''}`.trim();
+      // 401 = relay hasn't registered our WS yet; wait and retry.
+      if (response.status !== 401) break;
+    } catch (err) {
+      lastErr = err instanceof Error ? err.message : 'network error';
+    }
+    await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+  }
+  throw new Error(`Relay invite registration failed: ${lastErr || 'unknown'}`);
 }
 
 async function ensureRelayIdentity(): Promise<RelayIdentity> {
@@ -5650,6 +6259,370 @@ async function handleRelayRequest(
   return { response: response.payload || '', replyPublicKey };
 }
 
+/**
+ * Redeem a Cloud-Connect link on behalf of a cloud agent that connected via the
+ * relay's OAuth flow. Mirrors the HTTP /v1/cloud-connect/redeem, but the redeemer
+ * identity is the agent's DPoP key thumbprint (jkt) rather than an Ed25519 key —
+ * the relay enforces DPoP/audience binding; the vault records who redeemed and
+ * runs the on-device approval. The vault fully verifies the connect-link.
+ */
+async function redeemCloudConnectOverRelay(ctrl: {
+  connect_link?: string;
+  redeemer_key?: string;
+  source_ip?: string;
+}): Promise<Record<string, unknown>> {
+  const token = (ctrl.connect_link || '').trim();
+  if (!token || !isConnectLink(token)) return { ok: false, reason: 'INVALID_CONNECT_LINK' };
+  const jkt = (ctrl.redeemer_key || '').trim();
+  if (!jkt) return { ok: false, reason: 'INVALID_AGENT_KEY' };
+
+  const identity = await ensureRelayIdentity();
+  const payload = verifyConnectLinkWithKey(token, identity.signingKeyPair.publicKey);
+  if (!payload) return { ok: false, reason: 'INVALID_CONNECT_LINK' };
+  if (payload.vault_id !== identity.vaultId) return { ok: false, reason: 'WRONG_VAULT' };
+
+  const actualHpke = identity.hpkeKeyPair.publicKey.toString('base64');
+  if (
+    payload.vault_hpke_public_key !== actualHpke ||
+    payload.vault_hpke_fingerprint !== hpkeFingerprint(actualHpke)
+  ) {
+    return { ok: false, reason: 'KEY_PIN_MISMATCH' };
+  }
+
+  const matchCode = generateMatchCode();
+  const result = storage.redeemCloudConnectLink({
+    link_id: payload.link_id,
+    secret: payload.secret,
+    redeemer_public_key: jkt,
+    match_code: matchCode,
+    mode: 'mcp',
+    source_ip: ctrl.source_ip,
+  });
+  if (!result.ok) return { ok: false, reason: result.reason || 'REDEEM_FAILED' };
+  return { ok: true, agent_id: result.agent_id, match_code: result.match_code };
+}
+
+// --- Link-less ("paste-URL") pairing ---------------------------------------
+// A standard OAuth MCP client connected with JUST the vault's MCP URL (no
+// connect-link). The relay forwards the request here; we open the SAME on-device
+// approval a redeem would, gated by a short owner-opened "pairing window" + a
+// rate-limit (so a stranger who learns the vault id can at worst cause a bounded
+// number of approval prompts the owner must still tap — never a key release).
+
+const CLOUD_CONNECT_PAIR_MAX_PER_WINDOW = 5;
+const CLOUD_CONNECT_PAIR_WINDOW_MS = 10 * 60 * 1000;
+let cloudConnectPairTimes: number[] = [];
+
+function cloudConnectPairingOpenUntil(): number {
+  // Read the window FRESH from the config file (the source of truth — setConfig
+  // always persists), so it can be opened by the desktop, the CLI, or any owner
+  // tool in another process while this server runs. Fall back to in-memory config.
+  try {
+    const dir =
+      process.env.DCP_VAULT_DIR || process.env.VAULT_DIR || path.join(os.homedir(), '.dcp');
+    const file = path.join(dir, 'config.json');
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const v = Number(data?.cloud_connect_accept_until || 0);
+      if (Number.isFinite(v) && v > 0) return v;
+    }
+  } catch {
+    /* fall through to in-memory */
+  }
+  try {
+    return Number(budget.getConfig().cloud_connect_accept_until || 0) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function pairCloudConnectOverRelay(ctrl: {
+  redeemer_key?: string;
+  source_ip?: string;
+  client_name?: string;
+  scope?: string;
+}): Promise<Record<string, unknown>> {
+  // Gate 1 — the owner must have opened the pairing window (opt-in, like BT pairing).
+  const openUntil = cloudConnectPairingOpenUntil();
+  if (!openUntil || Date.now() > openUntil) {
+    return { ok: false, reason: 'PAIRING_NOT_OPEN' };
+  }
+  // Gate 2 — rate-limit link-less requests within the window.
+  const now = Date.now();
+  cloudConnectPairTimes = cloudConnectPairTimes.filter((t) => now - t < CLOUD_CONNECT_PAIR_WINDOW_MS);
+  if (cloudConnectPairTimes.length >= CLOUD_CONNECT_PAIR_MAX_PER_WINDOW) {
+    return { ok: false, reason: 'RATE_LIMITED' };
+  }
+  cloudConnectPairTimes.push(now);
+
+  // The relay must be reachable for routing; ensure our identity exists.
+  await ensureRelayIdentity();
+
+  const jkt = (ctrl.redeemer_key || '').trim() || 'browser-tofu';
+  const agentId = `agent_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  const linkId = `urlpair_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  const matchCode = generateMatchCode();
+  const name = ((ctrl.client_name || '').trim() || 'Cloud agent').slice(0, 80);
+  // Minimal default scope (read-only address) + $0 auto-approve (Rule #5). The
+  // owner can broaden scope/budget after approval; sensitive actions always need
+  // an explicit on-device consent regardless of scope.
+  const scopes = ['read:wallet.address'];
+  const budgetDef = { daily: 0, currency: 'USD', auto_approve_under: 0 };
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+  const result = storage.createCloudConnectPairingRequest({
+    link_id: linkId,
+    agent_id: agentId,
+    name,
+    permission_scopes: scopes,
+    budget: budgetDef,
+    redeemer_public_key: jkt,
+    match_code: matchCode,
+    source_ip: ctrl.source_ip,
+    source_host: 'url',
+    expires_at: expiresAt,
+  });
+  if (!result.ok) return { ok: false, reason: result.reason || 'PAIR_FAILED' };
+  return { ok: true, agent_id: agentId, match_code: matchCode };
+}
+
+// ============================================================================
+// Cloud-Connect MCP handler (the data plane for relay-fronted cloud agents)
+// ============================================================================
+// A thin MCP JSON-RPC shell that DELEGATES tool calls to the vault's own REST
+// endpoints (same path as handleRelayRequest -> server.inject), so scope, budget,
+// and ON-DEVICE CONSENT are enforced exactly as for every other agent. The cloud
+// agent was authenticated at the relay (DPoP + audience); here we bind the call to
+// THAT agent's identity so sensitive actions still require an on-device tap.
+
+const MCP_PROTOCOL_VERSION = '2024-11-05';
+
+/** Tool schemas advertised to cloud agents. Mirrors the @dcprotocol/agent set. */
+const CLOUD_CONNECT_MCP_TOOLS = [
+  {
+    name: 'vault_get_address',
+    description: 'Get the wallet public address for a chain (read-only).',
+    inputSchema: {
+      type: 'object',
+      properties: { chain: { type: 'string', enum: ['solana'], default: 'solana' } },
+    },
+  },
+  {
+    name: 'vault_budget_check',
+    description: 'Check whether an amount is within the agent budget (read-only).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        amount: { type: 'number' },
+        currency: { type: 'string' },
+        chain: { type: 'string' },
+      },
+      required: ['amount', 'currency'],
+    },
+  },
+  {
+    name: 'vault_read',
+    description: 'Read a credential/data scope (gated by scope + on-device consent).',
+    inputSchema: {
+      type: 'object',
+      properties: { scope: { type: 'string' }, fields: { type: 'array', items: { type: 'string' } } },
+      required: ['scope'],
+    },
+  },
+  {
+    name: 'vault_sign_tx',
+    description: 'Sign a transaction (requires on-device approval; never auto-signs).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chain: { type: 'string', enum: ['solana'] },
+        unsigned_tx: { type: 'string' },
+        description: { type: 'string' },
+        amount: { type: 'number' },
+        currency: { type: 'string' },
+        destination: { type: 'string' },
+        idempotency_key: { type: 'string' },
+      },
+      required: ['chain', 'unsigned_tx'],
+    },
+  },
+  {
+    name: 'vault_sign_message',
+    description: 'Sign an arbitrary message (requires on-device approval).',
+    inputSchema: {
+      type: 'object',
+      properties: { chain: { type: 'string' }, message: { type: 'string' } },
+      required: ['chain', 'message'],
+    },
+  },
+  {
+    name: 'vault_sign_x402',
+    description: 'Sign an x402 payment payload (requires on-device approval).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        network: { type: 'string' },
+        payload: { type: 'string' },
+        amount: { type: 'number' },
+        currency: { type: 'string' },
+      },
+      required: ['network', 'payload'],
+    },
+  },
+  {
+    name: 'vault_write',
+    description: 'Write a credential/data scope (gated by scope + on-device consent).',
+    inputSchema: {
+      type: 'object',
+      properties: { scope: { type: 'string' }, value: {} },
+      required: ['scope'],
+    },
+  },
+];
+
+/** Map an MCP tool call to the vault's REST endpoint (same surface as handleRelayRequest). */
+function mcpToolToRest(
+  name: string,
+  args: Record<string, unknown>
+): { method: 'GET' | 'POST'; url: string; body?: Record<string, unknown> } | null {
+  switch (name) {
+    case 'vault_get_address':
+      return { method: 'GET', url: `/address/${(args.chain as string) || 'solana'}` };
+    case 'vault_budget_check':
+      return {
+        method: 'GET',
+        url: `/budget/check?amount=${args.amount ?? ''}&currency=${args.currency ?? ''}&chain=${args.chain ?? ''}`,
+      };
+    case 'vault_read':
+      return { method: 'POST', url: '/v1/vault/read', body: { ...args } };
+    case 'vault_write':
+      return { method: 'POST', url: '/v1/vault/write', body: { ...args } };
+    case 'vault_sign_tx':
+      return { method: 'POST', url: '/v1/vault/sign', body: { ...args } };
+    case 'vault_sign_message':
+      return { method: 'POST', url: '/v1/vault/sign_message', body: { ...args } };
+    case 'vault_sign_x402':
+      return { method: 'POST', url: '/v1/vault/sign_x402', body: { ...args } };
+    default:
+      return null;
+  }
+}
+
+interface JsonRpcRequest {
+  jsonrpc?: string;
+  id?: unknown;
+  method?: string;
+  params?: Record<string, unknown>;
+}
+
+/**
+ * Handle an MCP JSON-RPC request from a relay-fronted cloud agent.
+ * Returns { status, body } where body is the JSON-RPC response (or null for
+ * notifications). Tool calls delegate to the vault's REST endpoints bound to the
+ * authenticated agent's identity (scope + budget + on-device consent enforced).
+ */
+export async function handleCloudConnectMcp(
+  server: FastifyInstance,
+  agentId: string,
+  rawBody: unknown
+): Promise<{ status: number; body: unknown }> {
+  const req = (rawBody || {}) as JsonRpcRequest;
+  const id = req.id ?? null;
+  const rpcError = (code: number, message: string, status = 200) => ({
+    status,
+    body: { jsonrpc: '2.0', id, error: { code, message } },
+  });
+  const rpcResult = (result: unknown) => ({ status: 200, body: { jsonrpc: '2.0', id, result } });
+
+  // The cloud agent must be bound + active (defense-in-depth alongside the relay).
+  const agent = storage.getAgentConnection(agentId);
+  if (!agent || agent.status !== 'active') {
+    return rpcError(-32001, 'Agent is not authorized', 200);
+  }
+
+  const method = req.method;
+  if (!method) return rpcError(-32600, 'Invalid Request');
+
+  if (method === 'initialize') {
+    return rpcResult({
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: { tools: {} },
+      serverInfo: { name: 'dcp-vault', version: PACKAGE_VERSION },
+    });
+  }
+  if (method === 'notifications/initialized') {
+    return { status: 202, body: null }; // notification: no response
+  }
+  if (method === 'ping') {
+    return rpcResult({});
+  }
+  if (method === 'tools/list') {
+    return rpcResult({ tools: CLOUD_CONNECT_MCP_TOOLS });
+  }
+  if (method === 'tools/call') {
+    const params = (req.params || {}) as { name?: string; arguments?: Record<string, unknown> };
+    const name = params.name || '';
+    const args = params.arguments || {};
+
+    if (name === 'vault_scope_guide') {
+      return rpcResult({
+        content: [
+          {
+            type: 'text',
+            text: `Your granted scopes: ${agent.permission_scopes.join(', ') || '(none)'}\nSensitive actions require on-device approval.`,
+          },
+        ],
+      });
+    }
+
+    const route = mcpToolToRest(name, args);
+    if (!route) return rpcError(-32601, `Unknown tool: ${name}`);
+
+    // Bind the call to THIS authenticated cloud agent (scope/budget/consent).
+    const body = { ...(route.body || {}), agent_name: agent.name };
+    const injected = await server.inject({
+      method: route.method,
+      url: route.url,
+      payload: route.method === 'POST' ? JSON.stringify(body) : undefined,
+      headers: { 'content-type': 'application/json' },
+    });
+
+    let payload: unknown;
+    try {
+      payload = injected.payload ? JSON.parse(injected.payload) : {};
+    } catch {
+      payload = { raw: injected.payload };
+    }
+    // Surface vault errors (incl. "consent required") as a tool result the agent
+    // can act on, rather than a transport error. The vault never signs without
+    // an on-device tap — a sensitive call returns a pending-consent result here.
+    const isError = injected.statusCode >= 400;
+    return rpcResult({
+      content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+      isError,
+    });
+  }
+
+  return rpcError(-32601, `Unsupported method: ${method}`);
+}
+
+/** Report a cloud agent's approval status to the relay (for the device-flow poll). */
+function cloudConnectStatusOverRelay(agentId?: string): Record<string, unknown> {
+  if (!agentId) return { status: 'unknown' };
+  const agent = storage.getAgentConnection(agentId);
+  if (!agent) return { status: 'unknown' };
+  if (agent.status === 'revoked') return { status: 'revoked' };
+  if (agent.status === 'active') {
+    return {
+      status: 'approved',
+      scope: agent.permission_scopes.join(' '),
+      budget: agent.budget,
+    };
+  }
+  // 'pending' (redeemed, awaiting on-device approval) or 'stale'.
+  return { status: 'pending' };
+}
+
 async function startRelayClient(server: FastifyInstance): Promise<void> {
   const identity = await ensureRelayIdentity();
 
@@ -5693,6 +6666,49 @@ async function startRelayClient(server: FastifyInstance): Promise<void> {
     console.log(`[Vault] Verification phrase: ${claim.verification_phrase}`);
     // Store pending claim for Desktop approval
     pendingPairingClaims.set(claim.claim_id, claim);
+  });
+
+  // Handle Cloud-Connect control messages from the relay's OAuth flow
+  // (relay asks the vault to redeem a connect-link / report approval status).
+  relayClient.on('cloudConnectControl', async (raw: unknown) => {
+    const ctrl = raw as {
+      control_id?: string;
+      kind?: 'redeem' | 'pair' | 'status' | 'mcp';
+      connect_link?: string;
+      redeemer_key?: string;
+      source_ip?: string;
+      client_name?: string;
+      scope?: string;
+      agent_id?: string;
+      body?: unknown;
+    };
+    if (!ctrl?.control_id || !relayClient) return;
+    try {
+      if (ctrl.kind === 'redeem') {
+        const result = await redeemCloudConnectOverRelay(ctrl);
+        relayClient.sendCloudConnectResult(ctrl.control_id, result);
+      } else if (ctrl.kind === 'pair') {
+        const result = await pairCloudConnectOverRelay(ctrl);
+        relayClient.sendCloudConnectResult(ctrl.control_id, result);
+      } else if (ctrl.kind === 'status') {
+        relayClient.sendCloudConnectResult(
+          ctrl.control_id,
+          cloudConnectStatusOverRelay(ctrl.agent_id)
+        );
+      } else if (ctrl.kind === 'mcp') {
+        const { status, body } = await handleCloudConnectMcp(server, ctrl.agent_id || '', ctrl.body);
+        relayClient.sendCloudConnectResult(ctrl.control_id, { status, body });
+      }
+    } catch (err) {
+      console.error('[Vault] Cloud-Connect control error:', err);
+      const fallback: Record<string, unknown> =
+        ctrl.kind === 'redeem' || ctrl.kind === 'pair'
+          ? { ok: false, reason: 'internal_error' }
+          : ctrl.kind === 'mcp'
+            ? { status: 500, body: { jsonrpc: '2.0', id: null, error: { code: -32603, message: 'internal_error' } } }
+            : { status: 'unknown' };
+      relayClient.sendCloudConnectResult(ctrl.control_id, fallback);
+    }
   });
 
   let pendingEnvelope: { request_id: string; action_type: string; vault_id: string; version: string } | null = null;

@@ -31,7 +31,7 @@ async function getKeytar() {
 }
 import * as path from 'path';
 import * as os from 'os';
-import { randomBytes, randomUUID, createHash, randomInt } from 'crypto';
+import { randomBytes, randomUUID, createHash, randomInt, timingSafeEqual } from 'crypto';
 import {
   VaultRecord,
   AgentSession,
@@ -52,6 +52,8 @@ import {
   AgentConnection,
   AgentConnectionMode,
   AgentConnectionTier,
+  CloudConnectLink,
+  CloudConnectLinkStatus,
   TelegramConfig,
   CreateTelegramConfigInput,
   TelegramPairingCode,
@@ -86,6 +88,13 @@ const KEY_FILE_MODE = 0o600;
 
 /** Non-secret marker used to distinguish a provisioned vault from bare schema tables */
 const INIT_MARKER_FILE = 'vault.initialized';
+
+/**
+ * Grace window in which a REDEEMED Cloud-Connect link may still be approved.
+ * After this, the redeemed-but-unapproved link expires so its match-code can't
+ * be approved indefinitely (anti stale-approval; Rule #4 short-expiry).
+ */
+export const CLOUD_CONNECT_APPROVAL_GRACE_MS = 15 * 60 * 1000;
 
 function generateId(): string {
   if (typeof randomUUID === 'function') {
@@ -291,6 +300,32 @@ export class VaultStorage {
         used_at TEXT
       );
 
+      -- Cloud-Connect links (Cloud Agent Connect: one-time, key-pinned bootstrap)
+      CREATE TABLE IF NOT EXISTS cloud_connect_links (
+        link_id TEXT PRIMARY KEY,
+        secret_hash TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        permission_scopes TEXT NOT NULL,
+        budget_daily REAL NOT NULL DEFAULT 0,
+        budget_currency TEXT NOT NULL DEFAULT 'USDC',
+        budget_auto_approve_under REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        match_code TEXT,
+        redeemer_public_key TEXT,
+        source_ip TEXT,
+        source_host TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        redeemed_at TEXT,
+        consumed_at TEXT,
+        revoked_at TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cloud_connect_links_status ON cloud_connect_links(status);
+      CREATE INDEX IF NOT EXISTS idx_cloud_connect_links_agent ON cloud_connect_links(agent_id);
+      CREATE INDEX IF NOT EXISTS idx_cloud_connect_links_expires ON cloud_connect_links(expires_at);
+
       CREATE INDEX IF NOT EXISTS idx_pairing_tokens_expires ON pairing_tokens(expires_at);
 
       -- Telegram configuration (protocol spec section 15)
@@ -385,6 +420,40 @@ export class VaultStorage {
         );
 
         CREATE INDEX IF NOT EXISTS idx_pairing_tokens_expires ON pairing_tokens(expires_at);
+      `);
+    }
+
+    // Ensure cloud_connect_links table exists (for existing vaults)
+    const cloudConnectTable = this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='cloud_connect_links'"
+    ).get() as { name?: string } | undefined;
+
+    if (!cloudConnectTable) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS cloud_connect_links (
+          link_id TEXT PRIMARY KEY,
+          secret_hash TEXT NOT NULL,
+          agent_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          permission_scopes TEXT NOT NULL,
+          budget_daily REAL NOT NULL DEFAULT 0,
+          budget_currency TEXT NOT NULL DEFAULT 'USDC',
+          budget_auto_approve_under REAL NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'pending',
+          match_code TEXT,
+          redeemer_public_key TEXT,
+          source_ip TEXT,
+          source_host TEXT,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          redeemed_at TEXT,
+          consumed_at TEXT,
+          revoked_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cloud_connect_links_status ON cloud_connect_links(status);
+        CREATE INDEX IF NOT EXISTS idx_cloud_connect_links_agent ON cloud_connect_links(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_cloud_connect_links_expires ON cloud_connect_links(expires_at);
       `);
     }
 
@@ -639,6 +708,38 @@ export class VaultStorage {
   }
 
   /**
+   * Verify a passphrase WITHOUT unlocking or caching the key, and WITHOUT changing
+   * the vault's lock state. Returns true iff the passphrase decrypts the master key.
+   * Used for re-authentication (e.g. owner re-registration) where we must not mutate
+   * the cached master key. (Unlike unlock(), this never sets this.masterKey, so the
+   * decrypted copy can be safely zeroized.)
+   */
+  async verifyPassphrase(passphrase: string): Promise<boolean> {
+    let keyData = await this.loadMasterKeyFromKeychain();
+    if (!keyData) keyData = this.loadMasterKeyFromFile();
+    if (!keyData) return false;
+
+    const attempt = (data: { encryptedKey: Buffer; nonce: Buffer; salt: Buffer }): boolean => {
+      const wrappingKey = deriveKeyFromPassphrase(passphrase, data.salt);
+      try {
+        const mk = decrypt(data.encryptedKey, data.nonce, wrappingKey);
+        zeroize(mk); // verify only — never cache, never return the live key
+        return true;
+      } catch {
+        return false;
+      } finally {
+        zeroize(wrappingKey);
+      }
+    };
+
+    if (attempt(keyData)) return true;
+    // Stale keychain entry fallback: try the file.
+    const fileData = this.loadMasterKeyFromFile();
+    if (fileData) return attempt(fileData);
+    return false;
+  }
+
+  /**
    * Lock vault (zeroize master key from memory)
    */
   lock(): void {
@@ -696,7 +797,18 @@ export class VaultStorage {
         version: '2.0', // Version 2.0 = AEAD encryption
       });
 
-      await kt.setPassword(KEYCHAIN_SERVICE, this.getKeychainAccount(), data);
+      // Delete any existing entry first, then write. The keychain account is
+      // derived from the vault path, so a vault recreated at the same path must
+      // NOT inherit a previous vault's key. A plain setPassword should overwrite,
+      // but deleting first guarantees the freshly stored key is the only one —
+      // otherwise a stale key can silently survive and break recovery.
+      const account = this.getKeychainAccount();
+      try {
+        await kt.deletePassword(KEYCHAIN_SERVICE, account);
+      } catch {
+        // No prior entry (or delete unsupported) — fine, we're about to set it.
+      }
+      await kt.setPassword(KEYCHAIN_SERVICE, account, data);
       return true;
     } catch {
       // Keychain not available (CI, headless system, etc.)
@@ -2140,6 +2252,7 @@ export class VaultStorage {
   updateAgentConnection(
     agentId: string,
     updates: {
+      name?: string;
       permission_scopes?: string[];
       budget_daily?: number;
       budget_currency?: string;
@@ -2156,6 +2269,11 @@ export class VaultStorage {
     const setClauses: string[] = [];
     const values: (string | number)[] = [];
 
+    // Display name is cosmetic only — connections key on agent_id, so renaming is safe.
+    if (updates.name !== undefined) {
+      setClauses.push('name = ?');
+      values.push(updates.name);
+    }
     if (updates.permission_scopes !== undefined) {
       setClauses.push('permission_scopes = ?');
       values.push(JSON.stringify(updates.permission_scopes));
@@ -2301,6 +2419,436 @@ export class VaultStorage {
     const stmt = this.db.prepare('UPDATE pairing_tokens SET used_at = ? WHERE token_hash = ?');
     const result = stmt.run(now, tokenHash);
     return result.changes > 0;
+  }
+
+  // ==========================================================================
+  // Cloud-Connect Links (Cloud Agent Connect feature)
+  // ==========================================================================
+
+  private rowToCloudConnectLink(row: {
+    link_id: string;
+    agent_id: string;
+    name: string;
+    permission_scopes: string;
+    budget_daily: number;
+    budget_currency: string;
+    budget_auto_approve_under: number;
+    status: string;
+    match_code: string | null;
+    redeemer_public_key: string | null;
+    source_ip: string | null;
+    source_host: string | null;
+    created_at: string;
+    expires_at: string;
+    redeemed_at: string | null;
+    consumed_at: string | null;
+    revoked_at: string | null;
+  }): CloudConnectLink {
+    return {
+      link_id: row.link_id,
+      agent_id: row.agent_id,
+      name: row.name,
+      permission_scopes: JSON.parse(row.permission_scopes),
+      budget: {
+        daily: row.budget_daily,
+        currency: row.budget_currency,
+        auto_approve_under: row.budget_auto_approve_under,
+      },
+      status: row.status as CloudConnectLinkStatus,
+      match_code: row.match_code || undefined,
+      redeemer_public_key: row.redeemer_public_key || undefined,
+      source_ip: row.source_ip || undefined,
+      source_host: row.source_host || undefined,
+      created_at: row.created_at,
+      expires_at: row.expires_at,
+      redeemed_at: row.redeemed_at || undefined,
+      consumed_at: row.consumed_at || undefined,
+      revoked_at: row.revoked_at || undefined,
+    };
+  }
+
+  /** Constant-time compare of two equal-length hex digests. */
+  private hexDigestsEqual(a: string, b: string): boolean {
+    if (a.length !== b.length) return false;
+    try {
+      return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Persist a newly-issued Cloud-Connect link (status='pending').
+   * The secret is stored only as a SHA-256 hash; the plaintext lives only in
+   * the link token handed to the user.
+   */
+  createCloudConnectLink(input: {
+    link_id: string;
+    secret: string;
+    agent_id: string;
+    name: string;
+    permission_scopes: string[];
+    budget: { daily: number; currency: string; auto_approve_under: number };
+    expires_at: string;
+  }): CloudConnectLink {
+    const now = new Date().toISOString();
+    const secretHash = createHash('sha256').update(input.secret).digest('hex');
+
+    this.db
+      .prepare(
+        `INSERT INTO cloud_connect_links (
+          link_id, secret_hash, agent_id, name, permission_scopes,
+          budget_daily, budget_currency, budget_auto_approve_under,
+          status, created_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+      )
+      .run(
+        input.link_id,
+        secretHash,
+        input.agent_id,
+        input.name,
+        JSON.stringify(input.permission_scopes),
+        input.budget.daily,
+        input.budget.currency,
+        input.budget.auto_approve_under,
+        now,
+        input.expires_at
+      );
+
+    this.logAudit('CONFIG', 'success', {
+      operation: 'cloud_connect_link_issued',
+      details: JSON.stringify({
+        link_id: input.link_id,
+        agent_id: input.agent_id,
+        name: input.name,
+      }),
+    });
+
+    return this.getCloudConnectLink(input.link_id)!;
+  }
+
+  /** Get a Cloud-Connect link by id. */
+  getCloudConnectLink(linkId: string): CloudConnectLink | null {
+    const row = this.db
+      .prepare('SELECT * FROM cloud_connect_links WHERE link_id = ?')
+      .get(linkId) as Parameters<typeof this.rowToCloudConnectLink>[0] | undefined;
+    return row ? this.rowToCloudConnectLink(row) : null;
+  }
+
+  /** Get the most recent Cloud-Connect link for an agent. */
+  getCloudConnectLinkByAgent(agentId: string): CloudConnectLink | null {
+    const row = this.db
+      .prepare(
+        'SELECT * FROM cloud_connect_links WHERE agent_id = ? ORDER BY created_at DESC LIMIT 1'
+      )
+      .get(agentId) as Parameters<typeof this.rowToCloudConnectLink>[0] | undefined;
+    return row ? this.rowToCloudConnectLink(row) : null;
+  }
+
+  /** List all Cloud-Connect links (newest first). */
+  listCloudConnectLinks(): CloudConnectLink[] {
+    const rows = this.db
+      .prepare('SELECT * FROM cloud_connect_links ORDER BY created_at DESC')
+      .all() as Array<Parameters<typeof this.rowToCloudConnectLink>[0]>;
+    return rows.map((row) => this.rowToCloudConnectLink(row));
+  }
+
+  /** List links awaiting on-device approval (status='redeemed'). */
+  listPendingCloudConnectApprovals(): CloudConnectLink[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM cloud_connect_links WHERE status = 'redeemed' ORDER BY redeemed_at DESC"
+      )
+      .all() as Array<Parameters<typeof this.rowToCloudConnectLink>[0]>;
+    return rows.map((row) => this.rowToCloudConnectLink(row));
+  }
+
+  /**
+   * Redeem a Cloud-Connect link (single-use). Validates the link is pending,
+   * unexpired, and the secret matches; then creates a PENDING agent connection
+   * (inert until approved — Rule #8) and transitions the link to 'redeemed'.
+   * Atomic: the whole thing runs in one transaction.
+   */
+  redeemCloudConnectLink(input: {
+    link_id: string;
+    secret: string;
+    redeemer_public_key: string;
+    match_code: string;
+    mode?: AgentConnectionMode;
+    source_ip?: string;
+    source_host?: string;
+  }): { ok: boolean; reason?: string; agent_id?: string; match_code?: string } {
+    const presentedHash = createHash('sha256').update(input.secret).digest('hex');
+
+    const txn = this.db.transaction(() => {
+      const link = this.getCloudConnectLink(input.link_id);
+      if (!link) return { ok: false as const, reason: 'LINK_NOT_FOUND' };
+      if (link.status !== 'pending') {
+        return { ok: false as const, reason: `LINK_${link.status.toUpperCase()}` };
+      }
+      if (new Date(link.expires_at) < new Date()) {
+        this.db
+          .prepare(
+            "UPDATE cloud_connect_links SET status='expired' WHERE link_id=? AND status='pending'"
+          )
+          .run(input.link_id);
+        return { ok: false as const, reason: 'LINK_EXPIRED' };
+      }
+
+      const secretRow = this.db
+        .prepare('SELECT secret_hash FROM cloud_connect_links WHERE link_id = ?')
+        .get(input.link_id) as { secret_hash: string } | undefined;
+      if (!secretRow || !this.hexDigestsEqual(secretRow.secret_hash, presentedHash)) {
+        return { ok: false as const, reason: 'BAD_SECRET' };
+      }
+
+      // Create the PENDING agent connection — no authority until approved.
+      this.createAgentConnection({
+        agent_id: link.agent_id,
+        name: link.name,
+        mode: input.mode || 'mcp',
+        permission_scopes: link.permission_scopes,
+        budget: link.budget,
+      });
+
+      // Single-use transition (guarded on status to defeat double-redeem races).
+      const now = new Date().toISOString();
+      const upd = this.db
+        .prepare(
+          `UPDATE cloud_connect_links
+           SET status='redeemed', match_code=?, redeemer_public_key=?,
+               source_ip=?, source_host=?, redeemed_at=?
+           WHERE link_id=? AND status='pending'`
+        )
+        .run(
+          input.match_code,
+          input.redeemer_public_key,
+          input.source_ip || null,
+          input.source_host || null,
+          now,
+          input.link_id
+        );
+      if (upd.changes === 0) return { ok: false as const, reason: 'RACE' };
+
+      return { ok: true as const, agent_id: link.agent_id, match_code: input.match_code };
+    });
+
+    const result = txn();
+    if (result.ok) {
+      this.logAudit('CONFIG', 'success', {
+        operation: 'cloud_connect_link_redeemed',
+        details: JSON.stringify({ link_id: input.link_id, agent_id: result.agent_id }),
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Create a LINK-LESS pairing request (the "paste-URL" Cloud-Connect flow).
+   *
+   * Unlike {@link redeemCloudConnectLink}, there is no pre-issued connect-link or
+   * secret: a standard OAuth MCP client connected with just the vault's MCP URL,
+   * and the relay forwarded the request here. We materialise the SAME on-device
+   * approval state a redeem produces — a row in 'redeemed' status plus a PENDING
+   * (inert) agent connection — so the existing approve/deny/status/revoke paths
+   * work unchanged. The only difference is provenance: secret_hash is empty (the
+   * row can never be redeemed as a link) and source_host marks it as URL-paired.
+   *
+   * Security note: the connect-link's HPKE key-pin (Rule #1) is intentionally
+   * absent here; the on-device match-code + human approval (Rules #6/#8) and the
+   * caller-side pairing window remain the gates. Budget defaults to $0 auto-approve
+   * (Rule #5). The agent stays inert until the owner approves.
+   */
+  createCloudConnectPairingRequest(input: {
+    link_id: string;
+    agent_id: string;
+    name: string;
+    permission_scopes: string[];
+    budget: { daily: number; currency: string; auto_approve_under: number };
+    redeemer_public_key: string;
+    match_code: string;
+    source_ip?: string;
+    source_host?: string;
+    expires_at: string;
+  }): { ok: boolean; reason?: string; agent_id: string; match_code: string } {
+    const txn = this.db.transaction(() => {
+      const now = new Date().toISOString();
+      // Inserted directly as 'redeemed': there is no secret to verify, so the
+      // pending->redeemed transition that protects link redemption does not apply.
+      // secret_hash='' ensures verifyCloudConnectSecret / redeem can never match it.
+      this.db
+        .prepare(
+          `INSERT INTO cloud_connect_links (
+            link_id, secret_hash, agent_id, name, permission_scopes,
+            budget_daily, budget_currency, budget_auto_approve_under,
+            status, match_code, redeemer_public_key, source_ip, source_host,
+            created_at, expires_at, redeemed_at
+          ) VALUES (?, '', ?, ?, ?, ?, ?, ?, 'redeemed', ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          input.link_id,
+          input.agent_id,
+          input.name,
+          JSON.stringify(input.permission_scopes),
+          input.budget.daily,
+          input.budget.currency,
+          input.budget.auto_approve_under,
+          input.match_code,
+          input.redeemer_public_key,
+          input.source_ip || null,
+          input.source_host || 'url',
+          now,
+          input.expires_at,
+          now
+        );
+
+      // Create the PENDING agent connection — no authority until approved (Rule #8).
+      this.createAgentConnection({
+        agent_id: input.agent_id,
+        name: input.name,
+        mode: 'mcp',
+        permission_scopes: input.permission_scopes,
+        budget: input.budget,
+      });
+
+      return { ok: true as const, agent_id: input.agent_id, match_code: input.match_code };
+    });
+
+    const result = txn();
+    this.logAudit('CONFIG', 'success', {
+      operation: 'cloud_connect_pairing_requested',
+      details: JSON.stringify({
+        link_id: input.link_id,
+        agent_id: input.agent_id,
+        source: input.source_host || 'url',
+      }),
+    });
+    return result;
+  }
+
+  /**
+   * Approve a redeemed Cloud-Connect link: bind the agent's presented public key
+   * and mark it active. The session token is minted separately when the agent
+   * authenticates its status poll (so the plaintext token is never stored).
+   */
+  approveCloudConnectLink(
+    linkId: string
+  ): { ok: boolean; reason?: string; agent_id?: string; redeemer_public_key?: string } {
+    // Atomic: bind the agent and consume the link in one transaction, with the
+    // guarded status UPDATE done FIRST so a lost race never marks the agent paired.
+    const txn = this.db.transaction(() => {
+      const link = this.getCloudConnectLink(linkId);
+      if (!link) return { ok: false as const, reason: 'LINK_NOT_FOUND' };
+      if (link.status !== 'redeemed') {
+        return { ok: false as const, reason: `LINK_${link.status.toUpperCase()}` };
+      }
+
+      const now = new Date().toISOString();
+      const upd = this.db
+        .prepare(
+          "UPDATE cloud_connect_links SET status='consumed', consumed_at=? WHERE link_id=? AND status='redeemed'"
+        )
+        .run(now, linkId);
+      if (upd.changes === 0) return { ok: false as const, reason: 'RACE' };
+
+      this.markAgentPaired(link.agent_id, undefined, link.redeemer_public_key);
+
+      return {
+        ok: true as const,
+        agent_id: link.agent_id,
+        redeemer_public_key: link.redeemer_public_key,
+      };
+    });
+
+    const result = txn();
+    if (result.ok) {
+      this.logAudit('GRANT', 'success', {
+        operation: 'cloud_connect_link_approved',
+        details: JSON.stringify({ link_id: linkId, agent_id: result.agent_id }),
+      });
+    }
+    return result;
+  }
+
+  /** Deny a pending/redeemed link (revokes any pending agent connection). */
+  denyCloudConnectLink(
+    linkId: string
+  ): { ok: boolean; reason?: string; agent_id?: string } {
+    const link = this.getCloudConnectLink(linkId);
+    if (!link) return { ok: false, reason: 'LINK_NOT_FOUND' };
+    if (link.status !== 'redeemed' && link.status !== 'pending') {
+      return { ok: false, reason: `LINK_${link.status.toUpperCase()}` };
+    }
+    const now = new Date().toISOString();
+    this.db
+      .prepare("UPDATE cloud_connect_links SET status='revoked', revoked_at=? WHERE link_id=?")
+      .run(now, linkId);
+    if (link.status === 'redeemed') {
+      this.revokeAgentConnection(link.agent_id);
+    }
+    this.logAudit('REVOKE', 'success', {
+      operation: 'cloud_connect_link_denied',
+      details: JSON.stringify({ link_id: linkId, agent_id: link.agent_id }),
+    });
+    return { ok: true, agent_id: link.agent_id };
+  }
+
+  /**
+   * Instantly revoke a Cloud-Connect link and its bound agent (Rule #7).
+   * Clears the agent token and marks both link + agent revoked so subsequent
+   * inbound requests are rejected.
+   */
+  revokeCloudConnectLink(
+    linkId: string
+  ): { ok: boolean; reason?: string; agent_id?: string } {
+    const link = this.getCloudConnectLink(linkId);
+    if (!link) return { ok: false, reason: 'LINK_NOT_FOUND' };
+    const now = new Date().toISOString();
+    this.db
+      .prepare("UPDATE cloud_connect_links SET status='revoked', revoked_at=? WHERE link_id=?")
+      .run(now, linkId);
+    this.revokeAgentConnection(link.agent_id);
+    this.logAudit('REVOKE', 'success', {
+      operation: 'cloud_connect_link_revoked',
+      details: JSON.stringify({ link_id: linkId, agent_id: link.agent_id }),
+    });
+    return { ok: true, agent_id: link.agent_id };
+  }
+
+  /**
+   * Verify a presented secret against a stored link (constant-time).
+   * Used to authenticate the agent's status poll without exposing the hash.
+   */
+  verifyCloudConnectSecret(linkId: string, secret: string): boolean {
+    const row = this.db
+      .prepare('SELECT secret_hash FROM cloud_connect_links WHERE link_id = ?')
+      .get(linkId) as { secret_hash: string } | undefined;
+    if (!row) return false;
+    const presented = createHash('sha256').update(secret).digest('hex');
+    return this.hexDigestsEqual(row.secret_hash, presented);
+  }
+
+  /**
+   * Lazily expire stale links. Covers both:
+   *  - unredeemed links past their bootstrap TTL, and
+   *  - redeemed-but-unapproved links past the approval grace window
+   * so a redeemed link's match-code can't be approved/polled indefinitely.
+   * Returns the number of links transitioned to 'expired'.
+   */
+  expireStaleCloudConnectLinks(): number {
+    const now = new Date().toISOString();
+    const r1 = this.db
+      .prepare(
+        "UPDATE cloud_connect_links SET status='expired' WHERE status='pending' AND expires_at < ?"
+      )
+      .run(now);
+    const graceCutoff = new Date(Date.now() - CLOUD_CONNECT_APPROVAL_GRACE_MS).toISOString();
+    const r2 = this.db
+      .prepare(
+        "UPDATE cloud_connect_links SET status='expired' WHERE status='redeemed' AND redeemed_at < ?"
+      )
+      .run(graceCutoff);
+    return r1.changes + r2.changes;
   }
 
   /**

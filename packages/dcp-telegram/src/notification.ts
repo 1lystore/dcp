@@ -132,7 +132,9 @@ export function sanitizeAgentName(name: string): string {
  * Escape Markdown special characters for Telegram
  */
 export function escapeMarkdown(text: string): string {
-  return text.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
+  // Escape backslash FIRST (include it in the class) so a literal '\' in input
+  // can't smuggle Telegram MarkdownV2 control sequences past the sanitizer.
+  return text.replace(/[\\_*[\]()~`>#+=|{}.!-]/g, '\\$&');
 }
 
 /**

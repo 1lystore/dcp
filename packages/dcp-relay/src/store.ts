@@ -50,6 +50,7 @@ export class MessageStore {
       rateLimitPerMinute: config.rateLimitPerMinute ?? 60,
       rateLimitWindowMs: config.rateLimitWindowMs ?? 60_000,
       expoPushUrl: config.expoPushUrl ?? 'https://exp.host/--/api/v2/push/send',
+      publicUrl: config.publicUrl ?? '',
     };
 
     // Start cleanup interval
@@ -154,6 +155,17 @@ export class MessageStore {
 
     stored.response = response;
     return true;
+  }
+
+  /**
+   * The vault_id a queued request was destined for. Used to authorize the
+   * HTTP-fallback /relay/respond (the responder must own the target vault).
+   */
+  getVaultIdForRequest(requestId: string): string | undefined {
+    const key = this.requestIdIndex.get(requestId);
+    if (!key) return undefined;
+    const suffix = `:${requestId}`;
+    return key.endsWith(suffix) ? key.slice(0, -suffix.length) : undefined;
   }
 
   /**

@@ -6,7 +6,7 @@
  */
 
 // Server exports
-export { buildServer } from './server/index.js';
+export { buildServer, handleCloudConnectMcp } from './server/index.js';
 
 // CLI is available as a binary (dcp, dcp-vault)
 // Import it directly if needed:

@@ -335,6 +335,51 @@ export interface AgentConnection {
 }
 
 /**
+ * Lifecycle status of a Cloud-Connect link.
+ *  - pending:  issued, not yet redeemed by an agent
+ *  - redeemed: an agent redeemed it; awaiting on-device owner approval
+ *  - consumed: owner approved; the agent is bound (link spent)
+ *  - revoked:  owner denied/revoked
+ *  - expired:  TTL elapsed before redemption
+ */
+export type CloudConnectLinkStatus =
+  | 'pending'
+  | 'redeemed'
+  | 'consumed'
+  | 'revoked'
+  | 'expired';
+
+/**
+ * A Cloud-Connect link record (Cloud Agent Connect feature).
+ * Permissions/budget here are the AUTHORITATIVE copy (the link token carries
+ * none). `source_*` are server-derived facts captured at redemption and shown
+ * in the on-device approval (Rule #6).
+ */
+export interface CloudConnectLink {
+  link_id: string;
+  agent_id: string;
+  name: string;
+  permission_scopes: string[];
+  budget: {
+    daily: number;
+    currency: string;
+    auto_approve_under: number;
+  };
+  status: CloudConnectLinkStatus;
+  /** Match-code shown on both sides after redemption (anti cross-device phishing). */
+  match_code?: string;
+  /** Agent's Ed25519 public key presented at redemption (bound on approval). */
+  redeemer_public_key?: string;
+  source_ip?: string;
+  source_host?: string;
+  created_at: string;
+  expires_at: string;
+  redeemed_at?: string;
+  consumed_at?: string;
+  revoked_at?: string;
+}
+
+/**
  * Signed Pairing Grant (protocol spec section 7.1)
  *
  * Self-describing, signed token for agent pairing.

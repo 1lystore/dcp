@@ -181,6 +181,162 @@ else
 fi
 
 # =============================================================================
+# Test 13: Cloud-Connect — match-code is MANDATORY on approve (Rule #6)
+# =============================================================================
+echo "Test 13: Cloud-Connect approve requires a match code"
+if grep -n "presentedCode\|expectedCode\|constantTimeStrEqual" "${ROOT_DIR}/packages/dcp-vault/src/server/index.ts" > /dev/null 2>&1; then
+  pass "Cloud-Connect approve enforces a mandatory, constant-time match code"
+else
+  fail "Cloud-Connect approve match-code enforcement not found"
+fi
+
+# =============================================================================
+# Test 14: Cloud-Connect — PKCE is S256-only (no plain downgrade)
+# =============================================================================
+echo "Test 14: Relay OAuth PKCE is S256-only"
+if grep -rn "code_challenge_methods_supported" "${ROOT_DIR}/packages/dcp-relay/src/oauth/metadata.ts" | grep -q "S256" && \
+   ! grep -rn "'plain'" "${ROOT_DIR}/packages/dcp-relay/src/oauth/"*.ts > /dev/null 2>&1; then
+  pass "Relay advertises + enforces PKCE S256 only (no plain)"
+else
+  fail "Relay PKCE may allow plain or S256 not enforced"
+fi
+
+# =============================================================================
+# Test 15: Cloud-Connect — access tokens are DPoP + audience bound (Rules #2)
+# =============================================================================
+echo "Test 15: Relay access tokens are DPoP + audience bound"
+if grep -n "cnf" "${ROOT_DIR}/packages/dcp-relay/src/oauth/tokens.ts" | grep -q "jkt" && \
+   grep -qn "setAudience" "${ROOT_DIR}/packages/dcp-relay/src/oauth/tokens.ts"; then
+  pass "Access tokens bind cnf.jkt (DPoP) + audience (RFC 8707)"
+else
+  fail "Access tokens missing DPoP/audience binding"
+fi
+
+# =============================================================================
+# Test 16: Cloud-Connect — DPoP proofs are single-use (jti replay guard)
+# =============================================================================
+echo "Test 16: Relay DPoP proofs have a jti replay guard"
+if grep -qn "dpop_replay\|jtiGuard\|createJtiGuard" "${ROOT_DIR}/packages/dcp-relay/src/oauth/dpop.ts"; then
+  pass "DPoP proofs are single-use (jti replay guard)"
+else
+  fail "DPoP jti replay guard not found"
+fi
+
+# =============================================================================
+# Test 17: Cloud-Connect — refresh tokens rotate with reuse detection (Rule #3)
+# =============================================================================
+echo "Test 17: Refresh tokens rotate with reuse detection"
+if grep -qn "reuse_detected" "${ROOT_DIR}/packages/dcp-relay/src/oauth/store.ts"; then
+  pass "Refresh-token reuse is detected (whole-chain revoke)"
+else
+  fail "Refresh-token reuse detection not found"
+fi
+
+# =============================================================================
+# Test 18: Local agent requests require a mandatory signature (no unsigned bypass)
+# =============================================================================
+echo "Test 18: Local agent identity requires a signature"
+if grep -qn "A signed request (service_signature, timestamp, nonce) is required" "${ROOT_DIR}/packages/dcp-vault/src/server/index.ts"; then
+  pass "agent_/vps_ requests reject missing signatures (no unsigned fallback)"
+else
+  fail "Mandatory local-agent signature check not found"
+fi
+
+# =============================================================================
+# Test 19: Local signed requests have nonce replay protection
+# =============================================================================
+echo "Test 19: Local agent nonce replay protection"
+if grep -qn "markLocalAgentNonce" "${ROOT_DIR}/packages/dcp-vault/src/server/index.ts"; then
+  pass "Local signed requests are single-use (nonce replay guard)"
+else
+  fail "Local-agent nonce replay guard not found"
+fi
+
+# =============================================================================
+# Test 20: Owner registration cannot be silently overwritten
+# =============================================================================
+echo "Test 20: Owner registration guard"
+if grep -qn "Replacing it requires the current owner token or the vault passphrase" "${ROOT_DIR}/packages/dcp-vault/src/server/index.ts"; then
+  pass "desktop/register guards against unauthenticated owner replacement"
+else
+  fail "Owner-registration guard not found"
+fi
+
+# =============================================================================
+# Test 21: Relay binds vault_id to its signing key (anti-hijack)
+# =============================================================================
+echo "Test 21: Relay vault_id <-> key binding"
+if grep -qn "bindOrVerifyVaultKey" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts"; then
+  pass "Relay rejects a different key claiming an existing vault_id"
+else
+  fail "Relay vault_id binding not found"
+fi
+
+# =============================================================================
+# Test 22: Relay HTTP poll/respond require a signed proof of vault ownership
+# =============================================================================
+echo "Test 22: Relay poll/respond authentication"
+if grep -qn "A signed proof of vault ownership is required" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts"; then
+  pass "HTTP-fallback poll/respond require signed vault ownership"
+else
+  fail "Relay poll/respond auth not found"
+fi
+
+# =============================================================================
+# Test 23: Relay WS control messages are bound to the socket's vault
+# =============================================================================
+echo "Test 23: Relay WS control messages bound to vault"
+if grep -qn "fromVaultId !== waiter.vaultId" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts" \
+  && grep -qn "knownOwner && knownOwner !== me" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts" \
+  && grep -qn "revokeAgentAccess(payload.agent_id, me)" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts"; then
+  pass "cloud_connect_result/revoke + pairing_result are bound/scoped to the socket's vault"
+else
+  fail "WS control message vault-binding not found"
+fi
+
+# =============================================================================
+# Test 24: Unauthenticated HTTP pairing-claims resolve route removed
+# =============================================================================
+echo "Test 24: Unauthenticated pairing resolve route removed"
+if ! grep -qn "handlePairingResolve" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts"; then
+  pass "Unauthenticated /v1/pairing-claims/:claimId/resolve route is gone"
+else
+  fail "Unauthenticated pairing resolve handler still present"
+fi
+
+# =============================================================================
+# Test 25: Passphrase re-auth does not corrupt the cached master key
+# =============================================================================
+echo "Test 25: Side-effect-free passphrase verification"
+if grep -qn "verifyPassphrase" "${ROOT_DIR}/packages/dcp-core/src/storage.ts" \
+  && ! grep -qn "zeroize(mk); // verify only — don't keep the key around" "${ROOT_DIR}/packages/dcp-vault/src/server/index.ts"; then
+  pass "Owner re-auth uses verifyPassphrase (no master-key corruption)"
+else
+  fail "Side-effect-free passphrase verification not in place"
+fi
+
+# =============================================================================
+# Test 26: WS unregister can only unregister the socket's own vault
+# =============================================================================
+echo "Test 26: WS unregister vault binding"
+if grep -qn "unregister vault_id mismatch" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts"; then
+  pass "WS unregister rejects evicting another vault's connection"
+else
+  fail "WS unregister vault-binding not found"
+fi
+
+# =============================================================================
+# Test 27: push-token registration requires signed vault ownership
+# =============================================================================
+echo "Test 27: Push-token registration auth"
+if grep -qn "A signed proof of vault ownership is required" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts" \
+  && grep -B6 "A signed proof of vault ownership is required" "${ROOT_DIR}/packages/dcp-relay/src/relay.ts" | grep -qn "verifyVaultProof(request.body"; then
+  pass "push-token register requires a signed proof (no cross-tenant push hijack)"
+else
+  fail "push-token registration auth not found"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 echo ""

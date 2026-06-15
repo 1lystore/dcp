@@ -107,6 +107,13 @@ export interface VaultConfig {
   relay_signing_public_key?: string;
   relay_signing_private_key?: string;
   relay_pairing_token?: string;
+  /**
+   * Cloud-Connect "pairing window" (paste-URL flow): epoch-ms until which the vault
+   * will open on-device approvals for link-less connections. 0/absent = closed.
+   * The owner opens a short window (like Bluetooth pairing); link-less requests
+   * outside it are refused.
+   */
+  cloud_connect_accept_until?: number;
 }
 
 /** Default vault configuration */
@@ -147,6 +154,7 @@ function deepCloneConfig(config: VaultConfig): VaultConfig {
     relay_signing_public_key: config.relay_signing_public_key,
     relay_signing_private_key: config.relay_signing_private_key,
     relay_pairing_token: config.relay_pairing_token,
+    cloud_connect_accept_until: config.cloud_connect_accept_until,
   };
 }
 
@@ -250,6 +258,11 @@ export class BudgetEngine {
   ): void {
     if (amount < 0) {
       throw new VaultError('INTERNAL_ERROR', 'Budget limit cannot be negative');
+    }
+    // Guard against prototype-polluting currency keys (defensive — currency is a
+    // free-form string).
+    if (currency === '__proto__' || currency === 'constructor' || currency === 'prototype') {
+      throw new VaultError('INTERNAL_ERROR', 'Invalid currency');
     }
 
     this.config[type][currency] = amount;

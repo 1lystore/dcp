@@ -138,6 +138,26 @@ export {
   type CreateSessionTokenInput,
 } from './pairing.js';
 
+// Cloud-Connect Links (Cloud Agent Connect — paste-a-URL + OAuth feature)
+export {
+  createConnectLink,
+  decodeConnectLink,
+  verifyConnectLinkWithKey,
+  isConnectLink,
+  hpkeFingerprint,
+  formatFingerprint,
+  generateMatchCode,
+  hashConnectLinkSecret,
+  CONNECT_LINK_PREFIX,
+  DEFAULT_CONNECT_LINK_TTL_MS,
+  CONNECT_LINK_SECRET_BYTES,
+  MATCH_CODE_LENGTH,
+  type ConnectLinkPayload,
+  type EncodedConnectLink,
+  type CreateConnectLinkInput,
+  type CreateConnectLinkResult,
+} from './connect-link.js';
+
 // Re-export Telegram types explicitly for convenience
 export type {
   TelegramConfig,

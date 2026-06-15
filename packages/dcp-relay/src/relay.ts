@@ -21,6 +21,7 @@ import type { FastifyPluginCallback, FastifyPluginOptions, RouteShorthandOptions
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
 import type { WebSocket } from 'ws';
+import { randomUUID } from 'crypto';
 import { ed25519 } from '@noble/curves/ed25519';
 import type {
   RelayConfig,
@@ -45,7 +46,39 @@ import {
   RELAY_VERSION,
 } from './types.js';
 import { MessageStore, ConnectionStore, RateLimiter, PairingClaimStore, MobilePairingStore, PushTokenStore } from './store.js';
-import { authenticateRegistration, authenticateRequest, closeAuth, type AuthConfig } from './auth.js';
+import {
+  authenticateRegistration,
+  authenticateRequest,
+  verifyRegistrationSignature,
+  closeAuth,
+  type AuthConfig,
+} from './auth.js';
+import {
+  initOAuthKeys,
+  authorizationServerMetadata,
+  protectedResourceMetadata,
+  createJtiGuard,
+  ClientStore,
+  AuthSessionStore,
+  RefreshTokenStore,
+  processConnect,
+  processToken,
+  processAuthorize,
+  authorizeStatus,
+  verifyAccessToken,
+  verifyDpopProof,
+  wwwAuthenticateChallenge,
+  type RelayOAuthKeys,
+  type JtiReplayGuard,
+  type VaultConnectBridge,
+  type McpDataBridge,
+  type GrantDeps,
+  type BridgeRedeemInput,
+  type BridgeRedeemResult,
+  type BridgeApprovalInput,
+  type BridgeApprovalResult,
+  type BridgePairingInput,
+} from './oauth/index.js';
 
 // ============================================================================
 // Relay Server
@@ -69,9 +102,61 @@ export class RelayServer {
   /** invite_id -> vault_id mapping (populated when vault registers) */
   private inviteVaultMap: Map<string, string> = new Map();
 
-  constructor(config: Partial<RelayConfig> & { authConfig?: AuthConfig } = {}) {
+  // --- OAuth 2.1 Authorization Server (Cloud-Connect) ---
+  private oauthKeysPromise: Promise<RelayOAuthKeys> | null = null;
+  private oauthClients = new ClientStore();
+  private oauthSessions = new AuthSessionStore();
+  private oauthRefresh = new RefreshTokenStore();
+  private oauthJti: JtiReplayGuard = createJtiGuard();
+  /** Control-plane bridge to the vault that issued a connect-link (WS-backed in prod). */
+  private vaultBridge: VaultConnectBridge;
+  /** Data-plane bridge that forwards authorized MCP requests to the vault. */
+  private mcpBridge: McpDataBridge;
+  /** Instant-revoke denylist of agent ids (kills live access tokens; Rule #7). */
+  private revokedAgents = new Set<string>();
+  /**
+   * Trust-on-first-use binding of vault_id -> signing public key. The first key to
+   * register a vault_id owns it; a DIFFERENT key claiming that id is rejected. This
+   * stops an attacker who knows a vault_id from hijacking its routing or draining the
+   * HTTP-fallback queue. In-memory per relay instance (a restart re-binds on reconnect).
+   */
+  private vaultKeyBindings = new Map<string, { key: string; lastSeen: number }>();
+  private readonly VAULT_BINDING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  /** Pending cloud-connect control requests awaiting a vault reply (control_id -> waiter).
+   *  `vaultId` records which vault the request was sent to, so only THAT vault's socket
+   *  may resolve it (a different vault cannot spoof another's control reply). */
+  private pendingControl = new Map<
+    string,
+    { vaultId: string; resolve: (v: Record<string, unknown>) => void; timer: ReturnType<typeof setTimeout> }
+  >();
+  /** agent_id -> owning vault_id, so cloud_connect_revoke can only revoke own agents. */
+  private agentVault = new Map<string, string>();
+  /** Per-vault timestamps of forwarded link-less pair requests (anti prompt-spam). */
+  private pairRequestTimes = new Map<string, number[]>();
+  private readonly PAIR_REQ_WINDOW_MS = 60_000;
+  private readonly PAIR_REQ_MAX_PER_WINDOW = 5;
+
+  constructor(
+    config: Partial<RelayConfig> & {
+      authConfig?: AuthConfig;
+      vaultBridge?: VaultConnectBridge;
+      mcpBridge?: McpDataBridge;
+    } = {}
+  ) {
     this.config = { ...DEFAULT_RELAY_CONFIG, ...config };
     this.authConfig = config.authConfig ?? { requirePairingToken: false };
+    // Default to the WS-backed bridge (talks to the connected vault over /ws);
+    // tests inject a fake. UnavailableVaultBridge is only a typing fallback.
+    this.vaultBridge =
+      config.vaultBridge ?? {
+        redeem: (input) => this.wsBridgeRedeem(input),
+        approvalStatus: (input) => this.wsBridgeApprovalStatus(input),
+        requestPairing: (input) => this.wsBridgeRequestPairing(input),
+      };
+    // Default to the WS-backed MCP forwarder (vanilla clients: relay terminates
+    // and forwards to the vault over /ws). DCP-aware agents wanting full E2E
+    // blindness use the existing encrypted /relay/request path instead.
+    this.mcpBridge = config.mcpBridge ?? { forward: (req) => this.wsMcpForward(req) };
     this.messageStore = new MessageStore(this.config);
     this.connectionStore = new ConnectionStore();
     this.rateLimiter = new RateLimiter(
@@ -101,6 +186,27 @@ export class RelayServer {
   // --------------------------------------------------------------------------
 
   async start(): Promise<void> {
+    // OAuth 2.1 token/registration/revocation requests are sent as
+    // `application/x-www-form-urlencoded` by standards-compliant clients
+    // (RFC 6749 §4.1.3 / Hermes / Claude.ai / ChatGPT). Fastify only parses JSON
+    // out of the box, so without this a real client's /oauth/token POST fails with
+    // 415 and the whole flow stalls. Parse form bodies into the same plain-object
+    // shape the JSON handlers expect (JSON parsing stays enabled for our own agents).
+    this.server.addContentTypeParser(
+      'application/x-www-form-urlencoded',
+      { parseAs: 'string' },
+      (_req: FastifyRequest, body: string | Buffer, done: (err: Error | null, value?: unknown) => void) => {
+        try {
+          const params = new URLSearchParams(typeof body === 'string' ? body : body.toString('utf8'));
+          const obj: Record<string, string> = {};
+          for (const [k, v] of params) obj[k] = v;
+          done(null, obj);
+        } catch (err) {
+          done(err as Error);
+        }
+      }
+    );
+
     await this.server.register(
       fastifyCors as unknown as FastifyPluginCallback<FastifyPluginOptions>,
       { origin: true }
@@ -139,12 +245,300 @@ export class RelayServer {
     this.clientRequestMap.clear();
     this.clientRequestsBySocket.clear();
 
+    for (const { timer } of this.pendingControl.values()) clearTimeout(timer);
+    this.pendingControl.clear();
+
     this.messageStore.close();
     this.rateLimiter.close();
     this.pairingClaimStore.close();
     this.mobilePairingStore.close();
     closeAuth();
     await this.server.close();
+  }
+
+  // --------------------------------------------------------------------------
+  // OAuth helpers (Cloud-Connect)
+  // --------------------------------------------------------------------------
+
+  /** Lazily initialise + memoize the OAuth signing keys (async, sync constructor). */
+  private getOAuthKeys(): Promise<RelayOAuthKeys> {
+    if (!this.oauthKeysPromise) {
+      this.oauthKeysPromise = initOAuthKeys({
+        privateJwk: process.env.DCP_RELAY_OAUTH_PRIVATE_JWK,
+      });
+    }
+    return this.oauthKeysPromise;
+  }
+
+  // --- Cloud-Connect control channel (relay -> vault over the /ws socket) ---
+
+  /**
+   * Send a cloud-connect control message to a connected vault and await its
+   * correlated reply. Rejects if the vault is offline or does not reply in time.
+   */
+  private sendCloudConnectControl(
+    vaultId: string,
+    type: 'cloud_connect_redeem' | 'cloud_connect_status' | 'cloud_connect_mcp' | 'cloud_connect_pair',
+    payload: Record<string, unknown>,
+    timeoutMs = 10_000
+  ): Promise<Record<string, unknown>> {
+    const sock = this.wsConnections.get(vaultId);
+    if (!sock || sock.readyState !== 1) {
+      return Promise.reject(new Error('vault_offline'));
+    }
+    const controlId = randomUUID();
+    const promise = new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingControl.delete(controlId);
+        reject(new Error('control_timeout'));
+      }, timeoutMs);
+      this.pendingControl.set(controlId, { vaultId, resolve, timer });
+    });
+    const msg: WsMessage = {
+      type,
+      payload: { control_id: controlId, ...payload },
+      timestamp: new Date().toISOString(),
+    };
+    sock.send(JSON.stringify(msg));
+    return promise;
+  }
+
+  /**
+   * Resolve a pending control request when the vault's reply arrives. Only the vault
+   * the request was SENT to may resolve it — a reply from any other vault socket is
+   * ignored (prevents one vault spoofing another's control reply).
+   */
+  private resolveControl(
+    controlId: string,
+    payload: Record<string, unknown>,
+    fromVaultId: string | null
+  ): void {
+    const waiter = this.pendingControl.get(controlId);
+    if (!waiter) return;
+    if (fromVaultId !== waiter.vaultId) return; // not the vault we asked
+    clearTimeout(waiter.timer);
+    this.pendingControl.delete(controlId);
+    waiter.resolve(payload);
+  }
+
+  private async wsBridgeRedeem(input: BridgeRedeemInput): Promise<BridgeRedeemResult> {
+    try {
+      const res = await this.sendCloudConnectControl(input.vaultId, 'cloud_connect_redeem', {
+        connect_link: input.connectLink,
+        redeemer_key: input.redeemerKey,
+        source_ip: input.sourceIp,
+      });
+      const agentId = res.agent_id as string | undefined;
+      if (res.ok && agentId) this.agentVault.set(agentId, input.vaultId);
+      return {
+        ok: Boolean(res.ok),
+        agentId,
+        matchCode: res.match_code as string | undefined,
+        reason: res.reason as string | undefined,
+      };
+    } catch {
+      return { ok: false, reason: 'vault_unreachable' };
+    }
+  }
+
+  /** Link-less pairing (paste-URL flow): ask the vault to open an on-device approval. */
+  private async wsBridgeRequestPairing(input: BridgePairingInput): Promise<BridgeRedeemResult> {
+    // Rate-limit per target vault so an attacker who knows a vault_id can't spam the
+    // owner's device with approval prompts. (The vault also gates on its pairing
+    // window + its own limit; this stops the forwarding flood at the relay.)
+    const now = Date.now();
+    const hits = (this.pairRequestTimes.get(input.vaultId) || []).filter(
+      (t) => now - t < this.PAIR_REQ_WINDOW_MS
+    );
+    if (hits.length >= this.PAIR_REQ_MAX_PER_WINDOW) {
+      return { ok: false, reason: 'rate_limited' };
+    }
+    hits.push(now);
+    this.pairRequestTimes.set(input.vaultId, hits);
+    try {
+      const res = await this.sendCloudConnectControl(input.vaultId, 'cloud_connect_pair', {
+        redeemer_key: input.redeemerKey,
+        source_ip: input.sourceIp,
+        client_name: input.clientName,
+        scope: input.scope,
+      });
+      const agentId = res.agent_id as string | undefined;
+      if (res.ok && agentId) this.agentVault.set(agentId, input.vaultId);
+      return {
+        ok: Boolean(res.ok),
+        agentId,
+        matchCode: res.match_code as string | undefined,
+        reason: res.reason as string | undefined,
+      };
+    } catch {
+      return { ok: false, reason: 'vault_unreachable' };
+    }
+  }
+
+  private async wsBridgeApprovalStatus(input: BridgeApprovalInput): Promise<BridgeApprovalResult> {
+    try {
+      const res = await this.sendCloudConnectControl(input.vaultId, 'cloud_connect_status', {
+        agent_id: input.agentId,
+      });
+      const status = res.status as BridgeApprovalResult['status'];
+      return {
+        status: status || 'unknown',
+        scope: res.scope as string | undefined,
+        budget: res.budget as BridgeApprovalResult['budget'],
+      };
+    } catch {
+      return { status: 'unknown' };
+    }
+  }
+
+  /** Forward an authorized MCP request to the vault over the WS control channel. */
+  private async wsMcpForward(req: {
+    vaultId: string;
+    agentId: string;
+    scope: string;
+    jkt: string;
+    body: unknown;
+  }): Promise<{ status: number; body: unknown }> {
+    try {
+      const res = await this.sendCloudConnectControl(
+        req.vaultId,
+        'cloud_connect_mcp',
+        { agent_id: req.agentId, scope: req.scope, jkt: req.jkt, body: req.body },
+        30_000
+      );
+      const status = typeof res.status === 'number' ? res.status : 200;
+      return { status, body: res.body ?? res };
+    } catch {
+      return {
+        status: 503,
+        body: { error: 'vault_unreachable', error_description: 'The vault did not respond' },
+      };
+    }
+  }
+
+  /**
+   * Bind a vault_id to its signing key on first sight; on later sights require the
+   * SAME key. Returns false if a different key already owns the id (hijack attempt).
+   */
+  private bindOrVerifyVaultKey(vaultId: string, signingKey: string): boolean {
+    const now = Date.now();
+    for (const [k, v] of this.vaultKeyBindings) {
+      if (now - v.lastSeen > this.VAULT_BINDING_TTL_MS) this.vaultKeyBindings.delete(k);
+    }
+    const existing = this.vaultKeyBindings.get(vaultId);
+    if (!existing) {
+      this.vaultKeyBindings.set(vaultId, { key: signingKey, lastSeen: now });
+      return true;
+    }
+    if (existing.key !== signingKey) return false;
+    existing.lastSeen = now;
+    return true;
+  }
+
+  /** True iff `signingKey` is the bound owner of `vaultId`. */
+  private vaultKeyOwner(vaultId: string, signingKey: string): boolean {
+    const e = this.vaultKeyBindings.get(vaultId);
+    return !!e && e.key === signingKey;
+  }
+
+  /**
+   * Verify a registration-style signed proof that the caller owns `vault_id`, for the
+   * unauthenticated HTTP-fallback endpoints (poll/respond). Checks the Ed25519
+   * signature over vault_id||timestamp||nonce (single-use nonce) AND that the signing
+   * key is the bound owner of the vault. Fails closed on anything missing/invalid.
+   */
+  private verifyVaultProof(
+    p: {
+      vault_id?: string;
+      signing_public_key?: string;
+      timestamp?: string;
+      nonce?: string;
+      signature?: string;
+    },
+    mode: 'strict' | 'bind' = 'strict'
+  ): boolean {
+    if (!p.vault_id || !p.signing_public_key || !p.timestamp || !p.nonce || !p.signature) {
+      return false;
+    }
+    try {
+      verifyRegistrationSignature({
+        vault_id: p.vault_id,
+        public_key: '',
+        signing_public_key: p.signing_public_key,
+        timestamp: p.timestamp,
+        nonce: p.nonce,
+        signature: p.signature,
+      } as RegisterPayload);
+    } catch {
+      return false;
+    }
+    // 'strict': the vault must already be bound (via WS registration). 'bind': allow
+    // trust-on-first-use binding (for HTTP-only vaults that register status before WS).
+    return mode === 'bind'
+      ? this.bindOrVerifyVaultKey(p.vault_id, p.signing_public_key)
+      : this.vaultKeyOwner(p.vault_id, p.signing_public_key);
+  }
+
+  private revokedAgentKey(vaultId: string, agentId: string): string {
+    return `${vaultId}\0${agentId}`;
+  }
+
+  private isAgentRevoked(vaultId: string, agentId: string): boolean {
+    return (
+      this.revokedAgents.has(this.revokedAgentKey(vaultId, agentId)) ||
+      // Back-compat for direct test/internal callers that intentionally revoke globally.
+      this.revokedAgents.has(agentId)
+    );
+  }
+
+  /**
+   * Instantly revoke a cloud agent's access (Rule #7): denylist its access tokens
+   * AND kill its refresh-token chains. Called when the vault owner revokes.
+   */
+  revokeAgentAccess(agentId: string, vaultId?: string): void {
+    if (!agentId) return;
+    if (vaultId) {
+      this.revokedAgents.add(this.revokedAgentKey(vaultId, agentId));
+      this.oauthRefresh.revokeByAgent(agentId, vaultId);
+    } else {
+      this.revokedAgents.add(agentId);
+      this.oauthRefresh.revokeByAgent(agentId);
+    }
+  }
+
+  /** Assemble the per-request OAuth grant dependencies. */
+  private async grantDeps(request: FastifyRequest): Promise<GrantDeps> {
+    return {
+      keys: await this.getOAuthKeys(),
+      sessions: this.oauthSessions,
+      refresh: this.oauthRefresh,
+      jtiGuard: this.oauthJti,
+      bridge: this.vaultBridge,
+      issuer: this.baseUrl(request),
+    };
+  }
+
+  /**
+   * Public base URL (OAuth issuer / MCP resource origin). Prefers the configured
+   * publicUrl; otherwise derives from the request (dev/local). No trailing slash.
+   */
+  private baseUrl(request: FastifyRequest): string {
+    if (this.config.publicUrl) return this.config.publicUrl.replace(/\/+$/, '');
+    const proto = (request.headers['x-forwarded-proto'] as string) || request.protocol || 'http';
+    const host = request.headers['host'] || `${this.config.host}:${this.config.port}`;
+    return `${proto}://${host}`;
+  }
+
+  /**
+   * Extract the vault id from an MCP resource URL (`.../v/<vaultId>/mcp`), used by
+   * the link-less paste-URL flow (RFC 8707 `resource` parameter). Returns null if
+   * the string is not a well-formed per-vault MCP resource. Untrusted: the vault is
+   * still the authorization authority (it runs the on-device approval).
+   */
+  private vaultIdFromResource(resource: string | undefined): string | null {
+    if (!resource || typeof resource !== 'string') return null;
+    const m = /\/v\/([A-Za-z0-9_-]{8,})\/mcp\/?$/.exec(resource.trim());
+    return m ? m[1] : null;
   }
 
   // --------------------------------------------------------------------------
@@ -158,6 +552,328 @@ export class RelayServer {
       version: RELAY_VERSION,
       timestamp: new Date().toISOString(),
     }));
+
+    // ----------------------------------------------------------------------
+    // OAuth 2.1 discovery + client management (Cloud-Connect)
+    // ----------------------------------------------------------------------
+
+    // Authorization Server Metadata (RFC 8414).
+    this.server.get('/.well-known/oauth-authorization-server', async (request, reply) => {
+      reply.header('cache-control', 'public, max-age=300');
+      return authorizationServerMetadata({ issuer: this.baseUrl(request) });
+    });
+
+    // Protected Resource Metadata (RFC 9728) for a per-vault MCP resource.
+    this.server.get<{ Params: { vaultId: string } }>(
+      '/.well-known/oauth-protected-resource/v/:vaultId/mcp',
+      async (request, reply) => {
+        const base = this.baseUrl(request);
+        reply.header('cache-control', 'public, max-age=300');
+        return protectedResourceMetadata({
+          resource: `${base}/v/${request.params.vaultId}/mcp`,
+          authorizationServers: [base],
+        });
+      }
+    );
+
+    // JWKS — public verification keys for issued access tokens.
+    this.server.get('/oauth/jwks', async (_request, reply) => {
+      const keys = await this.getOAuthKeys();
+      reply.header('cache-control', 'public, max-age=3600');
+      return keys.jwks();
+    });
+
+    // Dynamic Client Registration (RFC 7591). Public clients only; the real
+    // authorization gate is the on-device approval at the vault (Rule #8).
+    this.server.post<{
+      Body: { client_name?: string; redirect_uris?: string[] };
+    }>('/oauth/register', async (request, reply) => {
+      const body = request.body || {};
+      const client = this.oauthClients.register({
+        client_name: body.client_name,
+        redirect_uris: body.redirect_uris,
+      });
+      reply.status(201);
+      return {
+        client_id: client.client_id,
+        client_name: client.client_name,
+        redirect_uris: client.redirect_uris,
+        token_endpoint_auth_method: 'none',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+      };
+    });
+
+    // Token revocation (RFC 7009). Revokes the refresh-token chain. Always 200.
+    this.server.post<{ Body: { token?: string } }>(
+      '/oauth/revoke',
+      async (request, reply) => {
+        const token = request.body?.token;
+        if (token) {
+          const chain = this.oauthRefresh.chainFor(token);
+          if (chain) this.oauthRefresh.revokeChain(chain);
+        }
+        reply.status(200);
+        return {};
+      }
+    );
+
+    // Device-flow grant: redeem a connect-link (Model B) OR open a link-less pairing
+    // from the MCP `resource` URL (Model A). The agent then polls /oauth/token.
+    this.server.post<{
+      Body: {
+        connect_link?: string;
+        resource?: string;
+        code_challenge?: string;
+        code_challenge_method?: string;
+        client_id?: string;
+        scope?: string;
+      };
+    }>('/oauth/connect', async (request, reply) => {
+      const body = request.body || {};
+      const deps = await this.grantDeps(request);
+      const resourceVaultId = body.connect_link
+        ? null
+        : this.vaultIdFromResource(body.resource);
+      const clientName = body.client_id
+        ? this.oauthClients.get(body.client_id)?.client_name
+        : undefined;
+      const result = await processConnect(deps, {
+        connectLink: body.connect_link || undefined,
+        vaultId: resourceVaultId || undefined,
+        clientName,
+        codeChallenge: body.code_challenge || '',
+        codeChallengeMethod: body.code_challenge_method,
+        dpopProof: (request.headers['dpop'] as string) || '',
+        method: 'POST',
+        url: `${this.baseUrl(request)}/oauth/connect`,
+        sourceIp: request.ip,
+        clientId: body.client_id,
+        scope: body.scope,
+      });
+      reply.status(result.status);
+      return result.body;
+    });
+
+    // Token endpoint: device_code poll + refresh_token rotation. DPoP required.
+    this.server.post<{
+      Body: {
+        grant_type?: string;
+        device_code?: string;
+        code?: string;
+        code_verifier?: string;
+        refresh_token?: string;
+      };
+    }>('/oauth/token', async (request, reply) => {
+      const body = request.body || {};
+      const deps = await this.grantDeps(request);
+      const result = await processToken(deps, {
+        grantType: body.grant_type || '',
+        deviceCode: body.device_code,
+        code: body.code,
+        codeVerifier: body.code_verifier,
+        refreshToken: body.refresh_token,
+        dpopProof: (request.headers['dpop'] as string) || '',
+        method: 'POST',
+        url: `${this.baseUrl(request)}/oauth/token`,
+      });
+      reply.status(result.status);
+      if (result.status === 200) reply.header('cache-control', 'no-store');
+      return result.body;
+    });
+
+    // Browser authorization (Claude.ai / ChatGPT auth-code + PKCE). The user
+    // pastes a DCP connect-link; we redeem it, they approve on-device, then we
+    // redirect to redirect_uri with an authorization code. (DPoP binds at /token.)
+    this.server.get<{
+      Querystring: {
+        resource?: string;
+        code_challenge?: string;
+        code_challenge_method?: string;
+        redirect_uri?: string;
+        state?: string;
+        client_id?: string;
+        connect_link?: string;
+      };
+    }>('/oauth/authorize', async (request, reply) => {
+      const q = request.query;
+      const esc = (s: string | undefined) =>
+        String(s ?? '').replace(/[&<>"']/g, (c) =>
+          ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
+        );
+      const redirectUri = q.redirect_uri || '';
+      // Validate redirect_uri is a well-formed absolute URL before reflecting it.
+      try {
+        if (redirectUri) new URL(redirectUri);
+      } catch {
+        reply.status(400).header('content-type', 'text/html');
+        return '<h1>Invalid redirect_uri</h1>';
+      }
+      reply.header('content-type', 'text/html; charset=utf-8');
+
+      const shell = (inner: string) =>
+        `<!doctype html><html><head><meta charset="utf-8"><title>Connect to DCP</title>` +
+        `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+        `<style>body{font-family:system-ui,sans-serif;max-width:520px;margin:48px auto;padding:0 20px;color:#111}` +
+        `.code{font:700 32px/1.2 monospace;letter-spacing:6px;margin:16px 0}` +
+        `input{width:100%;padding:10px;font:14px monospace;box-sizing:border-box}` +
+        `button{padding:10px 16px;margin-top:12px;font-size:15px;cursor:pointer}.muted{color:#666;font-size:13px}</style>` +
+        `</head><body>${inner}</body></html>`;
+
+      // The universal "paste-URL" flow (Model A): a standard MCP client arrives with
+      // a `resource` pointing at /v/<vaultId>/mcp and no connect-link. We derive the
+      // vault and open an on-device approval directly — no second secret to paste.
+      const resourceVaultId = this.vaultIdFromResource(q.resource);
+
+      // Step 1 — if there's neither a connect-link nor a resolvable vault resource,
+      // fall back to the connect-link form (Model B / hardened pairing).
+      if (!q.connect_link && !resourceVaultId) {
+        return shell(
+          `<h2>Connect a cloud agent to your DCP vault</h2>` +
+            `<p class="muted">Open DCP → Connect → Cloud Agent, generate a connect-link, and paste it here.</p>` +
+            `<form method="GET" action="/oauth/authorize">` +
+            `<input name="connect_link" placeholder="dcp_connect_v1_..." autofocus required>` +
+            `<input type="hidden" name="resource" value="${esc(q.resource)}">` +
+            `<input type="hidden" name="code_challenge" value="${esc(q.code_challenge)}">` +
+            `<input type="hidden" name="code_challenge_method" value="${esc(q.code_challenge_method)}">` +
+            `<input type="hidden" name="redirect_uri" value="${esc(redirectUri)}">` +
+            `<input type="hidden" name="state" value="${esc(q.state)}">` +
+            `<input type="hidden" name="client_id" value="${esc(q.client_id)}">` +
+            `<button type="submit">Continue</button></form>`
+        );
+      }
+
+      // Step 2 — redeem (connect-link) or request pairing (URL) + open a session;
+      // the page polls approval, then redirects.
+      const deps = await this.grantDeps(request);
+      const clientName = q.client_id ? this.oauthClients.get(q.client_id)?.client_name : undefined;
+      const result = await processAuthorize(deps, {
+        connectLink: q.connect_link,
+        vaultId: q.connect_link ? undefined : resourceVaultId || undefined,
+        clientName,
+        codeChallenge: q.code_challenge || '',
+        codeChallengeMethod: q.code_challenge_method,
+        sourceIp: request.ip,
+        clientId: q.client_id,
+      });
+      if (!result.ok) {
+        return shell(`<h2>Could not connect</h2><p class="muted">Error: ${esc(result.error)}.</p>`);
+      }
+
+      const cfg = {
+        sessionId: result.sessionId,
+        redirectUri,
+        state: q.state || '',
+      };
+      return shell(
+        `<h2>Approve on your DCP device</h2>` +
+          `<p class="muted">Confirm this match code matches the one shown on your device, then approve there.</p>` +
+          `<div class="code">${esc(result.matchCode)}</div>` +
+          `<p class="muted" id="s">Waiting for approval…</p>` +
+          `<script>(function(){var c=${JSON.stringify(cfg)};` +
+          `function poll(){fetch('/oauth/authorize/status?session='+encodeURIComponent(c.sessionId))` +
+          `.then(function(r){return r.json()}).then(function(d){` +
+          `if(d.status==='approved'){var u=new URL(c.redirectUri);u.searchParams.set('code',d.code);` +
+          `if(c.state)u.searchParams.set('state',c.state);location.href=u.toString();return;}` +
+          `if(d.status==='denied'||d.status==='expired'){document.getElementById('s').textContent='Connection '+d.status+'.';return;}` +
+          `setTimeout(poll,2000);}).catch(function(){setTimeout(poll,3000)})}poll();})();</script>`
+      );
+    });
+
+    // Browser authorization status poll (used by the /oauth/authorize page).
+    this.server.get<{ Querystring: { session?: string } }>(
+      '/oauth/authorize/status',
+      async (request, reply) => {
+        reply.header('cache-control', 'no-store');
+        if (!request.query.session) return { status: 'unknown' };
+        const deps = await this.grantDeps(request);
+        return authorizeStatus(deps, request.query.session);
+      }
+    );
+
+    // Per-vault MCP resource (Streamable HTTP). Verifies the DPoP-bound,
+    // audience-bound access token, then bridges the MCP request to the vault.
+    this.server.post<{ Params: { vaultId: string }; Body: unknown }>(
+      '/v/:vaultId/mcp',
+      async (request, reply) => {
+        const vaultId = request.params.vaultId;
+        const base = this.baseUrl(request);
+        const resource = `${base}/v/${vaultId}/mcp`;
+        const metadataUrl = `${base}/.well-known/oauth-protected-resource/v/${vaultId}/mcp`;
+        const unauthorized = (error: string, desc: string) => {
+          reply
+            .status(401)
+            .header(
+              'WWW-Authenticate',
+              wwwAuthenticateChallenge({ resourceMetadataUrl: metadataUrl, error, errorDescription: desc })
+            );
+          return { error, error_description: desc };
+        };
+
+        // 1. Accept either a DPoP-scheme or Bearer-scheme access token. DPoP is
+        //    preferred (sender-constrained); Bearer is accepted for clients that
+        //    don't implement DPoP (the current MCP-client reality).
+        const authz = (request.headers['authorization'] as string) || '';
+        const m = /^(DPoP|Bearer) (.+)$/.exec(authz);
+        if (!m) return unauthorized('invalid_token', 'A DPoP or Bearer access token is required');
+        const accessToken = m[2].trim();
+        const proof = (request.headers['dpop'] as string) || '';
+
+        // 2. If a DPoP proof is present, verify it (bound to this request + token)
+        //    to derive the key thumbprint. A DPoP-BOUND token (cnf.jkt) without a
+        //    proof is rejected inside verifyAccessToken (no Bearer downgrade).
+        let jkt: string | undefined;
+        if (proof) {
+          try {
+            const d = await verifyDpopProof(proof, {
+              method: 'POST',
+              url: resource,
+              jtiGuard: this.oauthJti,
+              accessToken,
+            });
+            jkt = d.jkt;
+          } catch {
+            return unauthorized('invalid_token', 'DPoP proof invalid');
+          }
+        }
+
+        // 3. Verify the access token (signature, issuer, audience == this vault).
+        //    When the token is DPoP-bound, this also enforces cnf.jkt === proof key.
+        const keys = await this.getOAuthKeys();
+        let claims;
+        try {
+          claims = await verifyAccessToken({
+            keys,
+            token: accessToken,
+            issuer: base,
+            expectedAudience: resource,
+            expectedJkt: jkt,
+          });
+        } catch {
+          return unauthorized('invalid_token', 'Access token invalid or for a different resource');
+        }
+        if (claims.vault_id !== vaultId) {
+          return unauthorized('invalid_token', 'Token is not valid for this vault');
+        }
+
+        // 4. Instant-revoke denylist (Rule #7).
+        if (this.isAgentRevoked(vaultId, claims.sub)) {
+          return unauthorized('invalid_token', 'Access has been revoked');
+        }
+
+        // 5. Authorized — bridge to the vault. The vault still enforces per-action
+        //    on-device consent for anything sensitive.
+        const result = await this.mcpBridge.forward({
+          vaultId,
+          agentId: claims.sub,
+          scope: claims.scope,
+          jkt: jkt || '',
+          body: request.body,
+        });
+        reply.status(result.status);
+        return result.body as unknown;
+      }
+    );
 
     // Stats (for monitoring)
     this.server.get('/stats', async () => ({
@@ -303,28 +1019,26 @@ export class RelayServer {
       }
     );
 
-    // Vault resolves a pairing claim (approve/deny)
-    this.server.post<{
-      Params: { claimId: string };
-      Body: { action: 'approve' | 'deny'; agent_id?: string; vault_id: string };
-    }>(
-      '/v1/pairing-claims/:claimId/resolve',
-      async (request, reply) => {
-        return this.handlePairingResolve(
-          request.params.claimId,
-          request.body,
-          reply
-        );
-      }
-    );
+    // NOTE: the unauthenticated HTTP "/v1/pairing-claims/:claimId/resolve" route was
+    // removed (#3). Pairing approvals are pushed by the vault over its authenticated
+    // WS control channel (`pairing_result`, bound to the socket's vault), so an
+    // unauthenticated HTTP resolve was both unused and a spoofing vector.
 
-    // Register an invite_id → vault_id mapping (called by vault on invite creation)
+    // Register an invite_id → vault_id mapping (called by vault on invite creation).
+    // Only a vault with a LIVE, authenticated WS connection (vault_id bound to its
+    // key via #6) may register an invite for itself — otherwise anyone could remap
+    // a pairing invite. The legit vault is always WS-connected when it does this.
     this.server.post<{ Body: { invite_id: string; vault_id: string } }>(
       '/v1/invites/register',
       async (request, reply) => {
         const { invite_id, vault_id } = request.body;
         if (!invite_id || !vault_id) {
           return reply.status(400).send({ error: 'Missing invite_id or vault_id' });
+        }
+        if (!this.wsConnections.has(vault_id)) {
+          return reply
+            .status(401)
+            .send({ error: 'vault_id is not connected; invite registration requires an authenticated vault connection' });
         }
         this.inviteVaultMap.set(invite_id, vault_id);
         return reply.send({ success: true });
@@ -413,12 +1127,29 @@ export class RelayServer {
 
     this.server.post<{
       Params: { vaultId: string };
-      Body: { public_key: string; signing_public_key?: string };
+      Body: {
+        public_key: string;
+        signing_public_key?: string;
+        timestamp?: string;
+        nonce?: string;
+        signature?: string;
+      };
     }>(
       '/v1/mobile/vaults/:vaultId/online',
       async (request, reply) => {
         if (!request.body?.public_key) {
           return reply.status(400).send({ error: 'Missing public_key' });
+        }
+        // Require a signed proof that the caller owns this vault_id (anti-spoof).
+        // TOFU bind: an HTTP-only (mobile) vault may register status before any WS.
+        const ok = this.verifyVaultProof(
+          { vault_id: request.params.vaultId, ...request.body },
+          'bind'
+        );
+        if (!ok) {
+          return reply
+            .status(401)
+            .send({ error: 'A signed proof of vault ownership is required' });
         }
         this.connectionStore.register(request.params.vaultId, request.body.public_key);
         return reply.send({ success: true, vault_id: request.params.vaultId });
@@ -431,6 +1162,10 @@ export class RelayServer {
         token: string;
         platform?: 'ios' | 'android' | 'web' | 'unknown';
         device_id?: string;
+        signing_public_key?: string;
+        timestamp?: string;
+        nonce?: string;
+        signature?: string;
       };
     }>(
       '/v1/devices/push-token',
@@ -441,6 +1176,14 @@ export class RelayServer {
         }
         if (!this.isExpoPushToken(token)) {
           return reply.status(400).send({ error: 'Unsupported push token format' });
+        }
+        // Only the vault owner may (over)write its push token — otherwise an attacker
+        // who knows a vault_id could redirect the victim's approval pushes to their
+        // own device (approval phishing + notification DoS). Signed proof required.
+        if (!this.verifyVaultProof(request.body, 'bind')) {
+          return reply
+            .status(401)
+            .send({ error: 'A signed proof of vault ownership is required' });
         }
 
         const record = this.pushTokenStore.register({
@@ -604,6 +1347,15 @@ export class RelayServer {
     req: LongPollRequest,
     reply: FastifyReply
   ): Promise<unknown> {
+    // The HTTP-fallback poll exposes a vault's queued (encrypted) messages and marks
+    // them delivered, so it MUST prove ownership of the vault — otherwise anyone who
+    // knows a vault_id could drain the queue. Same signed scheme as registration.
+    if (!this.verifyVaultProof(req)) {
+      return reply
+        .status(401)
+        .send(new RelayError('RELAY_UNAUTHORIZED', 'A signed proof of vault ownership is required').toJSON());
+    }
+
     const timeoutMs = Math.min(req.timeout_ms ?? 30000, 60000);
     const startTime = Date.now();
 
@@ -639,6 +1391,21 @@ export class RelayServer {
     response: RelayResponseEnvelope,
     reply: FastifyReply
   ): Promise<unknown> {
+    // Only the vault the request was destined for may post its response — otherwise
+    // an attacker could race a bogus response for any known request_id. Require a
+    // signed proof of vault ownership AND that the request actually targets that vault.
+    if (!this.verifyVaultProof(response)) {
+      return reply
+        .status(401)
+        .send(new RelayError('RELAY_UNAUTHORIZED', 'A signed proof of vault ownership is required').toJSON());
+    }
+    const targetVault = this.messageStore.getVaultIdForRequest(response.request_id);
+    if (!targetVault || targetVault !== response.vault_id) {
+      return reply
+        .status(403)
+        .send(new RelayError('RELAY_UNAUTHORIZED', 'Not the owner of this request').toJSON());
+    }
+
     const stored = this.messageStore.storeResponse(response.request_id, response);
     if (!stored) {
       return reply.status(404).send(
@@ -786,46 +1553,6 @@ export class RelayServer {
     } satisfies PairingApprovalStatus);
   }
 
-  /**
-   * Handle pairing resolution from vault (approve/deny)
-   */
-  private async handlePairingResolve(
-    claimId: string,
-    body: { action: 'approve' | 'deny'; agent_id?: string; vault_id: string },
-    reply: FastifyReply
-  ): Promise<unknown> {
-    const { action, agent_id, vault_id } = body;
-
-    const claim = this.pairingClaimStore.getClaim(claimId);
-    if (!claim) {
-      return reply.status(404).send({ error: 'Claim not found' });
-    }
-
-    // Verify vault_id matches
-    if (claim.vault_id && claim.vault_id !== vault_id) {
-      return reply.status(403).send({ error: 'Vault ID mismatch' });
-    }
-
-    // Update claim status
-    const status = action === 'approve' ? 'approved' : 'denied';
-    const updated = this.pairingClaimStore.updateClaimStatus(claimId, status, agent_id);
-
-    if (!updated) {
-      return reply.status(500).send({ error: 'Failed to update claim status' });
-    }
-
-    if (this.config.debug) {
-      console.log(`Pairing claim ${claimId} ${status} by vault ${vault_id}`);
-    }
-
-    return reply.send({
-      success: true,
-      claim_id: claimId,
-      status,
-      agent_id,
-    });
-  }
-
   private async handleMobilePairingApprove(
     inviteId: string,
     body: MobilePairingApprovalRequest,
@@ -895,9 +1622,14 @@ export class RelayServer {
       ws.on('message', (data: Buffer | string) => {
         try {
           const msg: WsMessage = JSON.parse(data.toString());
-          this.handleWsMessage(ws, msg, (id) => {
-            vaultId = id;
-          });
+          this.handleWsMessage(
+            ws,
+            msg,
+            (id) => {
+              vaultId = id;
+            },
+            () => vaultId
+          );
         } catch (err) {
           this.sendWsError(ws, 'RELAY_INVALID_ENVELOPE', 'Invalid message format');
         }
@@ -950,7 +1682,8 @@ export class RelayServer {
   private handleWsMessage(
     ws: WebSocket,
     msg: WsMessage,
-    setVaultId: (id: string) => void
+    setVaultId: (id: string) => void,
+    getVaultId: () => string | null
   ): void {
     switch (msg.type) {
       case 'register': {
@@ -975,6 +1708,17 @@ export class RelayServer {
           } else {
             this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'Authentication failed');
           }
+          return;
+        }
+
+        // Bind vault_id to this signing key (TOFU). A different key claiming an
+        // already-bound vault_id is a hijack attempt and is rejected.
+        if (!this.bindOrVerifyVaultKey(payload.vault_id, payload.signing_public_key)) {
+          this.sendWsError(
+            ws,
+            'RELAY_UNAUTHORIZED',
+            'vault_id is already registered to a different key'
+          );
           return;
         }
 
@@ -1046,7 +1790,17 @@ export class RelayServer {
           return;
         }
 
-        this.messageStore.storeResponse(response.request_id, response);
+        const targetVault = this.messageStore.getVaultIdForRequest(response.request_id);
+        if (!targetVault || targetVault !== getVaultId()) {
+          this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'Not the owner of this request');
+          return;
+        }
+
+        const stored = this.messageStore.storeResponse(response.request_id, response);
+        if (!stored) {
+          this.sendWsError(ws, 'RELAY_TIMEOUT', 'Original request not found or expired');
+          return;
+        }
         this.notifyClientResponse(response);
 
         // Send ack
@@ -1060,12 +1814,18 @@ export class RelayServer {
       }
 
       case 'unregister': {
+        // A socket may only unregister ITSELF — not evict another vault's live
+        // connection. Without this, anyone could open /ws and unregister any vault
+        // by id (cross-tenant takedown of an online vault).
         const payload = msg.payload as { vault_id: string };
-        if (payload.vault_id) {
-          this.connectionStore.unregister(payload.vault_id);
-          this.wsConnections.delete(payload.vault_id);
-          setVaultId('');
+        const me = getVaultId();
+        if (!payload.vault_id || !me || payload.vault_id !== me) {
+          this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'unregister vault_id mismatch');
+          return;
         }
+        this.connectionStore.unregister(payload.vault_id);
+        this.wsConnections.delete(payload.vault_id);
+        setVaultId('');
         break;
       }
 
@@ -1080,6 +1840,18 @@ export class RelayServer {
 
         if (!payload.claim_id || !payload.action || !payload.vault_id) {
           this.sendWsError(ws, 'RELAY_INVALID_ENVELOPE', 'Invalid pairing_result payload');
+          return;
+        }
+
+        // The socket must be the registered vault it claims to be, and may only
+        // resolve a claim that targets ITS vault.
+        if (getVaultId() !== payload.vault_id) {
+          this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'pairing_result vault_id mismatch');
+          return;
+        }
+        const claimVault = this.pairingClaimStore.getClaim(payload.claim_id)?.vault_id;
+        if (claimVault && claimVault !== payload.vault_id) {
+          this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'claim does not belong to this vault');
           return;
         }
 
@@ -1104,6 +1876,35 @@ export class RelayServer {
         if (this.config.debug && updated) {
           console.log(`Pairing claim ${payload.claim_id} ${status} via WebSocket`);
         }
+        break;
+      }
+
+      case 'cloud_connect_result': {
+        // Vault's reply to a cloud-connect redeem/status control message. Only the
+        // vault the request was sent to may resolve it (checked in resolveControl).
+        const payload = (msg.payload || {}) as { control_id?: string };
+        if (payload.control_id) {
+          this.resolveControl(payload.control_id, msg.payload as Record<string, unknown>, getVaultId());
+        }
+        break;
+      }
+
+      case 'cloud_connect_revoke': {
+        // Vault instructing the relay to instantly revoke a cloud agent (Rule #7).
+        // A vault may only revoke agents that belong to IT.
+        const payload = (msg.payload || {}) as { agent_id?: string; vault_id?: string };
+        const me = getVaultId();
+        if (!payload.agent_id || !me) return;
+        if (payload.vault_id && payload.vault_id !== me) {
+          this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'cloud_connect_revoke vault_id mismatch');
+          return;
+        }
+        const knownOwner = this.agentVault.get(payload.agent_id);
+        if (knownOwner && knownOwner !== me) {
+          this.sendWsError(ws, 'RELAY_UNAUTHORIZED', 'agent does not belong to this vault');
+          return;
+        }
+        this.revokeAgentAccess(payload.agent_id, me);
         break;
       }
 

@@ -91,6 +91,20 @@ For OpenClaw, start a fresh chat/session. For Hermes, run:
 /reload-mcp
 ```
 
+### Cloud Agent (paste a link)
+
+For agents you do not host — Claude.ai, ChatGPT, or hosted OpenClaw/Hermes — there is nothing to
+install. In DCP Desktop, generate a connect link and paste it into the agent:
+
+```text
+dcp_connect_v1_...
+```
+
+The link is **single-use**, expires in ~10 minutes, and carries **no permissions**. It pins your
+vault's public key so the relay cannot impersonate your vault. The agent reaches your on-device
+vault through the DCP relay (an end-to-end-encrypted MCP facade), and **you approve the connection
+on your device** before anything is granted. Scopes, budgets, and revocation stay in your vault.
+
 ### CLI
 
 Use the CLI to create and manage vault data:
