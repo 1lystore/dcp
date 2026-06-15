@@ -13,6 +13,7 @@
  * Pure logic: returns { status, body }. The HTTP layer just (de)serializes.
  */
 
+import { stripTrailingSlashes } from '../safe-url.js';
 import type { RelayOAuthKeys } from './keys.js';
 import type { AuthSessionStore, RefreshTokenStore } from './store.js';
 import type { JtiReplayGuard } from './dpop.js';
@@ -48,7 +49,7 @@ const oauthError = (status: number, error: string, description?: string): GrantR
 });
 
 function resourceFor(issuer: string, vaultId: string): string {
-  return `${issuer.replace(/\/+$/, '')}/v/${vaultId}/mcp`;
+  return `${stripTrailingSlashes(issuer)}/v/${vaultId}/mcp`;
 }
 
 /** Call the optional link-less pairing bridge, normalising "not wired" to an error. */

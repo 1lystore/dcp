@@ -31,6 +31,7 @@
 
 import Fastify, { FastifyInstance, FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
+import rateLimit from '@fastify/rate-limit';
 import {
   VaultStorage,
   BudgetEngine,
@@ -1104,6 +1105,14 @@ async function buildServer(): Promise<FastifyInstance> {
       return cb(new Error('Not allowed by CORS'), false);
     },
     methods: ['GET', 'POST', 'DELETE', 'PATCH'],
+  });
+
+  // Global rate limit. The vault server binds to localhost, but this is cheap
+  // defense-in-depth against a runaway/compromised local agent hammering routes.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await server.register(rateLimit as any, {
+    max: 600,
+    timeWindow: '1 minute',
   });
 
   // Initialize vault storage (respects VAULT_DIR env for testing)

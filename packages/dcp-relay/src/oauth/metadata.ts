@@ -8,6 +8,8 @@
  * DPoP, and bearer methods. No implicit/password/plain — OAuth 2.1 hardening.
  */
 
+import { stripTrailingSlashes } from '../safe-url.js';
+
 export interface AsMetadataOptions {
   /** Public base URL of the relay (the OAuth issuer), e.g. https://relay.example. No trailing slash. */
   issuer: string;
@@ -15,7 +17,7 @@ export interface AsMetadataOptions {
 }
 
 export function authorizationServerMetadata(opts: AsMetadataOptions): Record<string, unknown> {
-  const base = opts.issuer.replace(/\/+$/, '');
+  const base = stripTrailingSlashes(opts.issuer);
   return {
     issuer: base,
     authorization_endpoint: `${base}/oauth/authorize`,

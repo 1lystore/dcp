@@ -20,6 +20,8 @@ import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import type { FastifyPluginCallback, FastifyPluginOptions, RouteShorthandOptions } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
+import fastifyRateLimit from '@fastify/rate-limit';
+import { stripTrailingSlashes, jsonForScript } from './safe-url.js';
 import type { WebSocket } from 'ws';
 import { randomUUID } from 'crypto';
 import { ed25519 } from '@noble/curves/ed25519';
@@ -210,6 +212,12 @@ export class RelayServer {
     await this.server.register(
       fastifyCors as unknown as FastifyPluginCallback<FastifyPluginOptions>,
       { origin: true }
+    );
+    // Global rate limit on the public HTTP surface (defense-in-depth; the WS
+    // control channel and per-route guards still apply).
+    await this.server.register(
+      fastifyRateLimit as unknown as FastifyPluginCallback<FastifyPluginOptions>,
+      { max: 300, timeWindow: '1 minute' }
     );
     await this.server.register(
       fastifyWebsocket as unknown as FastifyPluginCallback<FastifyPluginOptions>
@@ -523,7 +531,7 @@ export class RelayServer {
    * publicUrl; otherwise derives from the request (dev/local). No trailing slash.
    */
   private baseUrl(request: FastifyRequest): string {
-    if (this.config.publicUrl) return this.config.publicUrl.replace(/\/+$/, '');
+    if (this.config.publicUrl) return stripTrailingSlashes(this.config.publicUrl);
     const proto = (request.headers['x-forwarded-proto'] as string) || request.protocol || 'http';
     const host = request.headers['host'] || `${this.config.host}:${this.config.port}`;
     return `${proto}://${host}`;
@@ -770,7 +778,7 @@ export class RelayServer {
           `<p class="muted">Confirm this match code matches the one shown on your device, then approve there.</p>` +
           `<div class="code">${esc(result.matchCode)}</div>` +
           `<p class="muted" id="s">Waiting for approval…</p>` +
-          `<script>(function(){var c=${JSON.stringify(cfg)};` +
+          `<script>(function(){var c=${jsonForScript(cfg)};` +
           `function poll(){fetch('/oauth/authorize/status?session='+encodeURIComponent(c.sessionId))` +
           `.then(function(r){return r.json()}).then(function(d){` +
           `if(d.status==='approved'){var u=new URL(c.redirectUri);u.searchParams.set('code',d.code);` +
