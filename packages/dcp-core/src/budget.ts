@@ -259,6 +259,11 @@ export class BudgetEngine {
     if (amount < 0) {
       throw new VaultError('INTERNAL_ERROR', 'Budget limit cannot be negative');
     }
+    // Guard against prototype-polluting currency keys (defensive — currency is a
+    // free-form string).
+    if (currency === '__proto__' || currency === 'constructor' || currency === 'prototype') {
+      throw new VaultError('INTERNAL_ERROR', 'Invalid currency');
+    }
 
     this.config[type][currency] = amount;
     this.saveConfig();
