@@ -6,6 +6,31 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## Unreleased
 
+## 3.0.0 — 2026-06-15
+
+Major, lockstep release of all published `@dcprotocol/*` packages (`core`, `vault`,
+`agent`, `client`, `relay`, `relay-client`) to a single `3.0.0`. The version jump
+realigns published npm content with the current source — earlier `2.0.x` npm
+artifacts had drifted from the repo (same numbers, stale content), which could
+leave downloaded apps calling symbols that were not in the published build.
+
+### Added
+- `core`: agent connection display-name update support (`updateAgentConnection({ name })`)
+  and the vault `PATCH` agent endpoint accepts an optional `name` (display-only rename).
+
+### Fixed
+- `core`: keychain master-key storage now deletes any existing entry before writing,
+  so a vault recreated at the same path can never inherit a stale key (prevents a
+  class of recovery-phrase mismatches).
+- `core`/`vault`: owner-mode reads (the desktop reading its own data) no longer
+  pollute the audit log as agent activity.
+
+### Migration notes
+- Bump all `@dcprotocol/*` dependencies to `^3.0.0` together; mixing `2.x` and `3.x`
+  across these packages is unsupported.
+- No API removals. Code written against `2.x` continues to work; the major bump
+  reflects the lockstep republish, not breaking signatures.
+
 ## 2.0.4 — 2026-05-20
 
 ### Fixed

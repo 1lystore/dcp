@@ -115,6 +115,38 @@ remote VPS
 
 The relay routes encrypted data. It is not supposed to see plaintext secrets, transaction payloads, private keys, or credential values.
 
+## Cloud Connect Path
+
+For agents you do not host (Claude.ai, ChatGPT, or hosted OpenClaw/Hermes), there is no
+sidecar to install. Instead the vault issues a one-time **connect link** that the user pastes
+into the cloud agent, and the relay exposes an **MCP facade** the agent speaks to directly.
+
+```text
+cloud agent (Claude.ai / ChatGPT / hosted)
+┌────────────────────────┐
+│ paste: dcp_connect_v1_… │  one-time, ≤10 min, key-pinned, no authority
+└───────────┬────────────┘
+            │ MCP over HTTPS (OAuth)
+            ▼
+┌────────────────────────┐     encrypted envelopes      ┌────────────────────┐
+│ dcp-relay (MCP facade   │ ───────────────────────────▶ │ local DCP vault     │
+│ + OAuth bridge)         │ ◀─────────────────────────── │ Desktop approves    │
+└────────────────────────┘                              └────────────────────┘
+```
+
+Trust model (see `packages/dcp-core/src/connect-link.ts`):
+
+- The link **pins the vault's HPKE public key + fingerprint** (out-of-band trust anchor), so a
+  hostile relay cannot MITM the end-to-end channel.
+- The link is **single-use and short-lived** — a bootstrap only, never a standing credential. It
+  is exchanged for a vault-issued session token **only after the user approves on-device**.
+- The link carries **no permission authority**. Scopes, budgets, and revocation live only in the
+  vault policy DB; the embedded `agent_name` is for display.
+- The payload is Ed25519-signed by the vault so the pinned key and identifiers are tamper-evident.
+
+As with the VPS path, the relay routes encrypted envelopes only — it does not see plaintext
+secrets, transaction payloads, private keys, or credential values.
+
 ## Telegram Approval Path
 
 Telegram is a second approval surface, not a vault.

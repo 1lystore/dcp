@@ -1,8 +1,13 @@
 # @dcprotocol/relay
 
-Encrypted relay for DCP remote agents.
+Encrypted relay for DCP remote and cloud agents.
 
-The relay moves encrypted envelopes between a remote sidecar and a local vault. It is transport. Secrets do not belong in relay logs or relay payload metadata.
+The relay moves encrypted envelopes between an agent and a local vault. It is transport. Secrets do not belong in relay logs or relay payload metadata.
+
+It serves two paths:
+
+- **Remote/VPS sidecar** — a `dcp-agent` sidecar on a server forwards encrypted envelopes through the relay to the on-device vault.
+- **Cloud Connect MCP facade** — for agents you do not host (Claude.ai, ChatGPT, hosted OpenClaw/Hermes), the relay exposes an MCP endpoint with an OAuth bridge. The agent connects using a one-time, key-pinned connect link (`dcp_connect_v1_…`) the user pastes in; the relay carries end-to-end-encrypted requests to the vault, which approves on-device. The relay never sees plaintext — see [`ARCHITECTURE.md`](../../ARCHITECTURE.md) → Cloud Connect Path.
 
 ## Run
 

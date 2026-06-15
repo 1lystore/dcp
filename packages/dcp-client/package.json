@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/client",
-  "version": "2.0.1",
+  "version": "3.0.0",
   "description": "Internal runtime client for DCP agent and vault packages",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -47,7 +47,7 @@
   "author": "DCP Protocol",
   "license": "Apache-2.0",
   "dependencies": {
-    "@dcprotocol/core": "^2.0.0",
+    "@dcprotocol/core": "^3.0.0",
     "@hpke/core": "^1.6.0",
     "@hpke/chacha20poly1305": "^1.6.0",
     "@hpke/dhkem-x25519": "^1.6.0",

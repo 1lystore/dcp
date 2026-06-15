@@ -797,7 +797,18 @@ export class VaultStorage {
         version: '2.0', // Version 2.0 = AEAD encryption
       });
 
-      await kt.setPassword(KEYCHAIN_SERVICE, this.getKeychainAccount(), data);
+      // Delete any existing entry first, then write. The keychain account is
+      // derived from the vault path, so a vault recreated at the same path must
+      // NOT inherit a previous vault's key. A plain setPassword should overwrite,
+      // but deleting first guarantees the freshly stored key is the only one —
+      // otherwise a stale key can silently survive and break recovery.
+      const account = this.getKeychainAccount();
+      try {
+        await kt.deletePassword(KEYCHAIN_SERVICE, account);
+      } catch {
+        // No prior entry (or delete unsupported) — fine, we're about to set it.
+      }
+      await kt.setPassword(KEYCHAIN_SERVICE, account, data);
       return true;
     } catch {
       // Keychain not available (CI, headless system, etc.)
@@ -2241,6 +2252,7 @@ export class VaultStorage {
   updateAgentConnection(
     agentId: string,
     updates: {
+      name?: string;
       permission_scopes?: string[];
       budget_daily?: number;
       budget_currency?: string;
@@ -2257,6 +2269,11 @@ export class VaultStorage {
     const setClauses: string[] = [];
     const values: (string | number)[] = [];
 
+    // Display name is cosmetic only — connections key on agent_id, so renaming is safe.
+    if (updates.name !== undefined) {
+      setClauses.push('name = ?');
+      values.push(updates.name);
+    }
     if (updates.permission_scopes !== undefined) {
       setClauses.push('permission_scopes = ?');
       values.push(JSON.stringify(updates.permission_scopes));

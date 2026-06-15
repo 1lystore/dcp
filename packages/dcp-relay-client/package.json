@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/relay-client",
-  "version": "2.0.1",
+  "version": "3.0.0",
   "description": "Internal relay client for DCP vault transport packages",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -45,7 +45,7 @@
   "author": "DCP Protocol",
   "license": "Apache-2.0",
   "dependencies": {
-    "@dcprotocol/relay": "^2.0.1",
+    "@dcprotocol/relay": "^3.0.0",
     "@hpke/core": "^1.6.0",
     "@hpke/chacha20poly1305": "^1.6.0",
     "@hpke/dhkem-x25519": "^1.6.0",

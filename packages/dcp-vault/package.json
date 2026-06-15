@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/vault",
-  "version": "2.0.2",
+  "version": "3.0.0",
   "description": "DCP - Local vault runtime with CLI and server",
   "type": "module",
   "main": "./dist/index.js",
@@ -28,9 +28,9 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@dcprotocol/client": "^2.0.1",
-    "@dcprotocol/core": "^2.0.0",
-    "@dcprotocol/relay-client": "^2.0.0",
+    "@dcprotocol/client": "^3.0.0",
+    "@dcprotocol/core": "^3.0.0",
+    "@dcprotocol/relay-client": "^3.0.0",
     "@fastify/cors": "^10.0.2",
     "@fastify/rate-limit": "^10.0.0",
     "@fastify/websocket": "^11.0.0",

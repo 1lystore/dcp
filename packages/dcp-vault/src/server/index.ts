@@ -2724,6 +2724,7 @@ async function buildServer(): Promise<FastifyInstance> {
   server.patch<{
     Params: { id: string };
     Body: {
+      name?: string;
       permission_scopes?: string[];
       budget?: {
         daily?: number;
@@ -2764,6 +2765,20 @@ async function buildServer(): Promise<FastifyInstance> {
       });
     }
 
+    // Validate name if provided (display-only rename; safe since connections key on agent_id)
+    let trimmedName: string | undefined;
+    if (body.name !== undefined) {
+      if (typeof body.name !== 'string' || body.name.trim().length === 0) {
+        return reply.status(400).send({
+          error: {
+            code: 'INVALID_REQUEST',
+            message: 'name must be a non-empty string',
+          },
+        });
+      }
+      trimmedName = body.name.trim().slice(0, 80);
+    }
+
     // Validate permission_scopes if provided
     if (body.permission_scopes !== undefined) {
       if (!Array.isArray(body.permission_scopes)) {
@@ -2789,12 +2804,16 @@ async function buildServer(): Promise<FastifyInstance> {
 
     // Build updates object
     const updates: {
+      name?: string;
       permission_scopes?: string[];
       budget_daily?: number;
       budget_currency?: string;
       budget_auto_approve_under?: number;
     } = {};
 
+    if (trimmedName !== undefined) {
+      updates.name = trimmedName;
+    }
     if (body.permission_scopes !== undefined) {
       // Normalize scopes to ensure they have proper read:/sign: prefix
       updates.permission_scopes = normalizePermissionScopes(
@@ -4057,11 +4076,15 @@ async function buildServer(): Promise<FastifyInstance> {
     // Decrypt if it's not a CRITICAL item
     if (record.sensitivity === 'critical') {
       // Don't return critical data - return reference only
-      storage.logAudit('READ', 'success', {
-        agentName: agent_name,
-        scope,
-        operation: 'read_reference',
-      });
+      // Owner-mode reads (the desktop app reading your own data, e.g. for the
+      // greeting) are not "activity" — don't pollute the audit log with them.
+      if (!ownerMode) {
+        storage.logAudit('READ', 'success', {
+          agentName: agent_name,
+          scope,
+          operation: 'read_reference',
+        });
+      }
 
       return {
         scope,
@@ -4081,11 +4104,14 @@ async function buildServer(): Promise<FastifyInstance> {
     const decrypted = envelopeDecrypt(payload, masterKey);
     const data = JSON.parse(decrypted.toString('utf-8'));
 
-    storage.logAudit('READ', 'success', {
-      agentName: agent_name,
-      scope,
-      operation: 'read_data',
-    });
+    // Skip owner-mode reads (the app reading your own data) — not real activity.
+    if (!ownerMode) {
+      storage.logAudit('READ', 'success', {
+        agentName: agent_name,
+        scope,
+        operation: 'read_data',
+      });
+    }
 
     return {
       scope,
