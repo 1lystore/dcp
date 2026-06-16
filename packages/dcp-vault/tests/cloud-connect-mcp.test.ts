@@ -131,6 +131,21 @@ describe('Cloud-Connect vault MCP handler', () => {
     const names = (list.body as any).result.tools.map((t: { name: string }) => t.name);
     expect(names).toContain('vault_get_address');
     expect(names).toContain('vault_sign_tx');
+    // Parity with the local agent: the scope guide must be advertised, not just callable.
+    expect(names).toContain('vault_scope_guide');
+  });
+
+  it('advertises vault_scope_guide and returns the canonical scope names', async () => {
+    const res = await handleCloudConnectMcp(server, agentId, {
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'tools/call',
+      params: { name: 'vault_scope_guide', arguments: {} },
+    });
+    const text = (res.body as any).result.content[0].text as string;
+    expect(text).toContain('identity.name');
+    expect(text).toContain('identity.email');
+    expect((res.body as any).result.isError).toBeFalsy();
   });
 
   it('forwards a read-only tool (vault_get_address) to the vault', async () => {
@@ -145,6 +160,161 @@ describe('Cloud-Connect vault MCP handler', () => {
     expect(text.length).toBeGreaterThan(0);
     expect((res.body as any).result.isError).toBeFalsy();
   });
+
+  it('records activity (last_seen + request_count) on each cloud-connect tool call', async () => {
+    const before = await server.inject({ method: 'GET', url: '/v1/agent-connections', headers: owner() });
+    const beforeAgent = JSON.parse(before.body).agents.find((a: any) => a.agent_id === agentId);
+    const beforeCount = beforeAgent?.request_count ?? 0;
+
+    await handleCloudConnectMcp(server, agentId, {
+      jsonrpc: '2.0',
+      id: 31,
+      method: 'tools/call',
+      params: { name: 'vault_get_address', arguments: { chain: 'solana' } },
+    });
+
+    const after = await server.inject({ method: 'GET', url: '/v1/agent-connections', headers: owner() });
+    const afterAgent = JSON.parse(after.body).agents.find((a: any) => a.agent_id === agentId);
+    expect(afterAgent.request_count).toBe(beforeCount + 1);
+    expect(afterAgent.last_seen_at).toBeTruthy();
+  });
+
+  it('one-go consent: approving mid-call resumes and returns data (no "try again")', async () => {
+    // Owner stores a value the agent will read.
+    await server.inject({
+      method: 'POST',
+      url: '/v1/vault/write',
+      headers: owner(),
+      payload: { scope: 'identity.name', data: { full: 'Ada Lovelace' }, agent_name: 'desktop-ui' },
+    });
+
+    // Start a consent-gated read. The handler creates a pending consent, then
+    // polls in-process for the approval (it must NOT return the gate immediately).
+    const callP = handleCloudConnectMcp(server, agentId, {
+      jsonrpc: '2.0',
+      id: 70,
+      method: 'tools/call',
+      params: { name: 'vault_read', arguments: { scope: 'identity.name' } },
+    });
+
+    // Find the pending consent and approve it mid-call.
+    let consentId: string | undefined;
+    for (let i = 0; i < 150 && !consentId; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      const list = JSON.parse(
+        (await server.inject({ method: 'GET', url: '/consent', headers: owner() })).body
+      );
+      consentId = (list.pending || []).find(
+        (c: any) => c.scope === 'identity.name' && c.status === 'pending'
+      )?.id;
+    }
+    expect(consentId).toBeTruthy();
+    await server.inject({
+      method: 'POST',
+      url: `/consent/${consentId}/approve`,
+      headers: owner(),
+      payload: {},
+    });
+
+    // The single MCP call resolves with the DATA — not a "requires_consent" gate.
+    const res = await callP;
+    const text = (res.body as any).result.content[0].text as string;
+    expect(text).not.toContain('requires_consent');
+    expect(text).toContain('Ada Lovelace');
+    expect((res.body as any).result.isError).toBeFalsy();
+  }, 20000);
+
+  it('auto-approve: a pre-authorized scope reads in one call with NO consent prompt', async () => {
+    await server.inject({
+      method: 'POST',
+      url: '/v1/vault/write',
+      headers: owner(),
+      payload: { scope: 'identity.email', data: { email: 'ada@dcp.dev' }, agent_name: 'desktop-ui' },
+    });
+
+    // Owner pre-authorizes this agent to auto-approve identity.email.
+    const enable = await server.inject({
+      method: 'POST',
+      url: `/v1/agent-connections/${agentId}/auto-approve`,
+      headers: owner(),
+      payload: { scope: 'identity.email' },
+    });
+    expect(enable.statusCode).toBe(200);
+    expect(JSON.parse(enable.body).auto_approve_scopes).toContain('identity.email');
+
+    // No consent should be created — the read returns data directly.
+    const res = await handleCloudConnectMcp(server, agentId, {
+      jsonrpc: '2.0',
+      id: 80,
+      method: 'tools/call',
+      params: { name: 'vault_read', arguments: { scope: 'identity.email' } },
+    });
+    const text = (res.body as any).result.content[0].text as string;
+    expect(text).not.toContain('requires_consent');
+    expect(text).toContain('ada@dcp.dev');
+    expect((res.body as any).result.isError).toBeFalsy();
+
+    const pending = JSON.parse(
+      (await server.inject({ method: 'GET', url: '/consent', headers: owner() })).body
+    );
+    expect((pending.pending || []).some((c: any) => c.scope === 'identity.email')).toBe(false);
+  });
+
+  it('auto-approve: signing scopes are rejected (signing stays budget-bounded)', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: `/v1/agent-connections/${agentId}/auto-approve`,
+      headers: owner(),
+      payload: { scope: 'sign:solana' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error.code).toBe('SCOPE_NOT_AUTO_APPROVABLE');
+  });
+
+  it('auto-approve: disabling revokes the standing grant (consent required again)', async () => {
+    await server.inject({
+      method: 'POST',
+      url: '/v1/vault/write',
+      headers: owner(),
+      payload: { scope: 'identity.phone', data: { number: '555' }, agent_name: 'desktop-ui' },
+    });
+    await server.inject({
+      method: 'POST',
+      url: `/v1/agent-connections/${agentId}/auto-approve`,
+      headers: owner(),
+      payload: { scope: 'identity.phone' },
+    });
+    const off = await server.inject({
+      method: 'DELETE',
+      url: `/v1/agent-connections/${agentId}/auto-approve`,
+      headers: owner(),
+      payload: { scope: 'identity.phone' },
+    });
+    expect(off.statusCode).toBe(200);
+    expect(JSON.parse(off.body).auto_approve_scopes).not.toContain('identity.phone');
+
+    // With the grant gone, a read must create a pending consent again.
+    const callP = handleCloudConnectMcp(server, agentId, {
+      jsonrpc: '2.0',
+      id: 81,
+      method: 'tools/call',
+      params: { name: 'vault_read', arguments: { scope: 'identity.phone' } },
+    });
+    // It will now poll for consent; deny it so the call returns promptly.
+    let cid: string | undefined;
+    for (let i = 0; i < 150 && !cid; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      const list = JSON.parse(
+        (await server.inject({ method: 'GET', url: '/consent', headers: owner() })).body
+      );
+      cid = (list.pending || []).find(
+        (c: any) => c.scope === 'identity.phone' && c.status === 'pending'
+      )?.id;
+    }
+    expect(cid).toBeTruthy();
+    await server.inject({ method: 'POST', url: `/consent/${cid}/deny`, headers: owner() });
+    await callP;
+  }, 20000);
 
   it('NEVER signs without on-device approval — vault_sign_tx yields a gate, not a signature (#8)', async () => {
     const res = await handleCloudConnectMcp(server, agentId, {

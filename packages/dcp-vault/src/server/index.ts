@@ -324,6 +324,37 @@ function findActiveSessionForScope(agentName: string, scope: string): string | u
   return undefined;
 }
 
+// Auto-approve (standing grant) duration. Matches the schema default
+// `allow_always_expiry_days` (90d); a grant is just a long-lived 'always' session.
+const AUTO_APPROVE_GRANT_DAYS = 90;
+const AUTO_APPROVE_GRANT_MS = AUTO_APPROVE_GRANT_DAYS * 24 * 60 * 60 * 1000;
+
+// Strip a read:/write:/sign: prefix to the bare scope the consent/read gates use.
+function bareScope(scope: string): string {
+  return scope.replace(/^(read|write|sign):/, '');
+}
+
+// Signing scopes are NEVER blanket auto-approved — they stay bounded by the
+// budget threshold. Auto-approve grants are allowed only for read/write data.
+function isAutoApproveAllowedScope(scope: string): boolean {
+  const normalized = normalizePermissionScope(scope);
+  return normalized.startsWith('read:') || normalized.startsWith('write:');
+}
+
+// The bare scopes a user has set to auto-approve for an agent (active, non-expired
+// 'always' standing grants). Internal/ledger scopes are excluded.
+function listAutoApproveScopes(agentName: string): string[] {
+  const out = new Set<string>();
+  for (const session of storage.listActiveSessionsForAgent(agentName)) {
+    if (session.consent_mode !== 'always') continue;
+    for (const scope of session.granted_scopes) {
+      if (scope.startsWith('internal.')) continue;
+      out.add(scope);
+    }
+  }
+  return [...out];
+}
+
 function getBudgetLedgerSessionId(agentName: string): string {
   const existing = findActiveSessionForScope(agentName, BUDGET_LEDGER_SCOPE);
   if (existing) {
@@ -2678,10 +2709,13 @@ async function buildServer(): Promise<FastifyInstance> {
       });
     }
 
-    // Normalize permission_scopes to fix old data saved without read:/sign: prefix
+    // Normalize permission_scopes to fix old data saved without read:/sign: prefix.
+    // Also surface which scopes the user has set to AUTO-APPROVE (standing grants),
+    // so the desktop can render the per-agent/per-scope toggles.
     const agents = storage.listAgentConnections().map((agent) => ({
       ...agent,
       permission_scopes: normalizePermissionScopes(agent.permission_scopes || []),
+      auto_approve_scopes: listAutoApproveScopes(agent.name),
     }));
 
     return { agents };
@@ -2700,6 +2734,89 @@ async function buildServer(): Promise<FastifyInstance> {
     const revoked = storage.revokeAgentConnection(request.params.id);
     return { revoked };
   });
+
+  // ----------------------------------------------------------------------------
+  // Auto-approve (standing grants): pre-authorize an agent for a data scope so it
+  // no longer prompts for consent on every read/write. Configured ahead of time
+  // from Agent settings. Signing scopes are rejected — those stay budget-bounded.
+  // ----------------------------------------------------------------------------
+  server.post<{ Params: { id: string }; Body: { scope?: string } }>(
+    '/v1/agent-connections/:id/auto-approve',
+    async (request, reply) => {
+      if (!isOwnerRequest(request)) {
+        return reply.status(403).send({
+          error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+        });
+      }
+      const agent = storage.getAgentConnection(request.params.id);
+      if (!agent) {
+        return reply.status(404).send({ error: { code: 'AGENT_NOT_FOUND', message: 'Agent not found' } });
+      }
+      const rawScope = (request.body?.scope || '').trim();
+      if (!rawScope) {
+        return reply.status(400).send({ error: { code: 'INVALID_SCOPE', message: 'scope is required' } });
+      }
+      const scope = bareScope(rawScope);
+      if (!isAutoApproveAllowedScope(rawScope)) {
+        return reply.status(400).send({
+          error: {
+            code: 'SCOPE_NOT_AUTO_APPROVABLE',
+            message: 'Only read/write data scopes can be auto-approved. Signing stays budget-bounded.',
+          },
+        });
+      }
+      // Idempotent: if a standing grant already covers this scope, do nothing.
+      const sessions = storage.listActiveSessionsForAgent(agent.name);
+      const already = sessions.some(
+        (s) => s.consent_mode === 'always' && s.granted_scopes.includes(scope)
+      );
+      if (!already) {
+        storage.createSession(agent.name, [scope], 'always', new Date(Date.now() + AUTO_APPROVE_GRANT_MS), {
+          purpose: 'Auto-approve standing grant',
+        });
+        storage.logAudit('GRANT', 'success', {
+          agentName: agent.name,
+          scope,
+          operation: 'auto_approve_enable',
+        });
+      }
+      return { enabled: true, scope, auto_approve_scopes: listAutoApproveScopes(agent.name) };
+    }
+  );
+
+  server.delete<{ Params: { id: string }; Body: { scope?: string } }>(
+    '/v1/agent-connections/:id/auto-approve',
+    async (request, reply) => {
+      if (!isOwnerRequest(request)) {
+        return reply.status(403).send({
+          error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
+        });
+      }
+      const agent = storage.getAgentConnection(request.params.id);
+      if (!agent) {
+        return reply.status(404).send({ error: { code: 'AGENT_NOT_FOUND', message: 'Agent not found' } });
+      }
+      const scope = bareScope((request.body?.scope || '').trim());
+      if (!scope) {
+        return reply.status(400).send({ error: { code: 'INVALID_SCOPE', message: 'scope is required' } });
+      }
+      // Revoke every standing 'always' grant for this agent+scope.
+      let revoked = 0;
+      for (const s of storage.listActiveSessionsForAgent(agent.name)) {
+        if (s.consent_mode === 'always' && s.granted_scopes.includes(scope)) {
+          if (storage.revokeSession(s.id)) revoked++;
+        }
+      }
+      if (revoked > 0) {
+        storage.logAudit('REVOKE', 'success', {
+          agentName: agent.name,
+          scope,
+          operation: 'auto_approve_disable',
+        });
+      }
+      return { enabled: false, scope, revoked, auto_approve_scopes: listAutoApproveScopes(agent.name) };
+    }
+  );
 
   server.delete<{ Params: { id: string } }>('/v1/agent-connections/:id', async (request, reply) => {
     // Owner auth required for security, but for local agents we also delete the config file
@@ -6322,6 +6439,13 @@ const CLOUD_CONNECT_PAIR_MAX_PER_WINDOW = 5;
 const CLOUD_CONNECT_PAIR_WINDOW_MS = 10 * 60 * 1000;
 let cloudConnectPairTimes: number[] = [];
 
+// Cloud-connect consent poll-and-resume: when a tool call needs an on-device tap,
+// the vault waits in-process for the approval and returns the result in one go
+// (parity with the local @dcprotocol/agent). Wait just under the relay's control
+// timeout (125s) so the vault — not the relay — owns the retry fallback.
+const CLOUD_CONNECT_CONSENT_WAIT_MS = 115_000;
+const CLOUD_CONNECT_CONSENT_POLL_MS = 1_000;
+
 function cloudConnectPairingOpenUntil(): number {
   // Read the window FRESH from the config file (the source of truth — setConfig
   // always persists), so it can be opened by the desktop, the CLI, or any owner
@@ -6427,6 +6551,15 @@ const CLOUD_CONNECT_MCP_TOOLS = [
         chain: { type: 'string' },
       },
       required: ['amount', 'currency'],
+    },
+  },
+  {
+    name: 'vault_scope_guide',
+    description:
+      'Return the canonical DCP scope names. Use before vault_read/vault_write when unsure which scope to use (e.g. identity.name for name, identity.email for email). Read-only, no approval required.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
     },
   },
   {
@@ -6573,12 +6706,45 @@ export async function handleCloudConnectMcp(
     const name = params.name || '';
     const args = params.arguments || {};
 
+    // Record activity so the desktop shows live last-seen + request count for
+    // cloud-connect agents (parity with the REST/relay-envelope path which also
+    // calls recordAgentRequest). Without this, cloud agents always look "Idle".
+    storage.recordAgentRequest(agentId);
+
     if (name === 'vault_scope_guide') {
+      // Parity with the local @dcprotocol/agent vault_scope_guide: return the
+      // canonical scope names so cloud agents pick correct scopes. Keep this
+      // text in sync with CANONICAL_SCOPE_GUIDE in @dcprotocol/agent.
+      // (TODO: hoist CANONICAL_SCOPE_GUIDE into @dcprotocol/core to dedupe.)
+      const canonicalScopeGuide = `Use these DCP scopes exactly. Do not invent aliases.
+
+Common identity scopes:
+- User name, full name, display name, legal name: identity.name
+- Email address: identity.email
+- Phone number: identity.phone
+- Home address as identity data: identity.home_address
+
+Common address scopes:
+- Home address record: address.home
+- Work address record: address.work
+- Shipping address record: address.shipping
+
+Common API credential scopes:
+- OpenAI API key: credentials.api.openai
+- Anthropic API key: credentials.api.anthropic
+- Stripe API key: credentials.api.stripe
+- GitHub token: credentials.api.github
+
+Rules:
+- Never use username, user.name, profile.name, displayName, legalName, legal_name, contact.email, user.email, or email.
+- For "what is my name", always read identity.name.
+- For "what is my email", always read identity.email.
+- If the user asks for a value not listed here, ask the user for the exact DCP scope instead of guessing.`;
       return rpcResult({
         content: [
           {
             type: 'text',
-            text: `Your granted scopes: ${agent.permission_scopes.join(', ') || '(none)'}\nSensitive actions require on-device approval.`,
+            text: `${canonicalScopeGuide}\n\nYour granted scopes: ${agent.permission_scopes.join(', ') || '(none)'}\nSensitive actions require on-device approval.`,
           },
         ],
       });
@@ -6588,24 +6754,65 @@ export async function handleCloudConnectMcp(
     if (!route) return rpcError(-32601, `Unknown tool: ${name}`);
 
     // Bind the call to THIS authenticated cloud agent (scope/budget/consent).
-    const body = { ...(route.body || {}), agent_name: agent.name };
-    const injected = await server.inject({
-      method: route.method,
-      url: route.url,
-      payload: route.method === 'POST' ? JSON.stringify(body) : undefined,
-      headers: { 'content-type': 'application/json' },
-    });
+    const callOnce = async (): Promise<{ statusCode: number; payload: unknown }> => {
+      const body = { ...(route.body || {}), agent_name: agent.name };
+      const injected = await server.inject({
+        method: route.method,
+        url: route.url,
+        payload: route.method === 'POST' ? JSON.stringify(body) : undefined,
+        headers: { 'content-type': 'application/json' },
+      });
+      let payload: unknown;
+      try {
+        payload = injected.payload ? JSON.parse(injected.payload) : {};
+      } catch {
+        payload = { raw: injected.payload };
+      }
+      return { statusCode: injected.statusCode, payload };
+    };
 
-    let payload: unknown;
-    try {
-      payload = injected.payload ? JSON.parse(injected.payload) : {};
-    } catch {
-      payload = { raw: injected.payload };
+    let { statusCode, payload } = await callOnce();
+
+    // Poll-and-resume parity with the local @dcprotocol/agent: if the vault asks
+    // for an on-device consent tap, wait for the approval in-process and re-run
+    // the call so the agent gets the result in ONE response (no "try again").
+    // The vault never auto-approves a sensitive action — it only resumes AFTER a
+    // real tap resolves the consent. On deny/expiry/timeout we fall back to
+    // returning the consent gate so the agent can retry.
+    const pendingConsentId =
+      payload && typeof payload === 'object' && (payload as Record<string, unknown>).requires_consent
+        ? ((payload as Record<string, unknown>).consent_id as string | undefined)
+        : undefined;
+    if (pendingConsentId) {
+      const deadline = Date.now() + CLOUD_CONNECT_CONSENT_WAIT_MS;
+      let resolvedStatus = 'pending';
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, CLOUD_CONNECT_CONSENT_POLL_MS));
+        const c = storage.getPendingConsent(pendingConsentId);
+        if (!c) {
+          resolvedStatus = 'not_found';
+          break;
+        }
+        if (c.status === 'pending' && new Date(c.expires_at) < new Date()) {
+          resolvedStatus = 'expired';
+          break;
+        }
+        if (c.status !== 'pending') {
+          resolvedStatus = c.status;
+          break;
+        }
+      }
+      if (resolvedStatus === 'approved') {
+        // Approved: re-run — a session / approved-consent now satisfies the gate.
+        ({ statusCode, payload } = await callOnce());
+      }
+      // denied / expired / not_found / timed-out: keep the original gate payload.
     }
+
     // Surface vault errors (incl. "consent required") as a tool result the agent
     // can act on, rather than a transport error. The vault never signs without
     // an on-device tap — a sensitive call returns a pending-consent result here.
-    const isError = injected.statusCode >= 400;
+    const isError = statusCode >= 400;
     return rpcResult({
       content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
       isError,

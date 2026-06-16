@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/relay",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Encrypted message relay for DCP - enables cloud MCP clients to reach local vaults",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

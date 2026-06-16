@@ -412,7 +412,11 @@ export class RelayServer {
         req.vaultId,
         'cloud_connect_mcp',
         { agent_id: req.agentId, scope: req.scope, jkt: req.jkt, body: req.body },
-        30_000
+        // Allow the vault to block while it waits for an on-device consent tap
+        // (it polls up to ~115s) so approval returns the result in one go.
+        // Slightly above the vault's poll cap so the vault, not the relay, owns
+        // the fallback to a retryable consent gate.
+        125_000
       );
       const status = typeof res.status === 'number' ? res.status : 200;
       return { status, body: res.body ?? res };
