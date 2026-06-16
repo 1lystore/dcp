@@ -13,8 +13,9 @@ import { SignJWT, jwtVerify } from 'jose';
 import { randomUUID } from 'crypto';
 import type { RelayOAuthKeys } from './keys.js';
 
-/** Default access-token lifetime: 10 minutes. */
-export const DEFAULT_ACCESS_TOKEN_TTL_SEC = 10 * 60;
+/** Default access-token lifetime: 30 minutes (longer = fewer surprise re-auths;
+ *  safe because revocation is enforced per-call at the vault and keys persist). */
+export const DEFAULT_ACCESS_TOKEN_TTL_SEC = 30 * 60;
 
 export interface IssueAccessTokenInput {
   keys: RelayOAuthKeys;

@@ -772,23 +772,36 @@ export class RelayServer {
         return shell(`<h2>Could not connect</h2><p class="muted">Error: ${esc(result.error)}.</p>`);
       }
 
+      // Loopback redirects (CLI agents, RFC 8252) often can't be reached from the
+      // browser (e.g. agent on a VPS) AND the agent's local listener typically
+      // times out in ~40s. So for loopback we DON'T redirect — we show the code to
+      // copy-paste into the agent. Non-loopback (hosted agents) redirect normally.
+      const isLoopback = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])([:/]|$)/i.test(redirectUri);
       const cfg = {
         sessionId: result.sessionId,
         redirectUri,
         state: q.state || '',
+        isLoopback,
       };
       return shell(
         `<h2>Approve on your DCP device</h2>` +
           `<p class="muted">Confirm this match code matches the one shown on your device, then approve there.</p>` +
           `<div class="code">${esc(result.matchCode)}</div>` +
           `<p class="muted" id="s">Waiting for approval…</p>` +
-          `<script>(function(){var c=${jsonForScript(cfg)};` +
+          `<input id="cb" readonly style="display:none;margin-top:12px" onclick="this.select()">` +
+          `<button id="cp" style="display:none" onclick="if(navigator.clipboard){navigator.clipboard.writeText(document.getElementById('cb').value);this.textContent='Copied ✓'}">Copy</button>` +
+          `<script>(function(){var c=${jsonForScript(cfg)};var n=0;` +
           `function poll(){fetch('/oauth/authorize/status?session='+encodeURIComponent(c.sessionId))` +
           `.then(function(r){return r.json()}).then(function(d){` +
           `if(d.status==='approved'){var u=new URL(c.redirectUri);u.searchParams.set('code',d.code);` +
-          `if(c.state)u.searchParams.set('state',c.state);location.href=u.toString();return;}` +
-          `if(d.status==='denied'||d.status==='expired'){document.getElementById('s').textContent='Connection '+d.status+'.';return;}` +
-          `setTimeout(poll,2000);}).catch(function(){setTimeout(poll,3000)})}poll();})();</script>`
+          `if(c.state)u.searchParams.set('state',c.state);var full=u.toString();` +
+          `if(c.isLoopback){document.getElementById('s').textContent='Approved ✓ — copy this and paste it into your agent terminal:';` +
+          `var b=document.getElementById('cb');b.style.display='block';b.value=full;b.focus();b.select();` +
+          `document.getElementById('cp').style.display='inline-block';return;}` +
+          `location.href=full;return;}` +
+          `if(d.status==='denied'||d.status==='expired'){document.getElementById('s').textContent='Connection '+d.status+'. Generate a new connect-link in DCP and try again.';return;}` +
+          `if(++n>150){document.getElementById('s').textContent='Timed out waiting for approval. Generate a new connect-link in DCP and try again.';return;}` +
+          `setTimeout(poll,2000);}).catch(function(){if(++n>150){document.getElementById('s').textContent='Network error — please try again.';return;}setTimeout(poll,3000)})}poll();})();</script>`
       );
     });
 
