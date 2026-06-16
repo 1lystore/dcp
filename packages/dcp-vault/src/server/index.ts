@@ -341,6 +341,39 @@ function isAutoApproveAllowedScope(scope: string): boolean {
   return normalized.startsWith('read:') || normalized.startsWith('write:');
 }
 
+// Does a granted scope list permit a requested scope? Supports exact match plus
+// wildcards: '*', 'read:*', and 'read:identity.*'. Used by the cloud-connect
+// facade so it enforces permission_scopes like the signed path.
+function agentPermitsScope(grantedScopes: string[], requestedScope: string): boolean {
+  return normalizePermissionScopes(grantedScopes || []).some((s) => {
+    if (s === '*') return true;
+    if (s === requestedScope) return true;
+    if (s.endsWith('.*')) return requestedScope.startsWith(s.slice(0, -1));
+    if (s.endsWith(':*')) return requestedScope.startsWith(s.slice(0, -1));
+    return false;
+  });
+}
+
+// The permission scope a cloud-connect MCP tool requires. null = no scope gate
+// (read-only helpers: budget_check, scope_guide).
+function requiredScopeForTool(name: string, args: Record<string, unknown>): string | null {
+  switch (name) {
+    case 'vault_get_address':
+      return 'read:wallet.address';
+    case 'vault_read':
+      return `read:${(args.scope as string) || ''}`;
+    case 'vault_write':
+      return `write:${(args.scope as string) || ''}`;
+    case 'vault_sign_tx':
+    case 'vault_sign_message':
+      return `sign:${(args.chain as string) || 'solana'}`;
+    case 'vault_sign_x402':
+      return `sign:${(args.network as string) || 'solana'}`;
+    default:
+      return null;
+  }
+}
+
 // The bare scopes a user has set to auto-approve for an agent (active, non-expired
 // 'always' standing grants). Internal/ledger scopes are excluded.
 function listAutoApproveScopes(agentName: string): string[] {
@@ -5932,7 +5965,12 @@ function verifyLocalAgentRequest(
   // Update agent last_seen
   storage.recordAgentRequest(serviceId);
 
-  return { authorized: true, agent, preAuthorized: true };
+  // Scope is granted, but DON'T blanket auto-approve. Fall through to the shared
+  // consent + standing-grant gate so granted = Ask (prompt) and granted + an
+  // "Allow" standing grant = auto. This unifies signed reads with the No/Ask/Allow
+  // model (write/sign/delete already work this way). preAuthorized:false ⇒ the
+  // read endpoint will require consent unless an Allow grant exists.
+  return { authorized: true, agent, preAuthorized: false };
 }
 
 /**
@@ -6747,6 +6785,35 @@ Rules:
             text: `${canonicalScopeGuide}\n\nYour granted scopes: ${agent.permission_scopes.join(', ') || '(none)'}\nSensitive actions require on-device approval.`,
           },
         ],
+      });
+    }
+
+    // Enforce the agent's CURRENT granted scopes (read live each call, so owner
+    // edits apply instantly — no reconnect). Not granted = hard "No": deny here,
+    // before any consent is created, so the owner is never even prompted. Granted
+    // scopes fall through to the consent/standing-grant gate (Ask vs Allow).
+    const required = requiredScopeForTool(name, args);
+    if (required && !agentPermitsScope(agent.permission_scopes, required)) {
+      storage.logAudit('DENY', 'denied', {
+        agentName: agent.name,
+        scope: required,
+        operation: 'cloud_connect_scope_denied',
+      });
+      return rpcResult({
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                error: 'SCOPE_NOT_PERMITTED',
+                message: `Not permitted: the owner has not granted '${required}' to this agent.`,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+        isError: true,
       });
     }
 

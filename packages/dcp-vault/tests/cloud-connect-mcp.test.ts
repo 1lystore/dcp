@@ -179,6 +179,24 @@ describe('Cloud-Connect vault MCP handler', () => {
     expect(afterAgent.last_seen_at).toBeTruthy();
   });
 
+  it('scope enforcement: a NOT-granted scope is denied outright (No) — no consent created', async () => {
+    // The agent is granted wallet.address + sign:solana only — not address.home.
+    const res = await handleCloudConnectMcp(server, agentId, {
+      jsonrpc: '2.0',
+      id: 60,
+      method: 'tools/call',
+      params: { name: 'vault_read', arguments: { scope: 'address.home' } },
+    });
+    const text = (res.body as any).result.content[0].text as string;
+    expect(text).toContain('SCOPE_NOT_PERMITTED');
+    expect((res.body as any).result.isError).toBe(true);
+    // Crucially: NO consent should have been created (owner is never pestered).
+    const pending = JSON.parse(
+      (await server.inject({ method: 'GET', url: '/consent', headers: owner() })).body
+    );
+    expect((pending.pending || []).some((c: any) => c.scope === 'address.home')).toBe(false);
+  });
+
   it('one-go consent: approving mid-call resumes and returns data (no "try again")', async () => {
     // Owner stores a value the agent will read.
     await server.inject({
@@ -186,6 +204,13 @@ describe('Cloud-Connect vault MCP handler', () => {
       url: '/v1/vault/write',
       headers: owner(),
       payload: { scope: 'identity.name', data: { full: 'Ada Lovelace' }, agent_name: 'desktop-ui' },
+    });
+    // Grant the read scope (otherwise it's denied as "No" before consent).
+    await server.inject({
+      method: 'PATCH',
+      url: `/v1/agent-connections/${agentId}`,
+      headers: owner(),
+      payload: { permission_scopes: ['read:wallet.address', 'sign:solana', 'read:identity.name'] },
     });
 
     // Start a consent-gated read. The handler creates a pending consent, then
@@ -230,6 +255,15 @@ describe('Cloud-Connect vault MCP handler', () => {
       url: '/v1/vault/write',
       headers: owner(),
       payload: { scope: 'identity.email', data: { email: 'ada@dcp.dev' }, agent_name: 'desktop-ui' },
+    });
+    // Grant the read scope first (Allow = granted + auto-approve).
+    await server.inject({
+      method: 'PATCH',
+      url: `/v1/agent-connections/${agentId}`,
+      headers: owner(),
+      payload: {
+        permission_scopes: ['read:wallet.address', 'sign:solana', 'read:identity.name', 'read:identity.email'],
+      },
     });
 
     // Owner pre-authorizes this agent to auto-approve identity.email.
@@ -277,6 +311,20 @@ describe('Cloud-Connect vault MCP handler', () => {
       url: '/v1/vault/write',
       headers: owner(),
       payload: { scope: 'identity.phone', data: { number: '555' }, agent_name: 'desktop-ui' },
+    });
+    await server.inject({
+      method: 'PATCH',
+      url: `/v1/agent-connections/${agentId}`,
+      headers: owner(),
+      payload: {
+        permission_scopes: [
+          'read:wallet.address',
+          'sign:solana',
+          'read:identity.name',
+          'read:identity.email',
+          'read:identity.phone',
+        ],
+      },
     });
     await server.inject({
       method: 'POST',
