@@ -2764,8 +2764,13 @@ async function buildServer(): Promise<FastifyInstance> {
       });
     }
 
+    // Also kill the agent's standing grants (Allow sessions) — otherwise they
+    // linger in Active Sessions and could be inherited if the name is reused.
+    const agent = storage.getAgentConnection(request.params.id);
     const revoked = storage.revokeAgentConnection(request.params.id);
-    return { revoked };
+    let sessionsRevoked = 0;
+    if (agent?.name) sessionsRevoked = storage.revokeAgentSessions(agent.name);
+    return { revoked, sessions_revoked: sessionsRevoked };
   });
 
   // ----------------------------------------------------------------------------
@@ -2863,7 +2868,10 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     const agentId = request.params.id;
+    // Capture the name BEFORE deleting so we can purge its standing grants too.
+    const agentName = storage.getAgentConnection(agentId)?.name;
     const deleted = storage.deleteAgentConnection(agentId);
+    if (deleted && agentName) storage.revokeAgentSessions(agentName);
 
     // Also delete the local agent config file if it exists
     if (deleted) {
@@ -3775,6 +3783,8 @@ async function buildServer(): Promise<FastifyInstance> {
           error: { code: 'OWNER_AUTH_REQUIRED', message: 'Owner authentication required' },
         });
       }
+      // Purge the agent's standing grants (Allow sessions) on revoke too.
+      const revokedAgentName = storage.getAgentConnection(request.params.agentId)?.name;
       const link = storage.getCloudConnectLinkByAgent(request.params.agentId);
       if (!link) {
         // No link record — still revoke the agent connection if it exists.
@@ -3784,11 +3794,13 @@ async function buildServer(): Promise<FastifyInstance> {
             error: { code: 'AGENT_NOT_FOUND', message: 'Agent not found' },
           });
         }
+        if (revokedAgentName) storage.revokeAgentSessions(revokedAgentName);
         // Fast-fail at the relay too (denylist + kill refresh chains) — Rule #7.
         relayClient?.sendCloudConnectRevoke(request.params.agentId);
         return { revoked: true, agent_id: request.params.agentId };
       }
       const result = storage.revokeCloudConnectLink(link.link_id);
+      if (revokedAgentName) storage.revokeAgentSessions(revokedAgentName);
       relayClient?.sendCloudConnectRevoke(result.agent_id || request.params.agentId);
       return { revoked: true, agent_id: result.agent_id };
     }
