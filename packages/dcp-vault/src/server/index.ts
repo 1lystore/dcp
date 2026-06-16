@@ -6614,10 +6614,24 @@ const CLOUD_CONNECT_MCP_TOOLS = [
   },
   {
     name: 'vault_read',
-    description: 'Read a credential/data scope (gated by scope + on-device consent).',
+    description:
+      "Read data from the user's vault (gated by scope + on-device consent). " +
+      'Use EXACT canonical DCP scopes — do NOT invent names like "profile", "user", or "username". ' +
+      'Common scopes: identity.name (the user\'s name), identity.email, identity.phone, ' +
+      'address.home, credentials.api.<service> (e.g. credentials.api.openai). ' +
+      'For "what is my name" use identity.name; for email use identity.email. ' +
+      'If unsure which scope, call vault_scope_guide FIRST, then read.',
     inputSchema: {
       type: 'object',
-      properties: { scope: { type: 'string' }, fields: { type: 'array', items: { type: 'string' } } },
+      properties: {
+        scope: {
+          type: 'string',
+          description:
+            'Exact canonical DCP scope, e.g. identity.name, identity.email, credentials.api.openai. ' +
+            'Never guess aliases (profile, username, user.email). Call vault_scope_guide if unsure.',
+        },
+        fields: { type: 'array', items: { type: 'string' } },
+      },
       required: ['scope'],
     },
   },
@@ -6663,10 +6677,23 @@ const CLOUD_CONNECT_MCP_TOOLS = [
   },
   {
     name: 'vault_write',
-    description: 'Write a credential/data scope (gated by scope + on-device consent).',
+    description:
+      "Store data in the user's vault (gated by scope + on-device consent). " +
+      'Use EXACT canonical DCP scopes — do NOT invent names. ' +
+      'Common scopes: identity.name, identity.email, identity.phone, address.home, ' +
+      'credentials.api.<service> (e.g. credentials.api.openai). ' +
+      'If unsure which scope, call vault_scope_guide FIRST.',
     inputSchema: {
       type: 'object',
-      properties: { scope: { type: 'string' }, value: {} },
+      properties: {
+        scope: {
+          type: 'string',
+          description:
+            'Exact canonical DCP scope, e.g. identity.name, credentials.api.openai. ' +
+            'Never guess aliases. Call vault_scope_guide if unsure.',
+        },
+        value: {},
+      },
       required: ['scope'],
     },
   },
@@ -6818,7 +6845,11 @@ Rules:
             text: JSON.stringify(
               {
                 error: 'SCOPE_NOT_PERMITTED',
-                message: `Not permitted: the owner has not granted '${required}' to this agent.`,
+                message:
+                  `Not permitted: '${required}' is not a granted scope for this agent. ` +
+                  `If you guessed the scope name, it may be wrong — call vault_scope_guide for the ` +
+                  `canonical scopes (e.g. identity.name, identity.email) and retry with the correct one. ` +
+                  `Otherwise the owner needs to grant '${required}' in DCP.`,
               },
               null,
               2
