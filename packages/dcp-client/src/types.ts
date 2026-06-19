@@ -92,6 +92,83 @@ export interface SignTxInput {
   idempotencyKey?: string;
 }
 
+export interface TransferInput {
+  /** Blockchain (currently solana) */
+  chain: Chain;
+  /** Recipient address */
+  to: string;
+  /** Amount to send (e.g. SOL, or token units) */
+  amount: number;
+  /** Currency code: SOL for native, or a token symbol like USDC */
+  currency?: string;
+  /** Explicit SPL token mint (for arbitrary tokens not in the registry) */
+  mint?: string;
+  /** Explicit SPL token decimals (required with mint) */
+  decimals?: number;
+  /** Return as soon as broadcast ('submitted') or wait for on-chain confirmation ('confirmed', default) */
+  confirm?: 'submitted' | 'confirmed';
+  /** Human-readable description for consent UI */
+  description?: string;
+  /** Idempotency key to prevent duplicate transfers */
+  idempotencyKey?: string;
+}
+
+export interface TransferResult {
+  chain: Chain;
+  /** Sender (the vault wallet) */
+  from: string;
+  /** Recipient */
+  to: string;
+  /** Amount sent */
+  amount: number;
+  /** Currency */
+  currency: string;
+  /** Transaction signature */
+  signature: string;
+  /** Confirmation status: submitted | confirmed | finalized | failed */
+  status: string;
+  /** Block explorer URL */
+  explorerUrl: string;
+  /** Remaining daily budget */
+  remainingDaily?: number;
+  /** Session ID (if a session was used/created) */
+  sessionId?: string;
+}
+
+export interface SwapInput {
+  chain: Chain;
+  /** Input token: 'SOL', a known symbol like 'USDC', or a mint */
+  fromToken: string;
+  /** Output token: 'SOL', a known symbol like 'USDC', or a mint */
+  toToken: string;
+  /** Amount of the input token to swap */
+  amount: number;
+  /** Slippage tolerance in basis points (default 50 = 0.5%) */
+  slippageBps?: number;
+  /** Decimals for fromToken when it's an arbitrary mint */
+  fromDecimals?: number;
+  /** Decimals for toToken when it's an arbitrary mint */
+  toDecimals?: number;
+  /** Return on broadcast ('submitted') or wait for confirmation ('confirmed', default) */
+  confirm?: 'submitted' | 'confirmed';
+  description?: string;
+  idempotencyKey?: string;
+}
+
+export interface SwapResult {
+  chain: Chain;
+  fromToken: string;
+  toToken: string;
+  amount: number;
+  /** Estimated output amount (base units), from the quote */
+  outAmount?: string;
+  signature: string;
+  status: string;
+  explorerUrl: string;
+  remainingDaily?: number;
+  sessionId?: string;
+}
+
 export interface SignMessageInput {
   /** Blockchain to sign for */
   chain: Chain;
@@ -278,6 +355,12 @@ export interface Transport {
 
   /** Sign a transaction */
   signTx(input: SignTxInput): Promise<SignTxResult>;
+
+  /** Build + sign + submit a transfer (DCP builds the tx itself) */
+  transfer(input: TransferInput): Promise<TransferResult>;
+
+  /** Quote + build + sign + submit a swap (via Jupiter) */
+  swap(input: SwapInput): Promise<SwapResult>;
 
   /** Sign a message */
   signMessage(input: SignMessageInput): Promise<SignMessageResult>;

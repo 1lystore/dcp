@@ -530,55 +530,12 @@ export interface ProxyConfig {
 // Error Types (from protocol spec section 7)
 // ============================================================================
 
-export type VaultErrorCode =
-  | 'VAULT_NOT_INITIALIZED'
-  | 'VAULT_LOCKED'
-  | 'CONSENT_REQUIRED'
-  | 'CONSENT_DENIED'
-  | 'CONSENT_EXPIRED'
-  | 'CONSENT_TIMEOUT'
-  | 'CONSENT_NOT_FOUND'
-  | 'SCOPE_VIOLATION'
-  | 'BUDGET_EXCEEDED_TX'
-  | 'BUDGET_EXCEEDED_DAILY'
-  | 'TOKEN_EXPIRED'
-  | 'TOKEN_REVOKED'
-  | 'INVALID_CHAIN'
-  | 'INVALID_TX'
-  | 'INVALID_SCHEMA'
-  | 'IDEMPOTENCY_CONFLICT'
-  | 'RATE_LIMITED'
-  | 'RECORD_NOT_FOUND'
-  | 'INTERNAL_ERROR'
-  | 'VALIDATION_ERROR'
-  | 'UNAUTHORIZED'
-  | 'SERVICE_NOT_TRUSTED'
-  | 'SERVICE_NOT_FOUND'
-  | 'SERVICE_ALREADY_TRUSTED'
-  | 'INVALID_SERVICE_SIGNATURE'
-  | 'SERVICE_SCOPE_VIOLATION'
-  | 'INVALID_PUBLIC_KEY';
-
-export class VaultError extends Error {
-  constructor(
-    public code: VaultErrorCode,
-    message: string,
-    public details?: Record<string, unknown>
-  ) {
-    super(message);
-    this.name = 'VaultError';
-  }
-
-  toJSON() {
-    return {
-      error: {
-        code: this.code,
-        message: this.message,
-        details: this.details,
-      },
-    };
-  }
-}
+// VaultError + VaultErrorCode are the shared protocol error type. They live in the
+// foundational @dcprotocol/wallet-core package so that every package throws and
+// catches the SAME class (keeps `instanceof VaultError` reliable across package
+// boundaries). Re-exported here so existing `./types.js` importers are unchanged.
+export { VaultError } from '@dcprotocol/wallet-core';
+export type { VaultErrorCode } from '@dcprotocol/wallet-core';
 
 // ============================================================================
 // Telegram Notification Types (protocol spec section 15)

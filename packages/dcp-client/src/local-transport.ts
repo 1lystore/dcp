@@ -16,6 +16,10 @@ import type {
   GetAddressResult,
   SignTxInput,
   SignTxResult,
+  TransferInput,
+  TransferResult,
+  SwapInput,
+  SwapResult,
   SignMessageInput,
   SignMessageResult,
   SignX402Input,
@@ -164,6 +168,119 @@ export class LocalTransport implements Transport {
       chain: data.chain,
       remainingDaily: data.remaining_daily,
       sessionId: data.session_id,
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // Transfer (DCP builds + signs + submits)
+  // --------------------------------------------------------------------------
+
+  async transfer(input: TransferInput): Promise<TransferResult> {
+    const walletScope = `crypto.wallet.${input.chain}`;
+    const sessionId = this.getSessionId(walletScope);
+
+    const body = this.signRequestBody({
+      chain: input.chain,
+      to: input.to,
+      amount: input.amount,
+      currency: input.currency,
+      mint: input.mint,
+      decimals: input.decimals,
+      confirm: input.confirm,
+      agent_name: this.config.agentName,
+      session_id: sessionId,
+      description: input.description,
+      idempotency_key: input.idempotencyKey,
+    });
+
+    const response = await this.fetch('/v1/vault/transfer', {
+      method: 'POST',
+      body: this.jsonStringify(body),
+    });
+
+    const data = await this.handleResponse<{
+      chain: Chain;
+      from: string;
+      to: string;
+      amount: number;
+      currency: string;
+      signature: string;
+      status: string;
+      explorer_url: string;
+      remaining_daily?: number;
+      session_id?: string;
+      requires_consent?: boolean;
+      consent_id?: string;
+      expires_at?: string;
+    }>(response);
+
+    if (data.requires_consent && data.consent_id) {
+      throw new DcpError('CONSENT_REQUIRED', 'User consent required for transfer', {
+        consent_id: data.consent_id,
+        expires_at: data.expires_at,
+        approve_url: this.config.localUrl,
+      });
+    }
+
+    if (data.session_id) {
+      this.cacheSession(walletScope, data.session_id);
+    }
+
+    return {
+      chain: data.chain,
+      from: data.from,
+      to: data.to,
+      amount: data.amount,
+      currency: data.currency,
+      signature: data.signature,
+      status: data.status,
+      explorerUrl: data.explorer_url,
+      remainingDaily: data.remaining_daily,
+      sessionId: data.session_id,
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // Swap (Jupiter)
+  // --------------------------------------------------------------------------
+
+  async swap(input: SwapInput): Promise<SwapResult> {
+    const walletScope = `crypto.wallet.${input.chain}`;
+    const sessionId = this.getSessionId(walletScope);
+
+    const body = this.signRequestBody({
+      chain: input.chain,
+      from_token: input.fromToken,
+      to_token: input.toToken,
+      amount: input.amount,
+      slippage_bps: input.slippageBps,
+      from_decimals: input.fromDecimals,
+      to_decimals: input.toDecimals,
+      confirm: input.confirm,
+      agent_name: this.config.agentName,
+      session_id: sessionId,
+      description: input.description,
+      idempotency_key: input.idempotencyKey,
+    });
+
+    const response = await this.fetch('/v1/vault/swap', { method: 'POST', body: this.jsonStringify(body) });
+    const data = await this.handleResponse<{
+      chain: Chain; from_token: string; to_token: string; amount: number; out_amount?: string;
+      signature: string; status: string; explorer_url: string; remaining_daily?: number; session_id?: string;
+      requires_consent?: boolean; consent_id?: string; expires_at?: string;
+    }>(response);
+
+    if (data.requires_consent && data.consent_id) {
+      throw new DcpError('CONSENT_REQUIRED', 'User consent required for swap', {
+        consent_id: data.consent_id, expires_at: data.expires_at, approve_url: this.config.localUrl,
+      });
+    }
+    if (data.session_id) this.cacheSession(walletScope, data.session_id);
+
+    return {
+      chain: data.chain, fromToken: data.from_token, toToken: data.to_token, amount: data.amount,
+      outAmount: data.out_amount, signature: data.signature, status: data.status,
+      explorerUrl: data.explorer_url, remainingDaily: data.remaining_daily, sessionId: data.session_id,
     };
   }
 

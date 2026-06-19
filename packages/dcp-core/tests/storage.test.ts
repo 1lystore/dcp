@@ -776,4 +776,41 @@ describe('Storage Layer', () => {
       expect(logs[0].notification_type).toBe('test');
     });
   });
+
+  describe('Retention pruning', () => {
+    // Insert a backdated spend row directly (FK off, test-only) so we can exercise
+    // pruning at arbitrary ages without standing up sessions.
+    function insertSpend(id: string, key: string, createdAt: string): void {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const db = (storage as any).db;
+      db.pragma('foreign_keys = OFF');
+      db.prepare(
+        'INSERT INTO spend_events (id, agent_session_id, amount, currency, chain, operation, destination, idempotency_key, status, tx_signature, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)'
+      ).run(id, 'sess', 0.01, 'SOL', 'solana', 'transfer', null, key, 'committed', null, createdAt);
+    }
+
+    it('prunes old rows, keeps recent ones', () => {
+      const old = new Date(Date.now() - 200 * 24 * 60 * 60 * 1000).toISOString();
+      insertSpend('recent', 'recent-key', new Date().toISOString());
+      insertSpend('old', 'old-key', old);
+      storage.logAudit('EXECUTE', 'success', { operation: 'transfer' });
+
+      const res = storage.pruneOldEvents({ auditRetentionDays: 90, spendRetentionDays: 90 });
+      expect(res.spendDeleted).toBe(1);
+      expect(storage.getSpendByIdempotencyKey('recent-key')).toBeTruthy();
+      expect(storage.getSpendByIdempotencyKey('old-key')).toBeFalsy(); // removed
+    });
+
+    it('NEVER prunes within the budget window even if asked to (2-day floor)', () => {
+      const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
+      insertSpend('r12h', 'r12h-key', twelveHoursAgo);
+      // Aggressive 0-day retention is clamped to a 2-day floor inside storage.
+      storage.pruneOldEvents({ spendRetentionDays: 0, auditRetentionDays: 0 });
+      expect(storage.getSpendByIdempotencyKey('r12h-key')).toBeTruthy(); // budget data safe
+    });
+
+    it('vacuum runs without error', () => {
+      expect(() => storage.vacuum()).not.toThrow();
+    });
+  });
 });

@@ -25,6 +25,10 @@ import type {
   GetAddressResult,
   SignTxInput,
   SignTxResult,
+  TransferInput,
+  TransferResult,
+  SwapInput,
+  SwapResult,
   SignMessageInput,
   SignMessageResult,
   SignX402Input,
@@ -246,6 +250,26 @@ export class DcpClient {
   async signTx(input: SignTxInput): Promise<SignTxResult> {
     const transport = await this.getTransport();
     return transport.signTx(input);
+  }
+
+  /**
+   * Build + sign + submit a transfer. DCP builds the transaction itself from the
+   * intent, signs it (with consent + budget), and submits it to the network.
+   *
+   * @throws DcpError with CONSENT_REQUIRED if user approval needed
+   */
+  async transfer(input: TransferInput): Promise<TransferResult> {
+    const transport = await this.getTransport();
+    return transport.transfer(input);
+  }
+
+  /**
+   * Quote + build + sign + submit a swap via Jupiter.
+   * @throws DcpError with CONSENT_REQUIRED if user approval needed
+   */
+  async swap(input: SwapInput): Promise<SwapResult> {
+    const transport = await this.getTransport();
+    return transport.swap(input);
   }
 
   /**

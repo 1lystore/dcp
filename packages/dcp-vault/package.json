@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/vault",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "DCP - Local vault runtime with CLI and server",
   "type": "module",
   "main": "./dist/index.js",
@@ -30,6 +30,7 @@
   "dependencies": {
     "@dcprotocol/client": "^3.0.0",
     "@dcprotocol/core": "^3.0.0",
+    "@dcprotocol/wallet-core": "workspace:*",
     "@dcprotocol/relay-client": "^3.0.0",
     "@fastify/cors": "^10.0.2",
     "@fastify/rate-limit": "^10.0.0",
@@ -46,6 +47,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@solana/spl-token": "^0.4.9",
     "@solana/web3.js": "^1.98.0",
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^22.10.2",

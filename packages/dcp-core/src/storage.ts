@@ -1539,6 +1539,35 @@ export class VaultStorage {
     return stmt.get(idempotencyKey) as SpendEvent | null;
   }
 
+  /**
+   * Prune old audit + spend history to keep the local DB small (important on
+   * mobile). This is SAFE for budgeting: the daily budget only looks back 24h,
+   * and spend retention is clamped to a 2-day floor, so live budget enforcement
+   * is never affected. Idempotency keys are only relevant to short-lived retries,
+   * so pruning very old ones is also safe. Returns rows removed per table.
+   */
+  pruneOldEvents(options?: { auditRetentionDays?: number; spendRetentionDays?: number }): {
+    auditDeleted: number;
+    spendDeleted: number;
+  } {
+    const auditDays = Math.max(1, Math.floor(options?.auditRetentionDays ?? 90));
+    const spendDays = Math.max(2, Math.floor(options?.spendRetentionDays ?? 90)); // floor > 24h budget window
+    const auditCutoff = new Date(Date.now() - auditDays * 24 * 60 * 60 * 1000).toISOString();
+    const spendCutoff = new Date(Date.now() - spendDays * 24 * 60 * 60 * 1000).toISOString();
+    const a = this.db.prepare('DELETE FROM audit_events WHERE created_at < ?').run(auditCutoff);
+    const s = this.db.prepare('DELETE FROM spend_events WHERE created_at < ?').run(spendCutoff);
+    return { auditDeleted: a.changes, spendDeleted: s.changes };
+  }
+
+  /**
+   * Reclaim disk space (shrink the DB file) after pruning. VACUUM rewrites the
+   * file and briefly locks the DB, so call this during idle/maintenance — never
+   * on a request hot path.
+   */
+  vacuum(): void {
+    this.db.exec('VACUUM');
+  }
+
   // ==========================================================================
   // Audit Events
   // ==========================================================================

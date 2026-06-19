@@ -386,6 +386,34 @@ describe('Cloud-Connect vault MCP handler', () => {
     expect((res.body as any).result.isError).toBe(true);
   });
 
+  it('revoking an agent also purges its standing grants (no orphaned sessions)', async () => {
+    // Give the agent a standing Allow grant.
+    await server.inject({
+      method: 'POST',
+      url: `/v1/agent-connections/${agentId}/auto-approve`,
+      headers: owner(),
+      payload: { scope: 'identity.name' },
+    });
+    let agentsList = JSON.parse(
+      (await server.inject({ method: 'GET', url: '/v1/agent-connections', headers: owner() })).body
+    );
+    let me = agentsList.agents.find((a: any) => a.agent_id === agentId);
+    expect(me.auto_approve_scopes).toContain('identity.name');
+
+    // Revoke the agent → its sessions must be gone.
+    await server.inject({
+      method: 'POST',
+      url: `/v1/cloud-connect/agents/${agentId}/revoke`,
+      headers: owner(),
+    });
+    agentsList = JSON.parse(
+      (await server.inject({ method: 'GET', url: '/v1/agent-connections', headers: owner() })).body
+    );
+    me = agentsList.agents.find((a: any) => a.agent_id === agentId);
+    // Either the agent is gone, or it has no active standing grants left.
+    expect(me ? me.auto_approve_scopes : []).not.toContain('identity.name');
+  });
+
   it('rejects calls for a revoked agent', async () => {
     await server.inject({
       method: 'POST',

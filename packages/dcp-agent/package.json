@@ -57,6 +57,7 @@
   "dependencies": {
     "@dcprotocol/client": "^3.0.0",
     "@dcprotocol/core": "^3.0.0",
+    "@dcprotocol/wallet-core": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@noble/curves": "^1.4.0",
     "@solana/web3.js": "^1.98.0",
