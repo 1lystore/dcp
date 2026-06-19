@@ -5005,7 +5005,13 @@ async function buildServer(): Promise<FastifyInstance> {
       timestamp?: string;
       nonce?: string;
     };
-  }>('/v1/vault/transfer', async (request) => {
+  }>('/v1/vault/transfer', {
+    // Explicit per-route rate limit (in addition to the global one) on this
+    // money-moving, authorization-performing route. Generous so legitimate
+    // concurrent agent transfers aren't blocked; bounds a runaway/compromised
+    // local caller.
+    config: { rateLimit: { max: 600, timeWindow: '1 minute' } },
+  }, async (request) => {
     const { chain, to, amount, currency, mint, decimals, agent_name, session_id, description, idempotency_key } = request.body;
 
     if (!chain || !to || amount === undefined || !agent_name) {
@@ -5376,7 +5382,11 @@ async function buildServer(): Promise<FastifyInstance> {
       timestamp?: string;
       nonce?: string;
     };
-  }>('/v1/vault/swap', async (request) => {
+  }>('/v1/vault/swap', {
+    // Explicit per-route rate limit (in addition to the global one) on this
+    // money-moving, authorization-performing route.
+    config: { rateLimit: { max: 600, timeWindow: '1 minute' } },
+  }, async (request) => {
     const { chain, from_token, to_token, amount, slippage_bps, from_decimals, to_decimals, agent_name, session_id, description, idempotency_key } = request.body;
 
     if (!chain || !from_token || !to_token || amount === undefined || !agent_name) {

@@ -9,12 +9,15 @@ import { describe, it, expect } from 'vitest';
 import { Keypair, Transaction, SystemProgram, PublicKey } from '@solana/web3.js';
 import {
   buildSolanaTransferTx,
+  buildSplTransferTx,
   getSolanaAtaAddress,
   verifyTransferTx,
   getTransactionSigners,
   getTransactionProgramIds,
   VaultError,
 } from '../src/index.js';
+
+const MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
 const OWNER = 'Dq9XEjvhYbSdWQbzbi3LDsjPJvU2n8FYiw3QnSgnHFVm';
 const TO = '2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S';
@@ -33,8 +36,20 @@ describe('wallet-core: build + signers', () => {
   });
 
   it('derives a deterministic ATA address', () => {
-    const mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-    expect(getSolanaAtaAddress(mint, OWNER)).toBe(getSolanaAtaAddress(mint, OWNER));
+    expect(getSolanaAtaAddress(MINT, OWNER)).toBe(getSolanaAtaAddress(MINT, OWNER));
+  });
+
+  it('builds an SPL transfer with normal decimals', () => {
+    const tx = buildSplTransferTx({ fromAddress: OWNER, toAddress: TO, mint: MINT, amount: 1.5, decimals: 6, blockhash: BLOCKHASH, createRecipientAta: false });
+    expect(typeof tx).toBe('string');
+  });
+
+  it('rejects an out-of-range decimals (resource-exhaustion guard)', () => {
+    // A huge user-supplied `decimals` must NOT be allowed to allocate giant strings.
+    for (const decimals of [1_000_000_000, 100, 19, -1, 6.5]) {
+      expect(() => buildSplTransferTx({ fromAddress: OWNER, toAddress: TO, mint: MINT, amount: 1, decimals, blockhash: BLOCKHASH, createRecipientAta: false }))
+        .toThrowError(VaultError);
+    }
   });
 });
 

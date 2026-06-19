@@ -112,6 +112,13 @@ function toBaseUnits(amount: number, decimals: number): bigint {
   if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
     throw new VaultError('INVALID_CHAIN', 'amount must be a positive number');
   }
+  // Bound `decimals` (a user-supplied value) BEFORE it feeds string/bigint sizing.
+  // Without this, a huge `decimals` makes `'0'.repeat(decimals)` (and toFixed/10n**)
+  // allocate unbounded memory — a denial-of-service vector. No real SPL token exceeds
+  // a handful of decimals; 18 is a generous ceiling.
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
+    throw new VaultError('INVALID_CHAIN', 'decimals must be an integer between 0 and 18');
+  }
   const fixed = amount.toFixed(decimals);
   const [whole, frac = ''] = fixed.split('.');
   const raw = BigInt(whole) * 10n ** BigInt(decimals) + BigInt((frac + '0'.repeat(decimals)).slice(0, decimals) || '0');
