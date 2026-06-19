@@ -19,6 +19,10 @@ import type {
   GetAddressResult,
   SignTxInput,
   SignTxResult,
+  TransferInput,
+  TransferResult,
+  SwapInput,
+  SwapResult,
   SignMessageInput,
   SignMessageResult,
   SignX402Input,
@@ -262,6 +266,122 @@ export class RelayTransport implements Transport {
       chain: data.chain || input.chain,
       remainingDaily: data.remaining_daily,
       sessionId: data.session_id,
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // Transfer (DCP builds + signs + submits)
+  // --------------------------------------------------------------------------
+
+  async transfer(input: TransferInput): Promise<TransferResult> {
+    const walletScope = `crypto.wallet.${input.chain}`;
+    const sessionId = this.getSessionId(walletScope);
+
+    const params = {
+      chain: input.chain,
+      to: input.to,
+      amount: input.amount,
+      currency: input.currency,
+      mint: input.mint,
+      decimals: input.decimals,
+      confirm: input.confirm,
+      description: input.description,
+      idempotency_key: input.idempotencyKey,
+      session_id: sessionId,
+    };
+
+    const response = await this.relayRequest('vault_transfer', params);
+
+    const data = response as {
+      chain?: Chain;
+      from?: string;
+      to?: string;
+      amount?: number;
+      currency?: string;
+      signature?: string;
+      status?: string;
+      explorer_url?: string;
+      remaining_daily?: number;
+      session_id?: string;
+      requires_consent?: boolean;
+      consent_id?: string;
+      expires_at?: string;
+      error?: { code?: string; message?: string };
+    };
+
+    if (data.error) {
+      throw parseErrorResponse({ error: data.error });
+    }
+
+    if (data.requires_consent && data.consent_id) {
+      throw new DcpError('CONSENT_REQUIRED', 'User consent required for transfer', {
+        consent_id: data.consent_id,
+        expires_at: data.expires_at,
+      });
+    }
+
+    if (!data.signature) {
+      throw new DcpError('INTERNAL_ERROR', 'Invalid response from vault');
+    }
+
+    if (data.session_id) {
+      this.cacheSession(walletScope, data.session_id);
+    }
+
+    return {
+      chain: data.chain || input.chain,
+      from: data.from || '',
+      to: data.to || input.to,
+      amount: data.amount ?? input.amount,
+      currency: data.currency || input.currency || 'SOL',
+      signature: data.signature,
+      status: data.status || 'submitted',
+      explorerUrl: data.explorer_url || `https://solscan.io/tx/${data.signature}`,
+      remainingDaily: data.remaining_daily,
+      sessionId: data.session_id,
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // Swap (Jupiter)
+  // --------------------------------------------------------------------------
+
+  async swap(input: SwapInput): Promise<SwapResult> {
+    const walletScope = `crypto.wallet.${input.chain}`;
+    const sessionId = this.getSessionId(walletScope);
+
+    const params = {
+      chain: input.chain,
+      from_token: input.fromToken,
+      to_token: input.toToken,
+      amount: input.amount,
+      slippage_bps: input.slippageBps,
+      from_decimals: input.fromDecimals,
+      to_decimals: input.toDecimals,
+      confirm: input.confirm,
+      description: input.description,
+      idempotency_key: input.idempotencyKey,
+      session_id: sessionId,
+    };
+
+    const response = await this.relayRequest('vault_swap', params);
+    const data = response as {
+      chain?: Chain; from_token?: string; to_token?: string; amount?: number; out_amount?: string;
+      signature?: string; status?: string; explorer_url?: string; remaining_daily?: number; session_id?: string;
+      requires_consent?: boolean; consent_id?: string; expires_at?: string; error?: { code?: string; message?: string };
+    };
+
+    if (data.error) throw parseErrorResponse({ error: data.error });
+    if (data.requires_consent && data.consent_id) {
+      throw new DcpError('CONSENT_REQUIRED', 'User consent required for swap', { consent_id: data.consent_id, expires_at: data.expires_at });
+    }
+    if (!data.signature) throw new DcpError('INTERNAL_ERROR', 'Invalid response from vault');
+    if (data.session_id) this.cacheSession(walletScope, data.session_id);
+
+    return {
+      chain: data.chain || input.chain, fromToken: data.from_token || input.fromToken, toToken: data.to_token || input.toToken,
+      amount: data.amount ?? input.amount, outAmount: data.out_amount, signature: data.signature, status: data.status || 'submitted',
+      explorerUrl: data.explorer_url || `https://solscan.io/tx/${data.signature}`, remainingDaily: data.remaining_daily, sessionId: data.session_id,
     };
   }
 

@@ -45,6 +45,10 @@ import {
   envelopeDecrypt,
   signTransaction,
   signSolanaMessage,
+  buildSolanaTransferTx,
+  buildSplTransferTx,
+  getSolanaAtaAddress,
+  verifyTransferTx,
   type VaultErrorCode,
   type TrustedService,
   type AgentConnection,
@@ -70,6 +74,27 @@ import {
   canonicalJson,
   DEFAULT_RELAY_URL as CORE_DEFAULT_RELAY_URL,
 } from '@dcprotocol/core';
+import {
+  validateSwapQuote,
+  validateSwapTransaction,
+  idempotencyIntentMatches,
+  DEFAULT_SWAP_ALLOWED_PROGRAMS,
+  DEFAULT_JUPITER_PROGRAM_IDS,
+  resolveToken,
+  resolveSwapToken,
+  DEFAULT_KNOWN_TOKENS,
+  jupiterQuote,
+  jupiterBuildSwapTx,
+  DEFAULT_JUPITER_API,
+  executeTransfer,
+  executeSwap,
+  ConsentRequiredError,
+  type TokenRegistry,
+  type JupiterConfig,
+  type TransferPorts,
+  type SwapPorts,
+} from '@dcprotocol/wallet-core';
+import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -84,6 +109,13 @@ import {
   type SigningKeyPair,
   type StoredPairingClaim,
 } from '@dcprotocol/relay-client';
+import {
+  getUnlockRateLimitKey,
+  checkUnlockRateLimit,
+  recordUnlockFailure,
+  clearUnlockRateLimit,
+} from './lib/unlock-rate-limit.js';
+import { normalizePermissionScope, normalizePermissionScopes } from './lib/permission-scopes.js';
 
 // ============================================================================
 // Constants
@@ -126,112 +158,6 @@ const pendingChallenges: Map<string, Challenge> = new Map(); // desktop_id -> Ch
 // ============================================================================
 // Unlock Rate Limiting (protocol spec)
 // ============================================================================
-// 5 failed attempts per minute -> 5 minute lockout
-const UNLOCK_MAX_ATTEMPTS = 5;
-const UNLOCK_WINDOW_MS = 60 * 1000; // 1 minute window
-const UNLOCK_LOCKOUT_MS = 5 * 60 * 1000; // 5 minute lockout
-
-interface UnlockAttemptTracker {
-  attempts: number[];
-  locked_until: number | null;
-}
-
-const unlockAttempts: Map<string, UnlockAttemptTracker> = new Map();
-
-function getUnlockRateLimitKey(request: FastifyRequest): string {
-  // For localhost, we track by source port as a basic identifier
-  // In production, this is always localhost so we use a single key
-  return 'local';
-}
-
-function checkUnlockRateLimit(key: string): { allowed: boolean; retry_after_seconds?: number } {
-  const now = Date.now();
-  let tracker = unlockAttempts.get(key);
-
-  if (!tracker) {
-    tracker = { attempts: [], locked_until: null };
-    unlockAttempts.set(key, tracker);
-  }
-
-  // Check if currently locked out
-  if (tracker.locked_until && now < tracker.locked_until) {
-    const retry_after_seconds = Math.ceil((tracker.locked_until - now) / 1000);
-    return { allowed: false, retry_after_seconds };
-  }
-
-  // Clear lockout if expired
-  if (tracker.locked_until && now >= tracker.locked_until) {
-    tracker.locked_until = null;
-    tracker.attempts = [];
-  }
-
-  // Clean up old attempts outside the window
-  const windowStart = now - UNLOCK_WINDOW_MS;
-  tracker.attempts = tracker.attempts.filter((t) => t > windowStart);
-
-  return { allowed: true };
-}
-
-function recordUnlockFailure(key: string): { locked: boolean; retry_after_seconds?: number } {
-  const now = Date.now();
-  let tracker = unlockAttempts.get(key);
-
-  if (!tracker) {
-    tracker = { attempts: [], locked_until: null };
-    unlockAttempts.set(key, tracker);
-  }
-
-  // Record this attempt
-  tracker.attempts.push(now);
-
-  // Clean up old attempts outside the window
-  const windowStart = now - UNLOCK_WINDOW_MS;
-  tracker.attempts = tracker.attempts.filter((t) => t > windowStart);
-
-  // Check if we've exceeded the limit
-  if (tracker.attempts.length >= UNLOCK_MAX_ATTEMPTS) {
-    tracker.locked_until = now + UNLOCK_LOCKOUT_MS;
-    const retry_after_seconds = Math.ceil(UNLOCK_LOCKOUT_MS / 1000);
-    return { locked: true, retry_after_seconds };
-  }
-
-  return { locked: false };
-}
-
-function clearUnlockRateLimit(key: string): void {
-  unlockAttempts.delete(key);
-}
-
-// ============================================================================
-// Permission Scope Normalization
-// ============================================================================
-// Fixes old permission_scopes saved without operation prefix (read:/write:/sign:)
-// This ensures backward compatibility with agents created before the fix
-const SIGNING_CHAINS = ['solana'];
-
-function normalizePermissionScope(scope: string): string {
-  // Already has a valid prefix - return as-is
-  if (scope.startsWith('read:') || scope.startsWith('write:') || scope.startsWith('sign:')) {
-    return scope;
-  }
-
-  // Check if it's a chain name that should be sign:
-  const lowerScope = scope.toLowerCase();
-  if (SIGNING_CHAINS.includes(lowerScope)) {
-    return `sign:${lowerScope}`;
-  }
-
-  // Everything else gets read: prefix (identity, credentials, etc.)
-  return `read:${scope}`;
-}
-
-function normalizePermissionScopes(scopes: string[]): string[] {
-  if (!scopes || !Array.isArray(scopes)) return [];
-
-  // Normalize each scope and remove duplicates
-  const normalized = scopes.map(normalizePermissionScope);
-  return [...new Set(normalized)];
-}
 
 function getPackageVersion(): string {
   try {
@@ -4513,6 +4439,327 @@ async function buildServer(): Promise<FastifyInstance> {
   });
 
   // ============================================================================
+  // Solana RPC + shared sign core (backs /v1/vault/sign and /v1/vault/transfer)
+  // ============================================================================
+
+  // Per-wallet-scope serialization. A wallet must never run two value operations
+  // concurrently: budget check and spend recording straddle an async sign, so
+  // without this two transfers could both pass the budget check and overspend.
+  const walletLocks = new Map<string, Promise<unknown>>();
+  function withWalletLock<T>(scope: string, fn: () => Promise<T>): Promise<T> {
+    const prev = walletLocks.get(scope) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    walletLocks.set(scope, run.then(() => undefined, () => undefined));
+    return run;
+  }
+
+  // RPC endpoint is config, never a hardcoded secret. Premium hosts inject
+  // DCP_SOLANA_RPC_URL (their proxy); OSS gets the public mainnet default.
+  let solanaConnection: Connection | null = null;
+  function getSolanaConnection(): Connection {
+    if (!solanaConnection) {
+      const rpcUrl = process.env.DCP_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+      solanaConnection = new Connection(rpcUrl, {
+        commitment: 'confirmed',
+        confirmTransactionInitialTimeout: 60_000,
+      });
+    }
+    return solanaConnection;
+  }
+
+  // Known SPL tokens by symbol → mint + decimals. Mainnet defaults from wallet-core;
+  // override per-cluster via env (e.g. DCP_USDC_MINT for devnet). Resolution logic
+  // (resolveToken / resolveSwapToken) lives in wallet-core; this just supplies the
+  // registry the vault should use.
+  const KNOWN_TOKENS: TokenRegistry = {
+    USDC: { mint: process.env.DCP_USDC_MINT || DEFAULT_KNOWN_TOKENS.USDC.mint, decimals: DEFAULT_KNOWN_TOKENS.USDC.decimals },
+    USDT: { mint: process.env.DCP_USDT_MINT || DEFAULT_KNOWN_TOKENS.USDT.mint, decimals: DEFAULT_KNOWN_TOKENS.USDT.decimals },
+  };
+
+  // Cache the recent blockhash. A blockhash is valid ~60-90s; refetching it on
+  // every transfer costs a full RPC round-trip (~350-600ms). Caching it for a
+  // few seconds removes that from the hot path. It is PUBLIC data — no secret,
+  // no security surface. Invalidated on a stale-blockhash submit error.
+  const BLOCKHASH_TTL_MS = 8_000;
+  let cachedBlockhash: { blockhash: string; fetchedAt: number } | null = null;
+  async function getCachedBlockhash(conn: Connection): Promise<string> {
+    const now = Date.now();
+    if (cachedBlockhash && now - cachedBlockhash.fetchedAt < BLOCKHASH_TTL_MS) {
+      return cachedBlockhash.blockhash;
+    }
+    const { blockhash } = await rpcRetry(() => conn.getLatestBlockhash());
+    cachedBlockhash = { blockhash, fetchedAt: now };
+    return blockhash;
+  }
+  function invalidateBlockhash(): void {
+    cachedBlockhash = null;
+  }
+
+  // Retry transient RPC failures (rate limits, network blips) with backoff.
+  async function rpcRetry<T>(fn: () => Promise<T>, attempts = 3, delayMs = 400): Promise<T> {
+    let lastErr: unknown;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastErr = err;
+        if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs * (i + 1)));
+      }
+    }
+    throw lastErr;
+  }
+
+  // Broadcast a signed tx and poll to commitment, rebroadcasting periodically so
+  // a dropped transaction still lands while its blockhash is valid. On timeout
+  // returns a non-blocking `submitted` status (PRD §10.7).
+  async function submitAndConfirm(
+    conn: Connection,
+    signedTxBase64: string,
+    waitForConfirm = true,
+    timeoutMs = 45_000,
+    pollMs = 400
+  ): Promise<{ signature: string; status: 'submitted' | 'confirmed' | 'finalized' | 'failed' }> {
+    const raw = Buffer.from(signedTxBase64, 'base64');
+    // Confirmed mode runs preflight simulation (safer, catches errors before
+    // broadcast). Fast mode skips it — the tx is vault-built so it's well-formed,
+    // and skipping the simulate round-trip is the point of the fast path.
+    const signature = await rpcRetry(() =>
+      conn.sendRawTransaction(raw, { skipPreflight: !waitForConfirm, maxRetries: 0 })
+    );
+
+    // Fast path: the RPC accepted the broadcast — return without waiting for the
+    // network to confirm. The caller can poll status later.
+    if (!waitForConfirm) {
+      return { signature, status: 'submitted' };
+    }
+
+    const start = Date.now();
+    let lastRebroadcast = Date.now();
+    for (;;) {
+      const res = await conn.getSignatureStatuses([signature], { searchTransactionHistory: true });
+      const v = res.value?.[0];
+      if (v) {
+        if (v.err) return { signature, status: 'failed' };
+        const cs = v.confirmationStatus;
+        if (cs === 'finalized' || cs === 'confirmed') return { signature, status: cs };
+      }
+      if (Date.now() - start >= timeoutMs) return { signature, status: 'submitted' };
+      // Rebroadcast every ~6s in case the leader dropped the tx.
+      if (Date.now() - lastRebroadcast >= 6_000) {
+        lastRebroadcast = Date.now();
+        try {
+          await conn.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 });
+        } catch {
+          /* ignore — best-effort rebroadcast */
+        }
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+  }
+
+  /**
+   * Shared budget + consent + session + sign core. This is the EXACT behavior
+   * that has always backed /v1/vault/sign — extracted so /v1/vault/transfer can
+   * reuse it unchanged. Callers MUST do unlock + agent-auth checks first (each
+   * route authenticates its own request body). Do not change this without
+   * re-running the vault test suite.
+   */
+  async function signWithGuards(args: {
+    body: Record<string, unknown>;
+    chain: Chain;
+    unsignedTx: string;
+    amount?: number;
+    currency?: string;
+    agentName: string;
+    sessionId?: string;
+    description?: string;
+    idempotencyKey?: string;
+    /** When true, do NOT record the spend here — the caller commits it after a
+     *  successful submit (transfer path), so a failed broadcast doesn't consume
+     *  budget or burn the idempotency key. */
+    deferSpend?: boolean;
+    /** Owner-initiated (desktop, authenticated via owner token). The human IS the
+     *  owner and approved in the UI, so skip the agent budget limits + consent
+     *  flow entirely. Only set this from a verified isOwnerRequest(request). */
+    ownerApproved?: boolean;
+  }): Promise<
+    | { kind: 'consent'; consent_id: string; expires_at: string; reason?: string; message: string }
+    | { kind: 'signed'; signed_tx: string; signature: string; remaining_daily: number; session_id?: string; spend_session_id: string }
+  > {
+    const { chain, unsignedTx, amount, agentName: agent_name, description, idempotencyKey: idempotency_key } = args;
+    let effectiveSessionId = args.sessionId;
+    const txCurrency = args.currency || 'SOL';
+
+    let budgetAutoApproved = false;
+
+    // Owner-initiated requests (verified owner token) skip agent budget limits +
+    // consent — it's the user's own wallet and they approved in the UI.
+    if (!args.ownerApproved && amount !== undefined && amount > 0) {
+      const budgetResult = budget.checkBudget(amount, txCurrency, chain);
+
+      if (!budgetResult.allowed) {
+        storage.logAudit('EXECUTE', 'denied', {
+          agentName: agent_name,
+          scope: `crypto.wallet.${chain}`,
+          operation: 'sign_tx',
+          details: JSON.stringify({ reason: budgetResult.reason, amount, currency: txCurrency }),
+        });
+
+        const errorCode = budgetResult.reason?.includes('BUDGET_EXCEEDED_TX')
+          ? 'BUDGET_EXCEEDED_TX'
+          : 'BUDGET_EXCEEDED_DAILY';
+
+        const limits = budget.getLimits(txCurrency);
+        dispatchBudgetExceededNotification({
+          agent_name,
+          amount,
+          currency: txCurrency,
+          chain,
+          error_code: errorCode,
+          remaining_daily: budgetResult.remaining_daily,
+          remaining_tx: budgetResult.remaining_tx,
+          limit_daily: limits.daily_budget,
+          limit_tx: limits.tx_limit,
+        }).catch(err => console.log('[TG] Budget notification failed:', err));
+
+        throw new VaultError(errorCode, budgetResult.reason || 'Budget exceeded', {
+          remaining_daily: budgetResult.remaining_daily,
+          remaining_tx: budgetResult.remaining_tx,
+        });
+      }
+
+      if (budgetResult.requires_approval) {
+        const walletScope = `crypto.wallet.${chain}`;
+        const consumedConsent = storage.consumeApprovedConsent(agent_name, 'sign_tx', walletScope);
+        if (consumedConsent) {
+          budgetAutoApproved = true;
+          storage.logAudit('EXECUTE', 'success', {
+            agentName: agent_name,
+            scope: walletScope,
+            operation: 'consume_approval',
+            details: JSON.stringify({ consent_id: consumedConsent.id, amount, currency: txCurrency }),
+          });
+        } else {
+          const { consent } = storage.createPendingConsent(
+            agent_name,
+            'sign_tx',
+            walletScope,
+            consentDetailsWithDisplayName(args.body, agent_name, {
+              description,
+              amount,
+              currency: txCurrency,
+              chain,
+            })
+          );
+          return {
+            kind: 'consent',
+            consent_id: consent.id,
+            expires_at: consent.expires_at,
+            reason: 'Amount exceeds approval threshold',
+            message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
+          };
+        }
+      } else {
+        budgetAutoApproved = true;
+        storage.logAudit('EXECUTE', 'success', {
+          agentName: agent_name,
+          scope: `crypto.wallet.${chain}`,
+          operation: 'budget_auto_approve',
+          details: JSON.stringify({ amount, currency: txCurrency, chain, threshold: budget.getLimits(txCurrency).approval_threshold }),
+        });
+      }
+    }
+
+    const walletScope = `crypto.wallet.${chain}`;
+
+    if (!effectiveSessionId) {
+      const existing = findActiveSessionForScope(agent_name, walletScope);
+      if (existing) {
+        effectiveSessionId = existing;
+      }
+    }
+
+    let hasSession = false;
+    if (effectiveSessionId) {
+      const session = storage.getSession(effectiveSessionId);
+      if (session && !session.revoked_at && new Date(session.expires_at) > new Date()) {
+        if (session.granted_scopes.includes(walletScope)) {
+          hasSession = true;
+          storage.touchSession(effectiveSessionId);
+        }
+      }
+    }
+
+    if (!hasSession && !budgetAutoApproved && !args.ownerApproved) {
+      const consumedConsent = storage.consumeApprovedConsent(agent_name, 'sign_tx', walletScope);
+      if (!consumedConsent) {
+        const { consent } = storage.createPendingConsent(
+          agent_name,
+          'sign_tx',
+          walletScope,
+          consentDetailsWithDisplayName(args.body, agent_name, {
+            description,
+            amount,
+            currency: txCurrency,
+            chain,
+          })
+        );
+        return {
+          kind: 'consent',
+          consent_id: consent.id,
+          expires_at: consent.expires_at,
+          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
+        };
+      }
+
+      storage.logAudit('EXECUTE', 'success', {
+        agentName: agent_name,
+        scope: walletScope,
+        operation: 'consume_approval',
+        details: JSON.stringify({ consent_id: consumedConsent.id }),
+      });
+    }
+
+    const masterKey = storage.getMasterKey();
+    const payload = storage.getEncryptedPayload(walletScope);
+
+    if (!payload) {
+      throw new VaultError('RECORD_NOT_FOUND', `No wallet found for chain: ${chain}`);
+    }
+
+    const signResult = await signTransaction(payload, masterKey, chain, unsignedTx);
+
+    const spendSessionId = effectiveSessionId || getBudgetLedgerSessionId(agent_name);
+
+    // Default path records the spend immediately. The transfer path defers it
+    // until after a successful broadcast (see route) so a failed submit neither
+    // consumes budget nor burns the idempotency key.
+    if (!args.deferSpend && !args.ownerApproved && amount !== undefined && amount > 0) {
+      storage.recordSpend(spendSessionId, amount, txCurrency, chain, 'sign_tx', 'committed', {
+        idempotencyKey: idempotency_key,
+      });
+    }
+
+    const budgetInfo = budget.checkBudget(0, txCurrency, chain);
+
+    storage.logAudit('EXECUTE', 'success', {
+      agentName: agent_name,
+      scope: walletScope,
+      operation: 'sign_tx',
+      details: JSON.stringify({ chain, amount, currency: txCurrency }),
+    });
+
+    return {
+      kind: 'signed',
+      signed_tx: signResult.signed_tx,
+      signature: signResult.signature,
+      remaining_daily: budgetInfo.remaining_daily,
+      session_id: effectiveSessionId,
+      spend_session_id: spendSessionId,
+    };
+  }
+
+  // ============================================================================
   // V1 API: Vault Sign (with consent + budget)
   // ============================================================================
 
@@ -4534,7 +4781,6 @@ async function buildServer(): Promise<FastifyInstance> {
     };
   }>('/v1/vault/sign', async (request) => {
     const { chain, unsigned_tx, amount, currency, agent_name, session_id, description, idempotency_key } = request.body;
-    let effectiveSessionId = session_id;
 
     if (!chain || !unsigned_tx || !agent_name) {
       throw new VaultError('INTERNAL_ERROR', 'chain, unsigned_tx, and agent_name are required');
@@ -4552,199 +4798,748 @@ async function buildServer(): Promise<FastifyInstance> {
       throw new VaultError('SERVICE_SCOPE_VIOLATION', agentAuth.reason || 'Scope not permitted for this agent');
     }
 
-    // Determine currency from chain if not provided
-    const txCurrency = currency || 'SOL';
-
-    // Track if budget check auto-approved this transaction (amount under threshold)
-    // When true, we skip the session/consent check since user configured this threshold
-    let budgetAutoApproved = false;
-
-    // Budget check if amount is provided
-    if (amount !== undefined && amount > 0) {
-      const budgetResult = budget.checkBudget(amount, txCurrency, chain);
-
-      if (!budgetResult.allowed) {
-        storage.logAudit('EXECUTE', 'denied', {
+    // Anti blind-sign: if the blob is a simple SOL/SPL transfer, verify it
+    // actually matches the declared amount/destination before we budget-check,
+    // consent on, or sign it. Complex/opaque txs (swaps, defi) are not enforced
+    // here — those go through DCP-built tools. Pure local check, ~sub-ms.
+    if (chain === 'solana') {
+      const owner = getWalletAddress(chain as Chain).address;
+      const verdict = verifyTransferTx({
+        unsignedTx: unsigned_tx,
+        owner,
+        declaredAmount: amount,
+        declaredDestination: (request.body as { destination?: string }).destination,
+        currency,
+      });
+      if (!verdict.ok) {
+        storage.logAudit('DENY', 'denied', {
           agentName: agent_name,
           scope: `crypto.wallet.${chain}`,
-          operation: 'sign_tx',
-          details: JSON.stringify({ reason: budgetResult.reason, amount, currency: txCurrency }),
+          operation: 'sign_tx_verify',
+          details: JSON.stringify({ reason: verdict.reason }),
         });
-
-        const errorCode = budgetResult.reason?.includes('BUDGET_EXCEEDED_TX')
-          ? 'BUDGET_EXCEEDED_TX'
-          : 'BUDGET_EXCEEDED_DAILY';
-
-        // Send Telegram notification about budget exceeded (fire and forget)
-        const limits = budget.getLimits(txCurrency);
-        dispatchBudgetExceededNotification({
-          agent_name,
-          amount,
-          currency: txCurrency,
-          chain,
-          error_code: errorCode,
-          remaining_daily: budgetResult.remaining_daily,
-          remaining_tx: budgetResult.remaining_tx,
-          limit_daily: limits.daily_budget,
-          limit_tx: limits.tx_limit,
-        }).catch(err => console.log('[TG] Budget notification failed:', err));
-
-        throw new VaultError(errorCode, budgetResult.reason || 'Budget exceeded', {
-          remaining_daily: budgetResult.remaining_daily,
-          remaining_tx: budgetResult.remaining_tx,
-        });
+        throw new VaultError('INVALID_CHAIN', `Transaction does not match the declared transfer: ${verdict.reason}`);
       }
+    }
 
-      // If above approval threshold, check for approved consent or require new consent
-      if (budgetResult.requires_approval) {
-        const walletScope = `crypto.wallet.${chain}`;
+    // Serialize value operations on this wallet so concurrent budget checks and
+    // spend records cannot interleave.
+    const result = await withWalletLock(`crypto.wallet.${chain}`, () =>
+      signWithGuards({
+        body: request.body as Record<string, unknown>,
+        chain,
+        unsignedTx: unsigned_tx,
+        amount,
+        currency,
+        agentName: agent_name,
+        sessionId: session_id,
+        description,
+        idempotencyKey: idempotency_key,
+        ownerApproved: isOwnerRequest(request),
+      })
+    );
 
-        // Check if there's an approved consent that can be consumed (approve-once semantics)
-        const consumedConsent = storage.consumeApprovedConsent(agent_name, 'sign_tx', walletScope);
-        if (consumedConsent) {
-          // Approved consent found and consumed - proceed to signing below
-          // Skip session check since we already have budget approval
-          budgetAutoApproved = true;
-          // Log the consumption
-          storage.logAudit('EXECUTE', 'success', {
-            agentName: agent_name,
-            scope: walletScope,
-            operation: 'consume_approval',
-            details: JSON.stringify({ consent_id: consumedConsent.id, amount, currency: txCurrency }),
+    if (result.kind === 'consent') {
+      return {
+        requires_consent: true,
+        consent_id: result.consent_id,
+        expires_at: result.expires_at,
+        ...(result.reason ? { reason: result.reason } : {}),
+        message: result.message,
+      };
+    }
+
+    return {
+      signed_tx: result.signed_tx,
+      signature: result.signature,
+      chain,
+      remaining_daily: result.remaining_daily,
+      session_id: result.session_id,
+    };
+  });
+
+  // ============================================================================
+  // Jupiter swap helpers. The OSS engine takes NO platform fee by default — the
+  // fee bps + fee account are INJECTED by the product (premium build / entitle-
+  // ment) via env, so the open-source code never embeds DCP's revenue config.
+  // ============================================================================
+  // Jupiter config injected from env (fee value/account + endpoint stay out of OSS;
+  // the all-or-nothing fee rule + quote/build logic live in wallet-core).
+  const jupiterConfig: JupiterConfig = {
+    apiBase: process.env.DCP_JUPITER_API || DEFAULT_JUPITER_API,
+    feeBps: parseInt(process.env.DCP_SWAP_FEE_BPS || '0', 10),
+    feeAccount: process.env.DCP_SWAP_FEE_ACCOUNT || undefined,
+  };
+
+  // Program allow-list for a Jupiter swap tx. Defaults come from @dcprotocol/wallet-core
+  // (the single shared source so vault + mobile validate identically); operators can
+  // extend the Jupiter program ids via env in case Jupiter ships a new program.
+  const JUPITER_PROGRAM_IDS = (process.env.DCP_JUPITER_PROGRAM_IDS || DEFAULT_JUPITER_PROGRAM_IDS.join(','))
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const SWAP_ALLOWED_PROGRAMS = [...DEFAULT_SWAP_ALLOWED_PROGRAMS, ...JUPITER_PROGRAM_IDS];
+
+  // ============================================================================
+  // Phase 4 strangler: run a transfer through wallet-core's shared runner using
+  // vault adapters. The Signer adapter delegates to signWithGuards (budget+consent
+  // +sign) so the gating is REUSED, not rewritten; the runner owns the shared
+  // sequence (idempotency → build → sign → verify → submit → record-on-success).
+  // ============================================================================
+  async function runTransferViaSharedRunner(
+    request: FastifyRequest<{ Body: Record<string, unknown> }>,
+    ctx: {
+      chain: Chain; to: string; amount: number; txCurrency: string; agent_name: string;
+      session_id?: string; description?: string; idempotency_key?: string;
+      walletScope: string; from: string; token: { mint: string; decimals: number } | null;
+    }
+  ) {
+    const { chain, to, amount, txCurrency, agent_name, session_id, description, idempotency_key, walletScope, from, token } = ctx;
+    const owner = isOwnerRequest(request);
+    const effectiveIdem = idempotency_key || crypto.randomUUID();
+    const conn = getSolanaConnection();
+    let spendSessionId: string | undefined;
+
+    const ports: TransferPorts = {
+      signer: {
+        address: from,
+        async sign(unsignedTx) {
+          // Reuse the existing budget + consent + sign core. Defer the spend; the
+          // runner records it only after a successful submit.
+          const result = await signWithGuards({
+            body: request.body, chain, unsignedTx, amount, currency: txCurrency,
+            agentName: agent_name, sessionId: session_id, description,
+            idempotencyKey: effectiveIdem, deferSpend: true, ownerApproved: owner,
           });
-        } else {
-          // No approved consent - create pending consent
-          const { consent, isNew } = storage.createPendingConsent(
-            agent_name,
-            'sign_tx',
-            walletScope,
-            consentDetailsWithDisplayName(request.body as Record<string, unknown>, agent_name, {
-              description,
-              amount,
-              currency: txCurrency,
-              chain,
-            })
+          if (result.kind === 'consent') {
+            throw new ConsentRequiredError({
+              consentId: result.consent_id, expiresAt: result.expires_at,
+              reason: result.reason, message: result.message,
+            });
+          }
+          spendSessionId = result.spend_session_id;
+          return result.signed_tx;
+        },
+      },
+      rpc: {
+        async getLatestBlockhash() { return getCachedBlockhash(conn); },
+        async accountExists(address) { return !!(await rpcRetry(() => conn.getAccountInfo(new PublicKey(address)))); },
+        async submit(signedTx, opts) {
+          try {
+            return await submitAndConfirm(conn, signedTx, opts.confirm);
+          } catch (err) {
+            invalidateBlockhash();
+            storage.logAudit('EXECUTE', 'denied', { agentName: agent_name, scope: walletScope, operation: 'transfer_submit', details: JSON.stringify({ to, amount, error: (err as Error).message }) });
+            throw new VaultError('INTERNAL_ERROR', `Failed to submit transaction: ${(err as Error).message}`);
+          }
+        },
+      },
+      approval: { async requestApproval() { return true; } }, // gating handled inside signer (signWithGuards)
+      budget: {
+        async check() { return { withinDailyLimit: true, needsApproval: false }; }, // gating handled inside signer
+        async record({ amount: amt, currency: cur, signature }) {
+          if (!owner && amt > 0 && spendSessionId) {
+            try {
+              storage.recordSpend(spendSessionId, amt, cur, chain, 'transfer', 'committed', { destination: to, idempotencyKey: effectiveIdem, txSignature: signature });
+            } catch (err) {
+              if (!(err instanceof VaultError && err.code === 'IDEMPOTENCY_CONFLICT')) throw err;
+            }
+          }
+        },
+      },
+      idempotency: {
+        async get(key) {
+          const prior = storage.getSpendByIdempotencyKey(key);
+          if (!prior) return null;
+          return { operation: prior.operation, destination: prior.destination ?? null, currency: prior.currency, amount: prior.amount, signature: prior.tx_signature ?? undefined };
+        },
+        async commit() {}, // recordSpend handled in budget.record
+      },
+      activity: {
+        async record(ev) {
+          storage.logAudit('EXECUTE', ev.status === 'failed' ? 'denied' : 'success', { agentName: agent_name, scope: walletScope, operation: 'transfer', details: JSON.stringify({ to, amount: ev.amount, currency: ev.currency, signature: ev.signature, status: ev.status }) });
+        },
+      },
+    };
+
+    const waitForConfirm = (request.body.confirm ?? 'confirmed') !== 'submitted';
+    try {
+      const result = await withWalletLock(walletScope, () => executeTransfer({
+        chain: 'solana', to, amount, currency: txCurrency,
+        mint: token?.mint, decimals: token?.decimals,
+        idempotencyKey: effectiveIdem, confirm: waitForConfirm, description,
+      }, ports));
+
+      if (result.idempotentReplay) {
+        return { chain, from, to, amount, currency: txCurrency, signature: result.signature, status: 'submitted', explorer_url: `https://solscan.io/tx/${result.signature}`, idempotent_replay: true };
+      }
+      const budgetInfo = budget.checkBudget(0, txCurrency, chain);
+      return { chain, from, to, amount, currency: txCurrency, signature: result.signature, status: result.status, explorer_url: `https://solscan.io/tx/${result.signature}`, remaining_daily: budgetInfo.remaining_daily };
+    } catch (err) {
+      if (err instanceof ConsentRequiredError) {
+        return { requires_consent: true, consent_id: err.consentId, expires_at: err.expiresAt, ...(err.reason ? { reason: err.reason } : {}), message: err.message };
+      }
+      throw err;
+    }
+  }
+
+  // ============================================================================
+  // V1 API: Vault Transfer (DCP builds + signs + submits) — Solana SOL + SPL
+  // ============================================================================
+
+  server.post<{
+    Body: {
+      chain: Chain;
+      to: string;
+      amount: number;
+      currency?: string;
+      mint?: string;
+      decimals?: number;
+      confirm?: 'submitted' | 'confirmed';
+      agent_name: string;
+      session_id?: string;
+      description?: string;
+      idempotency_key?: string;
+      service_id?: string;
+      service_signature?: string;
+      timestamp?: string;
+      nonce?: string;
+    };
+  }>('/v1/vault/transfer', async (request) => {
+    const { chain, to, amount, currency, mint, decimals, agent_name, session_id, description, idempotency_key } = request.body;
+
+    if (!chain || !to || amount === undefined || !agent_name) {
+      throw new VaultError('INTERNAL_ERROR', 'chain, to, amount, and agent_name are required');
+    }
+    if (chain !== 'solana') {
+      throw new VaultError('INVALID_CHAIN', 'Only solana transfers are supported');
+    }
+    if (!storage.isUnlocked()) {
+      throw new VaultError('VAULT_LOCKED', 'Vault is locked. Please unlock first.');
+    }
+    const txCurrency = currency || 'SOL';
+    const isNative = txCurrency.toUpperCase() === 'SOL' && !mint;
+    // Resolve SPL token (mint + decimals) up front so an unknown token fails fast.
+    const token = isNative ? null : resolveToken(txCurrency, KNOWN_TOKENS, mint, decimals);
+
+    // Authenticate the transfer request (sign:chain scope), same as /v1/vault/sign.
+    const agentAuth = verifyLocalAgentRequest(request.body as Record<string, unknown>, `sign:${chain}`);
+    if (!agentAuth.authorized && agentAuth.skipConsentFlow) {
+      throw new VaultError('SERVICE_SCOPE_VIOLATION', agentAuth.reason || 'Scope not permitted for this agent');
+    }
+
+    const walletScope = `crypto.wallet.${chain}`;
+    const from = getWalletAddress(chain as Chain).address;
+
+    // ── Phase 4 strangler: shared-runner path (OFF by default) ────────────────
+    // When DCP_USE_SHARED_RUNNER=1 the transfer runs through wallet-core's
+    // executeTransfer using vault adapters. The Signer adapter REUSES the existing,
+    // tested signWithGuards (budget + consent + sign) — gating logic is re-sequenced
+    // by the runner, not rewritten. Default OFF keeps the proven path live until the
+    // new path is on-chain-verified.
+    if (process.env.DCP_USE_SHARED_RUNNER === '1') {
+      return runTransferViaSharedRunner(request, {
+        chain, to, amount, txCurrency, agent_name, session_id, description,
+        idempotency_key, walletScope, from, token,
+      });
+    }
+
+    // Serialize the whole build → sign → submit → record critical section per
+    // wallet so two transfers cannot race the budget check or double-submit.
+    type Outcome =
+      | { kind: 'replay'; signature: string }
+      | { kind: 'consent'; consent_id: string; expires_at: string; reason?: string; message: string }
+      | { kind: 'signed'; signature: string; status: string; remaining_daily: number; session_id?: string };
+
+    const outcome: Outcome = await withWalletLock(walletScope, async (): Promise<Outcome> => {
+      // Idempotency: a key replays ONLY the identical transfer. If the same key
+      // is reused with a DIFFERENT intent (other recipient, amount, or token) we
+      // must NOT replay the old signature — that would silently confirm a send the
+      // caller never asked for. Reject the mismatch and demand a fresh key.
+      if (idempotency_key) {
+        const prior = storage.getSpendByIdempotencyKey(idempotency_key);
+        if (prior) {
+          const sameIntent = idempotencyIntentMatches(
+            { operation: prior.operation, destination: prior.destination, currency: prior.currency, amount: prior.amount },
+            { operation: 'transfer', destination: to, currency: txCurrency, amount }
           );
-
-          // Telegram notification handled by consent watcher (avoids duplicates)
-
-          return {
-            requires_consent: true,
-            consent_id: consent.id,
-            expires_at: consent.expires_at,
-            reason: 'Amount exceeds approval threshold',
-            message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
-          };
+          if (!sameIntent) {
+            throw new VaultError(
+              'IDEMPOTENCY_CONFLICT',
+              'This idempotency_key was already used for a different transfer. Use a fresh idempotency_key for a new transaction.'
+            );
+          }
+          if (prior.tx_signature) return { kind: 'replay', signature: prior.tx_signature };
         }
+      }
+
+      // A per-transfer nonce embedded as an on-chain memo. With the blockhash
+      // cache, two DISTINCT transfers (different keys) with identical from/to/
+      // amount would otherwise build byte-identical transactions and collide on
+      // one signature. The memo makes same-key → same tx (idempotent) and
+      // different-key → different tx (distinct send). No client key → a random
+      // nonce, so each call is its own distinct send.
+      const effectiveIdem = idempotency_key || crypto.randomUUID();
+
+      const conn = getSolanaConnection();
+      const blockhash = await getCachedBlockhash(conn);
+
+      let unsignedTx: string;
+      if (isNative) {
+        // SOL: if the recipient account doesn't exist yet, a sub-rent-exempt
+        // amount can't create it — fail with a clear message instead of a
+        // cryptic on-chain simulation error.
+        const toInfo = await rpcRetry(() => conn.getAccountInfo(new PublicKey(to)));
+        if (!toInfo) {
+          const rentMin = await rpcRetry(() => conn.getMinimumBalanceForRentExemption(0));
+          const lamports = Math.round(amount * LAMPORTS_PER_SOL);
+          if (lamports < rentMin) {
+            throw new VaultError(
+              'INVALID_CHAIN',
+              `Amount ${amount} SOL is below the ~${(rentMin / LAMPORTS_PER_SOL).toFixed(5)} SOL minimum needed to create a new account. Send at least that much, or send to an account that already exists.`
+            );
+          }
+        }
+        unsignedTx = buildSolanaTransferTx(from, to, amount, blockhash, { memo: effectiveIdem });
       } else {
-        // Amount is under approval threshold - auto-approve without session/consent
-        // This is the user's configured threshold, so we trust it
-        budgetAutoApproved = true;
-        storage.logAudit('EXECUTE', 'success', {
-          agentName: agent_name,
-          scope: `crypto.wallet.${chain}`,
-          operation: 'budget_auto_approve',
-          details: JSON.stringify({ amount, currency: txCurrency, chain, threshold: budget.getLimits(txCurrency).approval_threshold }),
+        // SPL token: create the recipient's Associated Token Account if they've
+        // never held this token, so sending to a brand-new wallet "just works".
+        const recipientAta = getSolanaAtaAddress(token!.mint, to);
+        const ataInfo = await rpcRetry(() => conn.getAccountInfo(new PublicKey(recipientAta)));
+        unsignedTx = buildSplTransferTx({
+          fromAddress: from,
+          toAddress: to,
+          mint: token!.mint,
+          amount,
+          decimals: token!.decimals,
+          blockhash,
+          createRecipientAta: !ataInfo,
+          memo: effectiveIdem,
         });
       }
-    }
 
-    // Get wallet scope
-    const walletScope = `crypto.wallet.${chain}`;
+      // Reuse the exact budget + consent + sign core; defer the spend until the
+      // broadcast actually succeeds.
+      const result = await signWithGuards({
+        body: request.body as Record<string, unknown>,
+        chain,
+        unsignedTx,
+        amount,
+        currency: txCurrency,
+        agentName: agent_name,
+        sessionId: session_id,
+        description: description ?? `Send ${amount} SOL to ${to}`,
+        idempotencyKey: idempotency_key,
+        deferSpend: true,
+        ownerApproved: isOwnerRequest(request),
+      });
 
-    // Try to reuse an existing active session by agent + scope
-    if (!effectiveSessionId) {
-      const existing = findActiveSessionForScope(agent_name, walletScope);
-      if (existing) {
-        effectiveSessionId = existing;
-      }
-    }
-
-    // Check for valid session
-    let hasSession = false;
-    if (effectiveSessionId) {
-      const session = storage.getSession(effectiveSessionId);
-      if (session && !session.revoked_at && new Date(session.expires_at) > new Date()) {
-        if (session.granted_scopes.includes(walletScope)) {
-          hasSession = true;
-          storage.touchSession(effectiveSessionId);
-        }
-      }
-    }
-
-    // If no valid session AND not budget auto-approved, check for consent
-    // Skip this check if budget auto-approved (amount under threshold)
-    if (!hasSession && !budgetAutoApproved) {
-      // Check if there's an approved consent that can be consumed (approve-once semantics)
-      const consumedConsent = storage.consumeApprovedConsent(agent_name, 'sign_tx', walletScope);
-      if (!consumedConsent) {
-        // No approved consent - create pending consent
-        const { consent, isNew } = storage.createPendingConsent(
-          agent_name,
-          'sign_tx',
-          walletScope,
-          consentDetailsWithDisplayName(request.body as Record<string, unknown>, agent_name, {
-            description,
-            amount,
-            currency: txCurrency,
-            chain,
-          })
-        );
-
-        // Telegram notification handled by consent watcher (avoids duplicates)
-
+      if (result.kind === 'consent') {
         return {
-          requires_consent: true,
-          consent_id: consent.id,
-          expires_at: consent.expires_at,
-          message: `Consent required. Approve with: POST /consent/${consent.id}/approve`,
+          kind: 'consent',
+          consent_id: result.consent_id,
+          expires_at: result.expires_at,
+          reason: result.reason,
+          message: result.message,
         };
       }
 
-      // Approved consent consumed - proceed to signing
-      storage.logAudit('EXECUTE', 'success', {
+      // DCP SUBMITS the signed transaction (with retry + rebroadcast).
+      // confirm='submitted' returns as soon as it is broadcast (fast path for
+      // trading agents); the default waits for on-chain confirmation.
+      const waitForConfirm = (request.body.confirm ?? 'confirmed') !== 'submitted';
+      let submitted: { signature: string; status: 'submitted' | 'confirmed' | 'finalized' | 'failed' };
+      try {
+        submitted = await submitAndConfirm(conn, result.signed_tx, waitForConfirm);
+      } catch (err) {
+        // A stale cached blockhash is one possible cause — drop it so the next
+        // attempt refetches.
+        invalidateBlockhash();
+        storage.logAudit('EXECUTE', 'denied', {
+          agentName: agent_name,
+          scope: walletScope,
+          operation: 'transfer_submit',
+          details: JSON.stringify({ to, amount, error: (err as Error).message }),
+        });
+        // Spend was deferred → budget untouched and idempotency key free to retry.
+        throw new VaultError('INTERNAL_ERROR', `Failed to submit transaction: ${(err as Error).message}`);
+      }
+
+      // Commit the spend now that it landed/broadcast (records the signature for
+      // idempotent replay). Owner-initiated sends do not count against agent
+      // budget. A concurrent winner may have recorded first.
+      if (submitted.status !== 'failed' && amount > 0 && !isOwnerRequest(request)) {
+        try {
+          storage.recordSpend(result.spend_session_id, amount, txCurrency, chain, 'transfer', 'committed', {
+            destination: to,
+            idempotencyKey: effectiveIdem,
+            txSignature: submitted.signature,
+          });
+        } catch (err) {
+          if (!(err instanceof VaultError && err.code === 'IDEMPOTENCY_CONFLICT')) throw err;
+        }
+      }
+
+      const budgetInfo = budget.checkBudget(0, txCurrency, chain);
+
+      storage.logAudit('EXECUTE', submitted.status === 'failed' ? 'denied' : 'success', {
         agentName: agent_name,
         scope: walletScope,
-        operation: 'consume_approval',
-        details: JSON.stringify({ consent_id: consumedConsent.id }),
+        operation: 'transfer',
+        details: JSON.stringify({ to, amount, currency: txCurrency, signature: submitted.signature, status: submitted.status }),
       });
-    }
 
-    // Get wallet and sign
-    const masterKey = storage.getMasterKey();
-    const payload = storage.getEncryptedPayload(walletScope);
-
-    if (!payload) {
-      throw new VaultError('RECORD_NOT_FOUND', `No wallet found for chain: ${chain}`);
-    }
-
-    // Sign the transaction (signTransaction expects base64 string for Solana)
-    const signResult = await signTransaction(payload, masterKey, chain, unsigned_tx);
-
-    // Record spend event if amount provided
-    if (amount !== undefined && amount > 0) {
-      const spendSessionId = effectiveSessionId || getBudgetLedgerSessionId(agent_name);
-      storage.recordSpend(spendSessionId, amount, txCurrency, chain, 'sign_tx', 'committed', {
-        idempotencyKey: idempotency_key,
-      });
-    }
-
-    // Get updated budget info
-    const budgetInfo = budget.checkBudget(0, txCurrency, chain);
-
-    storage.logAudit('EXECUTE', 'success', {
-      agentName: agent_name,
-      scope: walletScope,
-      operation: 'sign_tx',
-      details: JSON.stringify({ chain, amount, currency: txCurrency }),
+      return {
+        kind: 'signed',
+        signature: submitted.signature,
+        status: submitted.status,
+        remaining_daily: budgetInfo.remaining_daily,
+        session_id: result.session_id,
+      };
     });
 
+    if (outcome.kind === 'consent') {
+      return {
+        requires_consent: true,
+        consent_id: outcome.consent_id,
+        expires_at: outcome.expires_at,
+        ...(outcome.reason ? { reason: outcome.reason } : {}),
+        message: outcome.message,
+      };
+    }
+
+    if (outcome.kind === 'replay') {
+      return {
+        chain,
+        from,
+        to,
+        amount,
+        currency: txCurrency,
+        signature: outcome.signature,
+        status: 'submitted',
+        explorer_url: `https://solscan.io/tx/${outcome.signature}`,
+        idempotent_replay: true,
+      };
+    }
+
     return {
-      signed_tx: signResult.signed_tx,
-      signature: signResult.signature,
       chain,
-      remaining_daily: budgetInfo.remaining_daily,
-      session_id: effectiveSessionId,
+      from,
+      to,
+      amount,
+      currency: txCurrency,
+      signature: outcome.signature,
+      status: outcome.status,
+      explorer_url: `https://solscan.io/tx/${outcome.signature}`,
+      remaining_daily: outcome.remaining_daily,
+      session_id: outcome.session_id,
+    };
+  });
+
+  // ============================================================================
+  // Phase 4 strangler: run a swap through wallet-core's shared runner using vault
+  // adapters. Signer delegates to signWithGuards (budget+consent+sign); SwapProvider
+  // uses wallet-core jupiter with the injected config; the runner owns the shared
+  // sequence (idempotency → quote+validate → build+validate → sign → re-validate →
+  // submit → record-on-success).
+  // ============================================================================
+  async function runSwapViaSharedRunner(
+    request: FastifyRequest<{ Body: Record<string, unknown> }>,
+    ctx: {
+      chain: Chain;
+      input: { mint: string; decimals: number; currency: string };
+      output: { mint: string; decimals: number; currency: string };
+      amount: number; slippageBps: number; agent_name: string; session_id?: string;
+      description?: string; idempotency_key?: string; walletScope: string; owner: string;
+    }
+  ) {
+    const { chain, input, output, amount, slippageBps, agent_name, session_id, description, idempotency_key, walletScope, owner } = ctx;
+    const isOwner = isOwnerRequest(request);
+    const effectiveIdem = idempotency_key || crypto.randomUUID();
+    const conn = getSolanaConnection();
+    let spendSessionId: string | undefined;
+
+    const ports: SwapPorts = {
+      signer: {
+        address: owner,
+        async sign(unsignedTx) {
+          const result = await signWithGuards({
+            body: request.body, chain, unsignedTx, amount, currency: input.currency,
+            agentName: agent_name, sessionId: session_id,
+            description: description ?? `Swap ${amount} ${input.currency} → ${output.currency}`,
+            idempotencyKey: effectiveIdem, deferSpend: true, ownerApproved: isOwner,
+          });
+          if (result.kind === 'consent') {
+            throw new ConsentRequiredError({ consentId: result.consent_id, expiresAt: result.expires_at, reason: result.reason, message: result.message });
+          }
+          spendSessionId = result.spend_session_id;
+          return result.signed_tx;
+        },
+      },
+      rpc: {
+        async getLatestBlockhash() { return getCachedBlockhash(conn); },
+        async accountExists(address) { return !!(await rpcRetry(() => conn.getAccountInfo(new PublicKey(address)))); },
+        async submit(signedTx, opts) {
+          try {
+            return await submitAndConfirm(conn, signedTx, opts.confirm);
+          } catch (err) {
+            storage.logAudit('EXECUTE', 'denied', { agentName: agent_name, scope: walletScope, operation: 'swap_submit', details: JSON.stringify({ from_token: input.currency, to_token: output.currency, error: (err as Error).message }) });
+            throw new VaultError('INTERNAL_ERROR', `Failed to submit swap: ${(err as Error).message}`);
+          }
+        },
+      },
+      swapProvider: {
+        async quote(args) {
+          return jupiterQuote(jupiterConfig, {
+            inputMint: args.inputMint,
+            outputMint: args.outputMint,
+            amountBaseUnits: args.rawInAmount,
+            slippageBps: args.slippageBps,
+          });
+        },
+        async buildSwapTx(quote, userPublicKey) { return jupiterBuildSwapTx(jupiterConfig, quote, userPublicKey); },
+      },
+      approval: { async requestApproval() { return true; } }, // gating handled inside signer
+      budget: {
+        async check() { return { withinDailyLimit: true, needsApproval: false }; },
+        async record({ amount: amt, currency: cur, signature }) {
+          if (!isOwner && amt > 0 && spendSessionId) {
+            try {
+              storage.recordSpend(spendSessionId, amt, cur, chain, 'swap', 'committed', { destination: output.mint, idempotencyKey: effectiveIdem, txSignature: signature });
+            } catch (err) {
+              if (!(err instanceof VaultError && err.code === 'IDEMPOTENCY_CONFLICT')) throw err;
+            }
+          }
+        },
+      },
+      idempotency: {
+        async get(key) {
+          const prior = storage.getSpendByIdempotencyKey(key);
+          if (!prior) return null;
+          return { operation: prior.operation, destination: prior.destination ?? null, currency: prior.currency, amount: prior.amount, signature: prior.tx_signature ?? undefined };
+        },
+        async commit() {},
+      },
+      config: {
+        jupiterProgramIds: () => JUPITER_PROGRAM_IDS,
+        swapAllowedPrograms: () => SWAP_ALLOWED_PROGRAMS,
+      },
+      activity: {
+        async record(ev) {
+          storage.logAudit('EXECUTE', ev.status === 'failed' ? 'denied' : 'success', { agentName: agent_name, scope: walletScope, operation: 'swap', details: JSON.stringify({ from_token: input.currency, to_token: output.currency, amount: ev.amount, signature: ev.signature, status: ev.status }) });
+        },
+      },
+    };
+
+    const waitForConfirm = (request.body.confirm ?? 'confirmed') !== 'submitted';
+    try {
+      const result = await withWalletLock(walletScope, () => executeSwap({
+        chain: 'solana',
+        fromToken: { mint: input.mint, decimals: input.decimals, currency: input.currency },
+        toToken: { mint: output.mint, decimals: output.decimals, currency: output.currency },
+        amount, slippageBps, idempotencyKey: effectiveIdem, confirm: waitForConfirm,
+      }, ports));
+
+      if (result.idempotentReplay) {
+        return { chain, from_token: input.currency, to_token: output.currency, amount, signature: result.signature, status: 'submitted', explorer_url: `https://solscan.io/tx/${result.signature}`, idempotent_replay: true };
+      }
+      const budgetInfo = budget.checkBudget(0, input.currency, chain);
+      return { chain, from_token: input.currency, to_token: output.currency, amount, out_amount: result.outAmount, signature: result.signature, status: result.status, explorer_url: `https://solscan.io/tx/${result.signature}`, remaining_daily: budgetInfo.remaining_daily };
+    } catch (err) {
+      if (err instanceof ConsentRequiredError) {
+        return { requires_consent: true, consent_id: err.consentId, expires_at: err.expiresAt, ...(err.reason ? { reason: err.reason } : {}), message: err.message };
+      }
+      throw err;
+    }
+  }
+
+  // ============================================================================
+  // V1 API: Vault Swap (Jupiter) — quote → build → validate → sign → submit
+  // ============================================================================
+
+  server.post<{
+    Body: {
+      chain: Chain;
+      from_token: string;
+      to_token: string;
+      amount: number;
+      slippage_bps?: number;
+      from_decimals?: number;
+      to_decimals?: number;
+      confirm?: 'submitted' | 'confirmed';
+      agent_name: string;
+      session_id?: string;
+      description?: string;
+      idempotency_key?: string;
+      service_id?: string;
+      service_signature?: string;
+      timestamp?: string;
+      nonce?: string;
+    };
+  }>('/v1/vault/swap', async (request) => {
+    const { chain, from_token, to_token, amount, slippage_bps, from_decimals, to_decimals, agent_name, session_id, description, idempotency_key } = request.body;
+
+    if (!chain || !from_token || !to_token || amount === undefined || !agent_name) {
+      throw new VaultError('INTERNAL_ERROR', 'chain, from_token, to_token, amount, and agent_name are required');
+    }
+    if (chain !== 'solana') {
+      throw new VaultError('INVALID_CHAIN', 'Only solana swaps are supported');
+    }
+    if (!storage.isUnlocked()) {
+      throw new VaultError('VAULT_LOCKED', 'Vault is locked. Please unlock first.');
+    }
+
+    const agentAuth = verifyLocalAgentRequest(request.body as Record<string, unknown>, `sign:${chain}`);
+    if (!agentAuth.authorized && agentAuth.skipConsentFlow) {
+      throw new VaultError('SERVICE_SCOPE_VIOLATION', agentAuth.reason || 'Scope not permitted for this agent');
+    }
+
+    const slippageBps = slippage_bps ?? 50;
+    const input = resolveSwapToken(from_token, KNOWN_TOKENS, from_decimals);
+    const output = resolveSwapToken(to_token, KNOWN_TOKENS, to_decimals);
+    if (input.mint === output.mint) {
+      throw new VaultError('INVALID_CHAIN', 'from_token and to_token are the same');
+    }
+    const walletScope = `crypto.wallet.${chain}`;
+    const owner = getWalletAddress(chain as Chain).address;
+
+    // Phase 4 strangler: shared-runner swap path (OFF by default).
+    if (process.env.DCP_USE_SHARED_RUNNER === '1') {
+      return runSwapViaSharedRunner(request, {
+        chain, input, output, amount, slippageBps, agent_name, session_id, description,
+        idempotency_key, walletScope, owner,
+      });
+    }
+
+    type Outcome =
+      | { kind: 'replay'; signature: string }
+      | { kind: 'consent'; consent_id: string; expires_at: string; reason?: string; message: string }
+      | { kind: 'signed'; signature: string; status: string; out_amount?: string; remaining_daily: number; session_id?: string };
+
+    const outcome: Outcome = await withWalletLock(walletScope, async (): Promise<Outcome> => {
+      // Idempotency: a key replays ONLY the identical swap (same input token,
+      // amount, and output token). Reuse with a different intent must NOT replay
+      // an unrelated signature — reject and demand a fresh key.
+      if (idempotency_key) {
+        const prior = storage.getSpendByIdempotencyKey(idempotency_key);
+        if (prior) {
+          const sameIntent = idempotencyIntentMatches(
+            { operation: prior.operation, destination: prior.destination, currency: prior.currency, amount: prior.amount },
+            { operation: 'swap', destination: output.mint, currency: input.currency, amount }
+          );
+          if (!sameIntent) {
+            throw new VaultError(
+              'IDEMPOTENCY_CONFLICT',
+              'This idempotency_key was already used for a different swap. Use a fresh idempotency_key.'
+            );
+          }
+          if (prior.tx_signature) return { kind: 'replay', signature: prior.tx_signature };
+        }
+      }
+      const effectiveIdem = idempotency_key || crypto.randomUUID();
+
+      // Quote + build the swap via Jupiter (with the injected platform fee, if any).
+      const rawIn = BigInt(Math.round(amount * 10 ** input.decimals)).toString();
+      const quote = await jupiterQuote(jupiterConfig, {
+        inputMint: input.mint,
+        outputMint: output.mint,
+        amountBaseUnits: rawIn,
+        slippageBps,
+      });
+
+      // Bind the third-party quote to the caller's intent (shared validator). A
+      // wrong/stale/swapped quote (different mints, tampered amount, wider slippage)
+      // must never get built or signed.
+      const quoteCheck = validateSwapQuote(quote, {
+        inputMint: input.mint,
+        outputMint: output.mint,
+        rawInAmount: rawIn,
+        slippageBps,
+      });
+      if (!quoteCheck.ok) throw new VaultError('INVALID_CHAIN', quoteCheck.reason!);
+
+      const swapTx = await jupiterBuildSwapTx(jupiterConfig, quote, owner);
+
+      // Validate the third-party-built tx before signing (shared validator): the
+      // wallet must be the sole signer + fee-payer, and the tx must be a real
+      // Jupiter route touching only allow-listed programs. Guards against a
+      // compromised/spoofed Jupiter response slipping in a drain instruction.
+      const txCheck = validateSwapTransaction(swapTx, {
+        owner,
+        jupiterProgramIds: JUPITER_PROGRAM_IDS,
+        allowedPrograms: SWAP_ALLOWED_PROGRAMS,
+      });
+      if (!txCheck.ok) throw new VaultError('INVALID_CHAIN', txCheck.reason!);
+
+      // Budget + consent are charged on the INPUT being spent. Defer the spend
+      // until the swap actually broadcasts.
+      const result = await signWithGuards({
+        body: request.body as Record<string, unknown>,
+        chain,
+        unsignedTx: swapTx,
+        amount,
+        currency: input.currency,
+        agentName: agent_name,
+        sessionId: session_id,
+        description: description ?? `Swap ${amount} ${input.currency} → ${output.currency}`,
+        idempotencyKey: effectiveIdem,
+        deferSpend: true,
+        ownerApproved: isOwnerRequest(request),
+      });
+      if (result.kind === 'consent') {
+        return { kind: 'consent', consent_id: result.consent_id, expires_at: result.expires_at, reason: result.reason, message: result.message };
+      }
+
+      const conn = getSolanaConnection();
+      const waitForConfirm = (request.body.confirm ?? 'confirmed') !== 'submitted';
+      let submitted: { signature: string; status: 'submitted' | 'confirmed' | 'finalized' | 'failed' };
+      try {
+        submitted = await submitAndConfirm(conn, result.signed_tx, waitForConfirm);
+      } catch (err) {
+        storage.logAudit('EXECUTE', 'denied', { agentName: agent_name, scope: walletScope, operation: 'swap_submit', details: JSON.stringify({ from_token, to_token, error: (err as Error).message }) });
+        throw new VaultError('INTERNAL_ERROR', `Failed to submit swap: ${(err as Error).message}`);
+      }
+
+      if (submitted.status !== 'failed' && amount > 0 && !isOwnerRequest(request)) {
+        try {
+          storage.recordSpend(result.spend_session_id, amount, input.currency, chain, 'swap', 'committed', {
+            destination: output.mint,
+            idempotencyKey: effectiveIdem,
+            txSignature: submitted.signature,
+          });
+        } catch (err) {
+          if (!(err instanceof VaultError && err.code === 'IDEMPOTENCY_CONFLICT')) throw err;
+        }
+      }
+
+      const budgetInfo = budget.checkBudget(0, input.currency, chain);
+      storage.logAudit('EXECUTE', submitted.status === 'failed' ? 'denied' : 'success', {
+        agentName: agent_name,
+        scope: walletScope,
+        operation: 'swap',
+        details: JSON.stringify({ from_token: input.currency, to_token: output.currency, amount, signature: submitted.signature, status: submitted.status }),
+      });
+
+      return { kind: 'signed', signature: submitted.signature, status: submitted.status, out_amount: quote.outAmount, remaining_daily: budgetInfo.remaining_daily, session_id: result.session_id };
+    });
+
+    if (outcome.kind === 'consent') {
+      return { requires_consent: true, consent_id: outcome.consent_id, expires_at: outcome.expires_at, ...(outcome.reason ? { reason: outcome.reason } : {}), message: outcome.message };
+    }
+    if (outcome.kind === 'replay') {
+      return { chain, from_token: input.currency, to_token: output.currency, amount, signature: outcome.signature, status: 'submitted', explorer_url: `https://solscan.io/tx/${outcome.signature}`, idempotent_replay: true };
+    }
+    return {
+      chain,
+      from_token: input.currency,
+      to_token: output.currency,
+      amount,
+      out_amount: outcome.out_amount,
+      signature: outcome.signature,
+      status: outcome.status,
+      explorer_url: `https://solscan.io/tx/${outcome.signature}`,
+      remaining_daily: outcome.remaining_daily,
+      session_id: outcome.session_id,
     };
   });
 
@@ -5506,6 +6301,34 @@ async function buildServer(): Promise<FastifyInstance> {
     return { logs, count: logs.length };
   });
 
+  // ============================================================================
+  // Background retention: keep the local DB small (mobile-friendly). Conservative
+  // by default (90 days) and SAFE for budgeting — spend retention is floored well
+  // beyond the 24h budget window inside storage.pruneOldEvents().
+  // ============================================================================
+  const RETENTION_AUDIT_DAYS = parseInt(process.env.DCP_AUDIT_RETENTION_DAYS || '90', 10);
+  const RETENTION_SPEND_DAYS = parseInt(process.env.DCP_SPEND_RETENTION_DAYS || '90', 10);
+  const runPrune = () => {
+    try {
+      if (!storage.isUnlocked()) return;
+      const r = storage.pruneOldEvents({
+        auditRetentionDays: RETENTION_AUDIT_DAYS,
+        spendRetentionDays: RETENTION_SPEND_DAYS,
+      });
+      if (r.auditDeleted + r.spendDeleted > 0) {
+        console.log(`[retention] pruned ${r.auditDeleted} audit + ${r.spendDeleted} spend rows`);
+      }
+    } catch (err) {
+      console.error('[retention] prune failed:', err instanceof Error ? err.message : err);
+    }
+  };
+  const pruneTimer = setInterval(runPrune, 24 * 60 * 60 * 1000);
+  // Don't keep the process alive just for the timer.
+  if (typeof pruneTimer.unref === 'function') pruneTimer.unref();
+  server.addHook('onClose', async () => {
+    clearInterval(pruneTimer);
+  });
+
   return server;
 }
 
@@ -5999,6 +6822,10 @@ function getScopeForRelayMethod(method: string, params: Record<string, unknown>)
       return `write:${params.scope || ''}`;
     case 'vault_sign':
       return `sign:${params.chain || 'solana'}`;
+    case 'vault_transfer':
+      return `sign:${params.chain || 'solana'}`;
+    case 'vault_swap':
+      return `sign:${params.chain || 'solana'}`;
     case 'vault_sign_message':
       return `sign:${params.chain || 'solana'}`;
     case 'vault_sign_x402':
@@ -6407,6 +7234,12 @@ async function handleRelayRequest(
     case 'vault_sign':
       url = '/v1/vault/sign';
       break;
+    case 'vault_transfer':
+      url = '/v1/vault/transfer';
+      break;
+    case 'vault_swap':
+      url = '/v1/vault/swap';
+      break;
     case 'vault_sign_message':
       url = '/v1/vault/sign_message';
       break;
@@ -6718,6 +7551,10 @@ function mcpToolToRest(
       return { method: 'POST', url: '/v1/vault/write', body: { ...args } };
     case 'vault_sign_tx':
       return { method: 'POST', url: '/v1/vault/sign', body: { ...args } };
+    case 'vault_transfer':
+      return { method: 'POST', url: '/v1/vault/transfer', body: { ...args } };
+    case 'vault_swap':
+      return { method: 'POST', url: '/v1/vault/swap', body: { ...args } };
     case 'vault_sign_message':
       return { method: 'POST', url: '/v1/vault/sign_message', body: { ...args } };
     case 'vault_sign_x402':

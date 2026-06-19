@@ -123,6 +123,7 @@ const PARKED_PACKAGES = [
 
 // Packages that CAN be published in Phase 1
 const PUBLISHABLE_PACKAGES = [
+  '@dcprotocol/wallet-core',
   '@dcprotocol/core',
   '@dcprotocol/client',
   '@dcprotocol/vault',

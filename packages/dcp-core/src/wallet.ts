@@ -279,6 +279,23 @@ export async function signTransaction(
 }
 
 // ============================================================================
+// Transaction Building + verification — RE-EXPORTED from @dcprotocol/wallet-core
+// ============================================================================
+//
+// The pure tx build/decode/validation logic lives in @dcprotocol/wallet-core (a
+// clean, native-dep-free package) so React Native (mobile) can import it. It is
+// re-exported here so existing @dcprotocol/core importers are unchanged.
+export {
+  buildSolanaTransferTx,
+  buildSplTransferTx,
+  getSolanaAtaAddress,
+  verifyTransferTx,
+  getTransactionSigners,
+  getTransactionProgramIds,
+} from '@dcprotocol/wallet-core';
+export type { TransferVerifyResult } from '@dcprotocol/wallet-core';
+
+// ============================================================================
 // Message Signing
 // ============================================================================
 

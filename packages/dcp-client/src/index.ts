@@ -68,7 +68,9 @@ export type {
 
   // Input types
   SignTxInput,
+  TransferInput,
   SignMessageInput,
+  SwapInput,
   SignX402Input,
   ReadCredentialInput,
   WriteCredentialInput,
@@ -78,7 +80,9 @@ export type {
   // Output types
   GetAddressResult,
   SignTxResult,
+  TransferResult,
   SignMessageResult,
+  SwapResult,
   SignX402Result,
   ReadCredentialResult,
   WriteCredentialResult,

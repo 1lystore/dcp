@@ -1,7 +1,7 @@
 {
-  "name": "@dcprotocol/core",
+  "name": "@dcprotocol/wallet-core",
   "version": "3.0.0",
-  "description": "Core encryption, wallet, storage, and policy engine for DCP",
+  "description": "Pure, dependency-light DCP wallet brain: tx build, decode, validation, and shared error types. No storage, no key custody, no native deps — safe to import from Node, browser, and React Native.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
@@ -21,7 +21,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/1lystore/dcp.git",
-    "directory": "packages/dcp-core"
+    "directory": "packages/dcp-wallet-core"
   },
   "homepage": "https://github.com/1lystore/dcp#readme",
   "bugs": {
@@ -34,32 +34,19 @@
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
-    "vault",
-    "encryption",
     "wallet",
     "solana",
-    "crypto"
+    "transaction",
+    "validation"
   ],
   "author": "DCP Protocol",
   "license": "Apache-2.0",
   "dependencies": {
-    "@dcprotocol/wallet-core": "workspace:*",
     "@solana/spl-token": "^0.4.9",
-    "@solana/web3.js": "^1.98.0",
-    "better-sqlite3": "^11.7.0",
-    "bip39": "^3.1.0",
-    "bs58": "^6.0.0",
-    "keytar": "^7.9.0",
-    "paseto": "^3.1.4",
-    "sodium-native": "^4.3.1",
-    "tweetnacl": "^1.0.3"
+    "@solana/web3.js": "^1.98.0"
   },
   "devDependencies": {
-    "vite": "^6.0.0",
-    "@types/better-sqlite3": "^7.6.12",
-    "@types/bip39": "^2.4.2",
     "@types/node": "^22.10.2",
-    "@types/sodium-native": "^2.3.9",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^3.0.0"

@@ -23,16 +23,23 @@ import {
 
 import { DcpError } from '@dcprotocol/client';
 import { AgentConnection } from './connection.js';
+import { SolanaReader, ReadInputError } from '@dcprotocol/wallet-core';
 import {
   CANONICAL_SCOPE_GUIDE,
   SCOPE_PROPERTY_DESCRIPTION,
   VAULT_BUDGET_CHECK_DESCRIPTION,
   VAULT_GET_ADDRESS_DESCRIPTION,
+  VAULT_GET_BALANCES_DESCRIPTION,
+  VAULT_GET_TX_HISTORY_DESCRIPTION,
+  VAULT_GET_TX_STATUS_DESCRIPTION,
   VAULT_READ_DESCRIPTION,
   VAULT_SCOPE_GUIDE_DESCRIPTION,
+  VAULT_SEARCH_TOKENS_DESCRIPTION,
   VAULT_SIGN_MESSAGE_DESCRIPTION,
   VAULT_SIGN_TX_DESCRIPTION,
   VAULT_SIGN_X402_DESCRIPTION,
+  VAULT_SWAP_DESCRIPTION,
+  VAULT_TRANSFER_DESCRIPTION,
   VAULT_WRITE_DESCRIPTION,
 } from './scope-guide.js';
 import { AgentConfig, AgentError } from './types.js';
@@ -124,6 +131,7 @@ export class HttpMcpServer {
   private host: string;
   private port: number;
   private forceRelay: boolean;
+  private reader: SolanaReader;
 
   constructor(config: AgentConfig, options?: HttpMcpServerOptions) {
     this.config = config;
@@ -131,6 +139,7 @@ export class HttpMcpServer {
     this.port = options?.port ?? DEFAULT_PORT;
     this.forceRelay = options?.forceRelay ?? process.env.DCP_FORCE_RELAY === '1';
     this.connection = new AgentConnection(config, { forceRelay: this.forceRelay });
+    this.reader = new SolanaReader();
   }
 
   private createMcpServer(): Server {
@@ -354,6 +363,79 @@ export class HttpMcpServer {
             },
           },
           {
+            name: 'vault_get_balances',
+            description: VAULT_GET_BALANCES_DESCRIPTION,
+            inputSchema: {
+              type: 'object',
+              properties: {
+                chain: {
+                  type: 'string',
+                  enum: ['solana'],
+                  description: 'Use solana. DCP is currently exposed as a Solana wallet.',
+                },
+              },
+            },
+          },
+          {
+            name: 'vault_get_tx_status',
+            description: VAULT_GET_TX_STATUS_DESCRIPTION,
+            inputSchema: {
+              type: 'object',
+              properties: {
+                signature: {
+                  type: 'string',
+                  description: 'The base58 Solana transaction signature to look up.',
+                },
+                chain: {
+                  type: 'string',
+                  enum: ['solana'],
+                  description: 'Use solana.',
+                },
+              },
+              required: ['signature'],
+            },
+          },
+          {
+            name: 'vault_get_tx_history',
+            description: VAULT_GET_TX_HISTORY_DESCRIPTION,
+            inputSchema: {
+              type: 'object',
+              properties: {
+                limit: {
+                  type: 'number',
+                  description: 'Max signatures to return. Default 20, maximum 50.',
+                },
+                before: {
+                  type: 'string',
+                  description: 'Optional signature to paginate older activity from.',
+                },
+                chain: {
+                  type: 'string',
+                  enum: ['solana'],
+                  description: 'Use solana.',
+                },
+              },
+            },
+          },
+          {
+            name: 'vault_search_tokens',
+            description: VAULT_SEARCH_TOKENS_DESCRIPTION,
+            inputSchema: {
+              type: 'object',
+              properties: {
+                query: {
+                  type: 'string',
+                  description: 'Token symbol, name, or mint to search for.',
+                },
+                limit: {
+                  type: 'number',
+                  description: 'Max results to return. Default 10, maximum 20.',
+                },
+              },
+              required: ['query'],
+            },
+          },
+          {
             name: 'vault_read',
             description: VAULT_READ_DESCRIPTION,
             inputSchema: {
@@ -370,6 +452,74 @@ export class HttpMcpServer {
                 },
               },
               required: ['scope'],
+            },
+          },
+          {
+            name: 'vault_transfer',
+            description: VAULT_TRANSFER_DESCRIPTION,
+            inputSchema: {
+              type: 'object',
+              properties: {
+                chain: {
+                  type: 'string',
+                  enum: ['solana'],
+                  description: 'Use solana.',
+                },
+                to: {
+                  type: 'string',
+                  description: 'Recipient Solana address.',
+                },
+                amount: {
+                  type: 'number',
+                  description: 'Amount to send, for example 0.05 (SOL) or 1.5 (USDC).',
+                },
+                currency: {
+                  type: 'string',
+                  description: 'SOL for native, or a token symbol like USDC. For an arbitrary SPL token, also pass mint and decimals.',
+                },
+                mint: {
+                  type: 'string',
+                  description: 'Optional SPL token mint address (for tokens not in the registry). Requires decimals.',
+                },
+                decimals: {
+                  type: 'number',
+                  description: 'Optional token decimals; required when mint is provided.',
+                },
+                confirm: {
+                  type: 'string',
+                  enum: ['submitted', 'confirmed'],
+                  description: "Optional. 'confirmed' (default) waits for on-chain confirmation; 'submitted' returns as soon as the tx is broadcast (faster; poll vault_get_tx_status to confirm).",
+                },
+                description: {
+                  type: 'string',
+                  description: 'Short human-readable explanation shown to the user for approval.',
+                },
+                idempotency_key: {
+                  type: 'string',
+                  description: 'Stable unique key for this intended transfer to prevent accidental double-sends.',
+                },
+              },
+              required: ['chain', 'to', 'amount'],
+            },
+          },
+          {
+            name: 'vault_swap',
+            description: VAULT_SWAP_DESCRIPTION,
+            inputSchema: {
+              type: 'object',
+              properties: {
+                chain: { type: 'string', enum: ['solana'], description: 'Use solana.' },
+                from_token: { type: 'string', description: "Input token: 'SOL', a symbol like 'USDC', or a mint." },
+                to_token: { type: 'string', description: "Output token: 'SOL', a symbol like 'USDC', or a mint." },
+                amount: { type: 'number', description: 'Amount of the input token to swap.' },
+                slippage_bps: { type: 'number', description: 'Slippage tolerance in basis points (default 50).' },
+                from_decimals: { type: 'number', description: 'Decimals for from_token when it is an arbitrary mint.' },
+                to_decimals: { type: 'number', description: 'Decimals for to_token when it is an arbitrary mint.' },
+                confirm: { type: 'string', enum: ['submitted', 'confirmed'], description: "'confirmed' (default) waits; 'submitted' returns on broadcast." },
+                description: { type: 'string', description: 'Short explanation shown to the user for approval.' },
+                idempotency_key: { type: 'string', description: 'Stable unique key to prevent accidental double-swaps.' },
+              },
+              required: ['chain', 'from_token', 'to_token', 'amount'],
             },
           },
           {
@@ -537,12 +687,111 @@ export class HttpMcpServer {
         };
       }
 
+      case 'vault_get_balances': {
+        const { address } = await this.connection.getAddress('solana');
+        const result = await this.reader.getBalances(address);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'vault_get_tx_status': {
+        const input = args as { signature: string };
+        if (!input.signature) {
+          throw new McpError(ErrorCode.InvalidParams, 'signature is required');
+        }
+        const result = await this.reader.getTxStatus(input.signature);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'vault_get_tx_history': {
+        const input = (args ?? {}) as { limit?: number; before?: string };
+        const { address } = await this.connection.getAddress('solana');
+        const result = await this.reader.getTxHistory(address, {
+          limit: input.limit,
+          before: input.before,
+        });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'vault_search_tokens': {
+        const input = args as { query: string; limit?: number };
+        if (!input.query) {
+          throw new McpError(ErrorCode.InvalidParams, 'query is required');
+        }
+        const result = await this.reader.searchTokens(input.query, input.limit);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
       case 'vault_read': {
         const input = args as { scope: string; fields?: string[] };
         if (!input.scope) {
           throw new McpError(ErrorCode.InvalidParams, 'scope is required');
         }
         const result = await this.connection.readCredential(input.scope, input.fields);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'vault_transfer': {
+        const input = args as {
+          chain: 'solana';
+          to: string;
+          amount: number;
+          currency?: string;
+          mint?: string;
+          decimals?: number;
+          confirm?: 'submitted' | 'confirmed';
+          description?: string;
+          idempotency_key?: string;
+        };
+        if (!input.chain || !input.to || input.amount === undefined) {
+          throw new McpError(ErrorCode.InvalidParams, 'chain, to, and amount are required');
+        }
+        const result = await this.connection.transfer({
+          chain: input.chain,
+          to: input.to,
+          amount: input.amount,
+          currency: input.currency,
+          mint: input.mint,
+          decimals: input.decimals,
+          confirm: input.confirm,
+          description: input.description,
+          idempotencyKey: input.idempotency_key,
+        });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'vault_swap': {
+        const input = args as {
+          chain: 'solana'; from_token: string; to_token: string; amount: number;
+          slippage_bps?: number; from_decimals?: number; to_decimals?: number;
+          confirm?: 'submitted' | 'confirmed'; description?: string; idempotency_key?: string;
+        };
+        if (!input.chain || !input.from_token || !input.to_token || input.amount === undefined) {
+          throw new McpError(ErrorCode.InvalidParams, 'chain, from_token, to_token, and amount are required');
+        }
+        const result = await this.connection.swap({
+          chain: input.chain,
+          fromToken: input.from_token,
+          toToken: input.to_token,
+          amount: input.amount,
+          slippageBps: input.slippage_bps,
+          fromDecimals: input.from_decimals,
+          toDecimals: input.to_decimals,
+          confirm: input.confirm,
+          description: input.description,
+          idempotencyKey: input.idempotency_key,
+        });
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };
@@ -776,6 +1025,10 @@ export class HttpMcpServer {
             ],
             isError: true,
           };
+        }
+
+        if (error instanceof ReadInputError) {
+          throw new McpError(ErrorCode.InvalidParams, error.message);
         }
 
         if (error instanceof McpError) {

@@ -180,6 +180,88 @@ export class AgentConnection {
   }
 
   /**
+   * Build + sign + submit a transfer. DCP (the vault) builds the transaction
+   * itself from the intent, signs it, and submits it to the network.
+   */
+  async transfer(params: {
+    chain: 'solana';
+    to: string;
+    amount: number;
+    currency?: string;
+    mint?: string;
+    decimals?: number;
+    confirm?: 'submitted' | 'confirmed';
+    description?: string;
+    idempotencyKey?: string;
+  }): Promise<{
+    chain: string;
+    from: string;
+    to: string;
+    amount: number;
+    currency: string;
+    signature: string;
+    status: string;
+    explorer_url: string;
+    remaining_daily?: number;
+  }> {
+    this.ensureConnected();
+    this.updateState();
+    const result = await this.client!.transfer(params);
+    return {
+      chain: result.chain,
+      from: result.from,
+      to: result.to,
+      amount: result.amount,
+      currency: result.currency,
+      signature: result.signature,
+      status: result.status,
+      explorer_url: result.explorerUrl,
+      remaining_daily: result.remainingDaily,
+    };
+  }
+
+  /**
+   * Quote + build + sign + submit a swap via Jupiter.
+   */
+  async swap(params: {
+    chain: 'solana';
+    fromToken: string;
+    toToken: string;
+    amount: number;
+    slippageBps?: number;
+    fromDecimals?: number;
+    toDecimals?: number;
+    confirm?: 'submitted' | 'confirmed';
+    description?: string;
+    idempotencyKey?: string;
+  }): Promise<{
+    chain: string;
+    from_token: string;
+    to_token: string;
+    amount: number;
+    out_amount?: string;
+    signature: string;
+    status: string;
+    explorer_url: string;
+    remaining_daily?: number;
+  }> {
+    this.ensureConnected();
+    this.updateState();
+    const result = await this.client!.swap(params);
+    return {
+      chain: result.chain,
+      from_token: result.fromToken,
+      to_token: result.toToken,
+      amount: result.amount,
+      out_amount: result.outAmount,
+      signature: result.signature,
+      status: result.status,
+      explorer_url: result.explorerUrl,
+      remaining_daily: result.remainingDaily,
+    };
+  }
+
+  /**
    * Sign a message
    */
   async signMessage(params: {

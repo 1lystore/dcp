@@ -64,6 +64,14 @@ export {
   exportWalletPrivateKey,
   exportSolanaPrivateKey,
 
+  // Transaction building (build-from-intent)
+  buildSolanaTransferTx,
+  buildSplTransferTx,
+  getSolanaAtaAddress,
+  verifyTransferTx,
+  getTransactionSigners,
+  getTransactionProgramIds,
+
   // Transaction signing
   signTransaction,
   signSolanaTransaction,
