@@ -80,6 +80,23 @@ interface PairingStartRequest {
 interface ApprovalProcessedRequest {
   command_id: string;
   result: string;
+  /** Vault whose command is being acknowledged (used to look up the signing key) */
+  vault_id: string;
+  /** ISO timestamp for freshness check */
+  timestamp: string;
+  /** Unique nonce for replay protection */
+  nonce: string;
+  /** Ed25519 signature over {vault_id, command_id, result, timestamp, nonce} */
+  signature: string;
+}
+
+/** Vault key registration request (public_key required; signature required only to rotate an existing key) */
+interface RegisterRequest {
+  vault_id: string;
+  public_key: string;
+  timestamp?: string;
+  nonce?: string;
+  signature?: string;
 }
 
 /**
@@ -239,6 +256,55 @@ export class WebhookServer {
         // Invalid key format
       }
     }
+    return null;
+  }
+
+  /**
+   * Verify an Ed25519-signed request against a vault's registered key.
+   *
+   * Enforces the same gauntlet as the consent/budget webhooks: presence of
+   * timestamp/nonce/signature, a known vault key, timestamp freshness + nonce
+   * replay protection, and a valid signature over the canonical `signedData`.
+   *
+   * @returns an error descriptor to send back, or `null` when the request is authorized.
+   */
+  private verifySignedVaultRequest(
+    vaultId: string,
+    signedData: Record<string, unknown>,
+    signature: string | undefined,
+    timestamp: string | undefined,
+    nonce: string | undefined
+  ): { status: number; error: string; message: string } | null {
+    if (!vaultId) {
+      return { status: 400, error: 'INVALID_PAYLOAD', message: 'vault_id is required' };
+    }
+    if (!timestamp || !nonce || !signature) {
+      return {
+        status: 401,
+        error: 'MISSING_SIGNATURE',
+        message: 'timestamp, nonce, and signature are required',
+      };
+    }
+
+    const publicKey = this.getVaultPublicKey(vaultId);
+    if (!publicKey) {
+      return {
+        status: 401,
+        error: 'UNKNOWN_VAULT_KEY',
+        message: 'Vault public key not registered. Call /register first.',
+      };
+    }
+
+    if (!this.nonceStore.checkAndMark(nonce, timestamp)) {
+      return { status: 400, error: 'REPLAY_DETECTED', message: 'Stale timestamp or reused nonce' };
+    }
+
+    const message = Buffer.from(canonicalJson(signedData), 'utf8');
+    const signatureBuffer = Buffer.from(signature, 'base64');
+    if (!verifyEd25519(message, signatureBuffer, publicKey)) {
+      return { status: 401, error: 'INVALID_SIGNATURE', message: 'Signature verification failed' };
+    }
+
     return null;
   }
 
@@ -437,6 +503,22 @@ export class WebhookServer {
   ) {
     const { vaultId } = request.params;
 
+    // Require the vault's signature — otherwise anyone who knows a vault_id could
+    // unlink someone else's Telegram pairing (griefing / notification DoS).
+    const timestamp = request.headers['x-dcp-timestamp'] as string | undefined;
+    const nonce = request.headers['x-dcp-nonce'] as string | undefined;
+    const signature = request.headers['x-dcp-signature'] as string | undefined;
+    const authError = this.verifySignedVaultRequest(
+      vaultId,
+      { vault_id: vaultId, timestamp, nonce },
+      signature,
+      timestamp,
+      nonce
+    );
+    if (authError) {
+      return reply.status(authError.status).send({ error: authError.error, message: authError.message });
+    }
+
     const deleted = this.store.pairings.deletePairing(vaultId);
 
     console.log(`[UNLINK] Vault ${vaultId} unlinked: ${deleted}`);
@@ -451,6 +533,23 @@ export class WebhookServer {
     reply: FastifyReply
   ) {
     const { vaultId } = request.params;
+
+    // Require an Ed25519 signature from the vault's registered key. Only the
+    // desktop that owns this vault may enumerate its pending approvals.
+    const timestamp = request.headers['x-dcp-timestamp'] as string | undefined;
+    const nonce = request.headers['x-dcp-nonce'] as string | undefined;
+    const signature = request.headers['x-dcp-signature'] as string | undefined;
+    const authError = this.verifySignedVaultRequest(
+      vaultId,
+      { vault_id: vaultId, timestamp, nonce },
+      signature,
+      timestamp,
+      nonce
+    );
+    if (authError) {
+      return reply.status(authError.status).send({ error: authError.error, message: authError.message });
+    }
+
     const pairing = this.store.pairings.getPairingByVaultId(vaultId);
 
     if (!pairing) {
@@ -487,12 +586,36 @@ export class WebhookServer {
     request: FastifyRequest<{ Body: ApprovalProcessedRequest }>,
     reply: FastifyReply
   ) {
-    const { command_id, result } = request.body || {};
+    const { command_id, result, vault_id, timestamp, nonce, signature } = request.body || {};
 
-    if (!command_id || !result) {
+    if (!command_id || !result || !vault_id) {
       return reply.status(400).send({
         error: 'INVALID_PAYLOAD',
-        message: 'command_id and result are required',
+        message: 'command_id, result, and vault_id are required',
+      });
+    }
+
+    // Require an Ed25519 signature from the vault's registered key over the exact
+    // command being acknowledged — prevents anyone from forging "processed"
+    // notifications or spoofing arbitrary result text into the user's Telegram.
+    const authError = this.verifySignedVaultRequest(
+      vault_id,
+      { vault_id, command_id, result, timestamp, nonce },
+      signature,
+      timestamp,
+      nonce
+    );
+    if (authError) {
+      return reply.status(authError.status).send({ error: authError.error, message: authError.message });
+    }
+
+    // Authorization: the command must belong to the vault that signed the request,
+    // so a valid signature for vault A cannot process vault B's command.
+    const existing = this.store.approvals.getApprovalCommand(command_id);
+    if (!existing || existing.vault_id !== vault_id) {
+      return reply.status(404).send({
+        error: 'COMMAND_NOT_FOUND',
+        message: 'Approval command not found',
       });
     }
 
@@ -829,16 +952,43 @@ export class WebhookServer {
    * Handle vault key registration
    */
   private async handleRegister(
-    request: FastifyRequest<{ Body: { vault_id: string; public_key: string } }>,
+    request: FastifyRequest<{ Body: RegisterRequest }>,
     reply: FastifyReply
   ) {
-    const { vault_id, public_key } = request.body;
+    const { vault_id, public_key, timestamp, nonce, signature } = request.body;
 
     if (!vault_id || !public_key) {
       return reply.status(400).send({
         error: 'INVALID_PAYLOAD',
         message: 'vault_id and public_key are required',
       });
+    }
+
+    // Trust-anchor protection: the first key registered for a vault wins (TOFU),
+    // and idempotent re-registration of the SAME key is always allowed. Replacing
+    // an existing key with a DIFFERENT one is a rotation that must be signed by the
+    // currently-registered key — otherwise anyone who knows a vault_id could
+    // overwrite its trust anchor and forge every downstream webhook.
+    const existing = this.store.getVaultKey(vault_id);
+    if (existing && existing !== public_key) {
+      const authError = this.verifySignedVaultRequest(
+        vault_id,
+        { vault_id, public_key, timestamp, nonce },
+        signature,
+        timestamp,
+        nonce
+      );
+      if (authError) {
+        // A rotation attempt without a valid signature from the existing key is a
+        // takeover attempt — surface it distinctly from a first-time registration.
+        return reply.status(authError.status === 401 ? 403 : authError.status).send({
+          error: authError.error === 'MISSING_SIGNATURE' ? 'KEY_ALREADY_REGISTERED' : authError.error,
+          message:
+            authError.error === 'MISSING_SIGNATURE'
+              ? 'A different key is already registered for this vault; rotation must be signed by the existing key'
+              : authError.message,
+        });
+      }
     }
 
     try {

@@ -6,7 +6,15 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { Keypair, Transaction, SystemProgram, PublicKey } from '@solana/web3.js';
+import {
+  Keypair,
+  Transaction,
+  SystemProgram,
+  PublicKey,
+  TransactionMessage,
+  VersionedTransaction,
+  AddressLookupTableAccount,
+} from '@solana/web3.js';
 import {
   buildSolanaTransferTx,
   buildSplTransferTx,
@@ -85,5 +93,35 @@ describe('wallet-core: program ids (LUT-safe)', () => {
 
   it('reports resolvable:false on garbage', () => {
     expect(getTransactionProgramIds(Buffer.from('garbage').toString('base64')).resolvable).toBe(false);
+  });
+
+  it('stays resolvable for a v0 tx whose account args come from an Address Lookup Table (Jupiter swap shape)', () => {
+    // A real Jupiter swap is a v0 tx that sources most instruction accounts from an
+    // ALT (indexes beyond the static keys). Program ids still live in the static keys,
+    // so we must resolve them and NOT reject the tx as undecodable — the bug that made
+    // every swap fail with "could not be decoded for validation".
+    const SYSTEM = '11111111111111111111111111111111';
+    const lut = new AddressLookupTableAccount({
+      key: new PublicKey('4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T'),
+      state: {
+        deactivationSlot: BigInt('18446744073709551615'),
+        lastExtendedSlot: 0,
+        lastExtendedSlotStartIndex: 0,
+        authority: new PublicKey(OWNER),
+        addresses: [new PublicKey(TO)], // destination supplied via the LUT
+      },
+    });
+    const ix = SystemProgram.transfer({ fromPubkey: new PublicKey(OWNER), toPubkey: new PublicKey(TO), lamports: 1 });
+    const msg = new TransactionMessage({
+      payerKey: new PublicKey(OWNER),
+      recentBlockhash: BLOCKHASH,
+      instructions: [ix],
+    }).compileToV0Message([lut]);
+    const vtx = new VersionedTransaction(msg);
+    const b64 = Buffer.from(vtx.serialize()).toString('base64');
+
+    const r = getTransactionProgramIds(b64);
+    expect(r.resolvable).toBe(true); // was false before the fix → swap rejected
+    expect(r.programIds).toContain(SYSTEM);
   });
 });

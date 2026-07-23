@@ -26,6 +26,7 @@ import type {
 } from './types.js';
 import { RelayError, MESSAGE_TTL_MS } from './types.js';
 import { createHash, randomUUID } from 'node:crypto';
+import * as bip39 from 'bip39';
 
 // ============================================================================
 // Message Store
@@ -547,15 +548,26 @@ export class RateLimiter {
 // Pairing Claim Store (VPS → Relay → Vault flow)
 // ============================================================================
 
-/** Word list for verification phrase generation (matches agent/pairing.ts) */
-const WORD_LIST = [
-  'apple', 'banana', 'cherry', 'dragon', 'eagle', 'falcon',
-  'grape', 'harbor', 'island', 'jungle', 'kettle', 'lemon',
-  'mango', 'nectar', 'orange', 'pepper', 'quartz', 'river',
-  'sunset', 'tiger', 'umbrella', 'violet', 'walnut', 'xylophone',
-  'yellow', 'zebra', 'anchor', 'bridge', 'castle', 'delta',
-  'ember', 'forest',
-];
+// Verification-phrase parameters. CANONICAL SOURCE: @dcprotocol/core
+// `generateVerificationPhrase` — this MUST stay byte-for-byte identical or agent
+// and relay will compute different phrases and pairing verification will fail.
+// The relay is deliberately kept free of the (native-dep-heavy) core package, so
+// the algorithm is mirrored here against the same BIP-39 2048-word list.
+// BIP-39 2048 words × 4 = 2^44 collision resistance (was 32 words × 3 ≈ 2^15).
+const VERIFICATION_PHRASE_WORDLIST = bip39.wordlists.english;
+const VERIFICATION_PHRASE_WORD_COUNT = 4;
+
+function readBitsBigEndian(buf: Buffer, bitOffset: number, numBits: number): number {
+  let value = 0;
+  for (let i = 0; i < numBits; i++) {
+    const globalBit = bitOffset + i;
+    const byteIndex = globalBit >> 3;
+    const bitIndex = 7 - (globalBit & 7);
+    const bit = (buf[byteIndex] >> bitIndex) & 1;
+    value = (value << 1) | bit;
+  }
+  return value;
+}
 
 /** Pairing claim TTL: 10 minutes */
 const PAIRING_CLAIM_TTL_MS = 10 * 60 * 1000;
@@ -709,11 +721,12 @@ export class PairingClaimStore {
 
     const hash = createHash('sha256').update(combined).digest();
 
-    const word1 = WORD_LIST[hash[0] % WORD_LIST.length];
-    const word2 = WORD_LIST[hash[1] % WORD_LIST.length];
-    const word3 = WORD_LIST[hash[2] % WORD_LIST.length];
-
-    return `${word1}-${word2}-${word3}`;
+    const words: string[] = [];
+    for (let i = 0; i < VERIFICATION_PHRASE_WORD_COUNT; i++) {
+      const index = readBitsBigEndian(hash, i * 11, 11) % VERIFICATION_PHRASE_WORDLIST.length;
+      words.push(VERIFICATION_PHRASE_WORDLIST[index]);
+    }
+    return words.join('-');
   }
 
   /**

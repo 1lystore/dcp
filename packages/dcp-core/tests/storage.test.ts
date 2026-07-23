@@ -475,6 +475,51 @@ describe('Storage Layer', () => {
       const resolved = storage.resolveConsent(consent.id, 'denied');
       expect(resolved).toBe(false);
     });
+
+    it('consumes an approved consent when the transaction binding matches', () => {
+      const details = JSON.stringify({ amount: 0.1, destination: 'DEST_X', currency: 'SOL' });
+      const consent = storage.createPendingConsent('Claude', 'sign_tx', 'crypto.wallet.solana', details);
+      storage.resolveConsent(consent.id, 'approved');
+
+      const consumed = storage.consumeApprovedConsent('Claude', 'sign_tx', 'crypto.wallet.solana', {
+        amount: 0.1,
+        destination: 'DEST_X',
+      });
+      expect(consumed).not.toBeNull();
+      expect(consumed!.status).toBe('consumed');
+    });
+
+    it('refuses to reuse an approval for a different destination', () => {
+      const details = JSON.stringify({ amount: 0.1, destination: 'DEST_X', currency: 'SOL' });
+      const consent = storage.createPendingConsent('Claude', 'sign_tx', 'crypto.wallet.solana', details);
+      storage.resolveConsent(consent.id, 'approved');
+
+      // Approval was for DEST_X; agent tries to reuse it to pay DEST_EVIL.
+      const consumed = storage.consumeApprovedConsent('Claude', 'sign_tx', 'crypto.wallet.solana', {
+        amount: 0.1,
+        destination: 'DEST_EVIL',
+      });
+      expect(consumed).toBeNull();
+
+      // And the approval remains available for its intended transaction.
+      const stillThere = storage.consumeApprovedConsent('Claude', 'sign_tx', 'crypto.wallet.solana', {
+        amount: 0.1,
+        destination: 'DEST_X',
+      });
+      expect(stillThere).not.toBeNull();
+    });
+
+    it('refuses to reuse an approval for a different amount', () => {
+      const details = JSON.stringify({ amount: 0.1, destination: 'DEST_X', currency: 'SOL' });
+      const consent = storage.createPendingConsent('Claude', 'sign_tx', 'crypto.wallet.solana', details);
+      storage.resolveConsent(consent.id, 'approved');
+
+      const consumed = storage.consumeApprovedConsent('Claude', 'sign_tx', 'crypto.wallet.solana', {
+        amount: 9.9,
+        destination: 'DEST_X',
+      });
+      expect(consumed).toBeNull();
+    });
   });
 
   describe('Master Key Management', () => {

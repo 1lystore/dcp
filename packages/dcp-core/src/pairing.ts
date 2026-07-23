@@ -5,7 +5,8 @@
  * Format: dcp_pair_v1_<base64url(JSON)>
  */
 
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
+import * as bip39 from 'bip39';
 import { signMessage, verifySignature, canonicalJson } from './crypto.js';
 import {
   SignedPairingGrant,
@@ -504,4 +505,66 @@ export function verifySessionToken(
  */
 export function isSessionToken(token: string): boolean {
   return token.startsWith(SESSION_TOKEN_PREFIX);
+}
+
+// ============================================================================
+// Verification Phrase (out-of-band MITM check for remote agent pairing)
+// ============================================================================
+
+/**
+ * Wordlist and length for the pairing verification phrase.
+ *
+ * This is the SINGLE source of truth shared by the agent (which shows the phrase
+ * on the VPS) and the relay/desktop (which recompute it from the agent's claimed
+ * key). Both sides MUST import this — never re-implement it — or the phrases will
+ * not match and pairing verification silently fails.
+ *
+ * Security: the phrase binds the agent's public key. A MITM that substitutes its
+ * own key must find a key whose phrase COLLIDES with the legit one. With the
+ * BIP-39 2048-word list and 4 words, the space is 2048^4 = 2^44 (~17.6 trillion),
+ * making an offline grind within the 10-minute pairing window infeasible. The old
+ * 32-word × 3 scheme was only ~2^15 (32k), which is trivially grindable.
+ */
+const VERIFICATION_PHRASE_WORDLIST = bip39.wordlists.english; // 2048 words = 11 bits each
+const VERIFICATION_PHRASE_WORD_COUNT = 4; // 4 * 11 = 44 bits of collision resistance
+
+/** Read `numBits` bits from `buf` starting at `bitOffset`, MSB-first. */
+function readBitsBigEndian(buf: Buffer, bitOffset: number, numBits: number): number {
+  let value = 0;
+  for (let i = 0; i < numBits; i++) {
+    const globalBit = bitOffset + i;
+    const byteIndex = globalBit >> 3;
+    const bitIndex = 7 - (globalBit & 7);
+    const bit = (buf[byteIndex] >> bitIndex) & 1;
+    value = (value << 1) | bit;
+  }
+  return value;
+}
+
+/**
+ * Generate the deterministic verification phrase for a pairing claim.
+ *
+ * Same inputs (agent public key + invite_id) always produce the same phrase, so
+ * the VPS-side and desktop-side displays can be compared by the human operator.
+ *
+ * @param publicKey - Agent's public key (raw bytes or base64 string)
+ * @param inviteId - The invite ID string (e.g. "inv_abc123")
+ * @returns A hyphenated 4-word phrase (e.g. "anchor-forest-tiger-ember")
+ */
+export function generateVerificationPhrase(
+  publicKey: Uint8Array | string,
+  inviteId: string
+): string {
+  const publicKeyBytes =
+    typeof publicKey === 'string' ? Buffer.from(publicKey, 'base64') : Buffer.from(publicKey);
+
+  const combined = Buffer.concat([publicKeyBytes, Buffer.from(inviteId)]);
+  const hash = createHash('sha256').update(combined).digest(); // 32 bytes = 256 bits
+
+  const words: string[] = [];
+  for (let i = 0; i < VERIFICATION_PHRASE_WORD_COUNT; i++) {
+    const index = readBitsBigEndian(hash, i * 11, 11) % VERIFICATION_PHRASE_WORDLIST.length;
+    words.push(VERIFICATION_PHRASE_WORDLIST[index]);
+  }
+  return words.join('-');
 }

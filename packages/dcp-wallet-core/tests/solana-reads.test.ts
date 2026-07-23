@@ -164,6 +164,16 @@ describe('SolanaReader.getTxHistory', () => {
     expect(out.count).toBe(1);
     expect(out.transactions[0]).toMatchObject({ signature: SIG, status: 'confirmed', block_time: 1700 });
   });
+
+  it('coerces an empty-string `before` cursor to undefined (no RPC WrongSize)', async () => {
+    // The cloud-connect facade builds `?before=` when there is no page cursor. An
+    // empty string must NOT reach getSignaturesForAddress — the RPC rejects '' as a
+    // wrong-size signature.
+    const getSignaturesForAddress = vi.fn(async () => []);
+    const reader = new SolanaReader({ connection: makeRpc({ getSignaturesForAddress }) });
+    await reader.getTxHistory(OWNER, { limit: 5, before: '' });
+    expect(getSignaturesForAddress).toHaveBeenCalledWith(expect.any(PublicKey), { limit: 5, before: undefined });
+  });
 });
 
 describe('SolanaReader.searchTokens', () => {

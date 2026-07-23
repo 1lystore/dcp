@@ -1740,9 +1740,21 @@ export class VaultStorage {
   /**
    * Find an approved consent for this agent/action/scope and consume it (mark as 'consumed')
    * This implements "approve once" semantics - after one use, the consent cannot be reused
-   * @returns The consumed consent if found, null otherwise
+   *
+   * @param bind - Optional transaction binding. When provided, the approved consent
+   *   is only consumed if the amount/destination the owner reviewed (recorded in the
+   *   consent's `details`) matches this request. This prevents an agent from getting
+   *   approval for transaction A (e.g. 0.1 SOL to X) and reusing that approval to sign
+   *   a different transaction B. Consents whose details did not record the relevant
+   *   field are treated as unbindable and pass (backward compatible with read/write).
+   * @returns The consumed consent if found and binding matches, null otherwise
    */
-  consumeApprovedConsent(agentName: string, action: string, scope: string): PendingConsent | null {
+  consumeApprovedConsent(
+    agentName: string,
+    action: string,
+    scope: string,
+    bind?: { amount?: number; destination?: string }
+  ): PendingConsent | null {
     const now = new Date().toISOString();
 
     // Find an approved consent for this agent/action/scope
@@ -1756,6 +1768,11 @@ export class VaultStorage {
     const consent = findStmt.get(agentName, action, scope) as PendingConsent | null;
 
     if (!consent) {
+      return null;
+    }
+
+    // Enforce that the request matches the exact transaction the owner approved.
+    if (bind && !this.consentMatchesBinding(consent, bind)) {
       return null;
     }
 
@@ -1773,6 +1790,38 @@ export class VaultStorage {
     }
 
     return { ...consent, status: 'consumed' };
+  }
+
+  /**
+   * Check that an approved consent's recorded amount/destination match the
+   * transaction now being authorized. A recorded field that is absent (older
+   * consent, or a non-transfer action) is treated as "nothing to bind" and
+   * passes; a recorded field that is present MUST match exactly.
+   */
+  private consentMatchesBinding(
+    consent: PendingConsent,
+    bind: { amount?: number; destination?: string }
+  ): boolean {
+    if (!consent.details) return true;
+
+    let details: { amount?: unknown; destination?: unknown };
+    try {
+      details = JSON.parse(consent.details);
+    } catch {
+      // Unparseable details can't be verified; fail closed only when the caller
+      // requested a binding on a specific field.
+      return bind.amount === undefined && bind.destination === undefined;
+    }
+
+    if (bind.destination !== undefined && details.destination !== undefined) {
+      if (String(details.destination) !== String(bind.destination)) return false;
+    }
+
+    if (bind.amount !== undefined && details.amount !== undefined) {
+      if (Number(details.amount) !== Number(bind.amount)) return false;
+    }
+
+    return true;
   }
 
   /**

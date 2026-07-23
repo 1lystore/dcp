@@ -89,6 +89,7 @@ import {
   executeTransfer,
   executeSwap,
   ConsentRequiredError,
+  SolanaReader,
   type TokenRegistry,
   type JupiterConfig,
   type TransferPorts,
@@ -285,13 +286,22 @@ function agentPermitsScope(grantedScopes: string[], requestedScope: string): boo
 function requiredScopeForTool(name: string, args: Record<string, unknown>): string | null {
   switch (name) {
     case 'vault_get_address':
+    case 'vault_get_balances':
+    case 'vault_get_tx_history':
       return 'read:wallet.address';
+    // tx status + token search are public lookups (any signature / the Jupiter
+    // token list) — not the user's private data, so no scope gate.
+    case 'vault_get_tx_status':
+    case 'vault_search_tokens':
+      return null;
     case 'vault_read':
       return `read:${(args.scope as string) || ''}`;
     case 'vault_write':
       return `write:${(args.scope as string) || ''}`;
     case 'vault_sign_tx':
     case 'vault_sign_message':
+    case 'vault_transfer':
+    case 'vault_swap':
       return `sign:${(args.chain as string) || 'solana'}`;
     case 'vault_sign_x402':
       return `sign:${(args.network as string) || 'solana'}`;
@@ -873,11 +883,37 @@ function processRemoteApprovalCommand(command: RemoteApprovalCommand): string {
   return `unknown action: ${command.action}`;
 }
 
+/**
+ * Sign a canonical object with the vault's Ed25519 identity key.
+ * Returns the timestamp/nonce/signature the Telegram cloud verifies.
+ */
+async function signTelegramRequest(
+  signedData: Record<string, unknown>
+): Promise<{ timestamp: string; nonce: string; signature: string }> {
+  const identity = await ensureRelayIdentity();
+  const timestamp = new Date().toISOString();
+  const nonce = crypto.randomBytes(16).toString('base64');
+  const message = Buffer.from(canonicalJson({ ...signedData, timestamp, nonce }), 'utf8');
+  const signatureBytes = nacl.sign.detached(
+    new Uint8Array(message),
+    new Uint8Array(identity.signingKeyPair.privateKey)
+  );
+  return { timestamp, nonce, signature: Buffer.from(signatureBytes).toString('base64') };
+}
+
 async function acknowledgeRemoteApproval(commandId: string, result: string): Promise<void> {
+  const identity = await ensureRelayIdentity();
+  const vaultId = identity.vaultId;
+  const { timestamp, nonce, signature } = await signTelegramRequest({
+    vault_id: vaultId,
+    command_id: commandId,
+    result,
+  });
+
   const response = await fetchWithTimeout(`${TELEGRAM_CLOUD_URL}/api/approvals/processed`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ command_id: commandId, result }),
+    body: JSON.stringify({ command_id: commandId, result, vault_id: vaultId, timestamp, nonce, signature }),
   });
 
   if (!response.ok) {
@@ -899,7 +935,14 @@ async function pollRemoteApprovals(): Promise<void> {
 
   const identity = await ensureRelayIdentity();
   const vaultId = identity.vaultId;
-  const response = await fetchWithTimeout(`${TELEGRAM_CLOUD_URL}/api/approvals/${vaultId}`);
+  const { timestamp, nonce, signature } = await signTelegramRequest({ vault_id: vaultId });
+  const response = await fetchWithTimeout(`${TELEGRAM_CLOUD_URL}/api/approvals/${vaultId}`, {
+    headers: {
+      'x-dcp-timestamp': timestamp,
+      'x-dcp-nonce': nonce,
+      'x-dcp-signature': signature,
+    },
+  });
 
   if (response.status === 404 || response.status === 403) {
     return;
@@ -2460,6 +2503,48 @@ async function buildServer(): Promise<FastifyInstance> {
   server.get<{ Params: { chain: Chain } }>('/v1/address/:chain', async (request) => {
     return getWalletAddress(request.params.chain);
   });
+
+  // Wallet reads (balances, tx status/history, token search). These power the
+  // vault_get_balances / vault_get_tx_* / vault_search_tokens tools for BOTH the
+  // local agent and remote cloud-connect agents — an agentic wallet exposes the
+  // same read surface to every agent. Read-only, no approval; the SolanaReader
+  // uses the vault's configured RPC (DCP_SOLANA_RPC_URL proxy or public default).
+  let solanaReader: SolanaReader | null = null;
+  const getSolanaReader = (): SolanaReader => {
+    if (!solanaReader) solanaReader = new SolanaReader();
+    return solanaReader;
+  };
+
+  server.get<{ Querystring: { chain?: Chain } }>('/v1/vault/balances', async (request) => {
+    const chain = request.query.chain || 'solana';
+    const { address } = getWalletAddress(chain as Chain);
+    return getSolanaReader().getBalances(address);
+  });
+
+  server.get<{ Querystring: { signature?: string } }>('/v1/vault/tx-status', async (request) => {
+    const signature = request.query.signature || '';
+    if (!signature) throw new VaultError('INTERNAL_ERROR', 'signature is required');
+    return getSolanaReader().getTxStatus(signature);
+  });
+
+  server.get<{ Querystring: { chain?: Chain; limit?: string; before?: string } }>(
+    '/v1/vault/tx-history',
+    async (request) => {
+      const chain = request.query.chain || 'solana';
+      const { address } = getWalletAddress(chain as Chain);
+      const limit = request.query.limit ? parseInt(request.query.limit, 10) : undefined;
+      return getSolanaReader().getTxHistory(address, { limit, before: request.query.before });
+    }
+  );
+
+  server.get<{ Querystring: { query?: string; limit?: string } }>(
+    '/v1/vault/search-tokens',
+    async (request) => {
+      const query = request.query.query || '';
+      const limit = request.query.limit ? parseInt(request.query.limit, 10) : undefined;
+      return getSolanaReader().searchTokens(query, limit);
+    }
+  );
 
   // ============================================================================
   // Budget Check
@@ -4589,6 +4674,11 @@ async function buildServer(): Promise<FastifyInstance> {
     const { chain, unsignedTx, amount, agentName: agent_name, description, idempotencyKey: idempotency_key } = args;
     let effectiveSessionId = args.sessionId;
     const txCurrency = args.currency || 'SOL';
+    // Declared destination for this transfer. The anti-blind-sign check has already
+    // proven the tx bytes match this destination + amount, so binding the consent to
+    // it binds the approval to the exact transaction being signed.
+    const declaredDestination = (args.body as { destination?: string }).destination;
+    const consentBinding = { amount, destination: declaredDestination };
 
     let budgetAutoApproved = false;
 
@@ -4630,7 +4720,7 @@ async function buildServer(): Promise<FastifyInstance> {
 
       if (budgetResult.requires_approval) {
         const walletScope = `crypto.wallet.${chain}`;
-        const consumedConsent = storage.consumeApprovedConsent(agent_name, 'sign_tx', walletScope);
+        const consumedConsent = storage.consumeApprovedConsent(agent_name, 'sign_tx', walletScope, consentBinding);
         if (consumedConsent) {
           budgetAutoApproved = true;
           storage.logAudit('EXECUTE', 'success', {
@@ -4649,6 +4739,7 @@ async function buildServer(): Promise<FastifyInstance> {
               amount,
               currency: txCurrency,
               chain,
+              destination: declaredDestination,
             })
           );
           return {
@@ -4691,7 +4782,7 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     if (!hasSession && !budgetAutoApproved && !args.ownerApproved) {
-      const consumedConsent = storage.consumeApprovedConsent(agent_name, 'sign_tx', walletScope);
+      const consumedConsent = storage.consumeApprovedConsent(agent_name, 'sign_tx', walletScope, consentBinding);
       if (!consumedConsent) {
         const { consent } = storage.createPendingConsent(
           agent_name,
@@ -4702,6 +4793,7 @@ async function buildServer(): Promise<FastifyInstance> {
             amount,
             currency: txCurrency,
             chain,
+            destination: declaredDestination,
           })
         );
         return {
@@ -5584,9 +5676,15 @@ async function buildServer(): Promise<FastifyInstance> {
     }
 
     const walletScope = `crypto.wallet.${chain}`;
+    // Message signing is authorized INDEPENDENTLY of transaction signing. Off-chain
+    // message signatures are used for auth/login/delegation, so a session the owner
+    // approved for sending transactions must NOT silently authorize signing arbitrary
+    // opaque messages. Gate message signing on its own scope so a tx session never
+    // satisfies it (and vice versa) — the wallet key itself is still `walletScope`.
+    const messageScope = `crypto.wallet.${chain}.sign_message`;
 
     if (!effectiveSessionId) {
-      const existing = findActiveSessionForScope(agent_name, walletScope);
+      const existing = findActiveSessionForScope(agent_name, messageScope);
       if (existing) {
         effectiveSessionId = existing;
       }
@@ -5596,7 +5694,7 @@ async function buildServer(): Promise<FastifyInstance> {
     if (effectiveSessionId) {
       const session = storage.getSession(effectiveSessionId);
       if (session && !session.revoked_at && new Date(session.expires_at) > new Date()) {
-        if (session.granted_scopes.includes(walletScope)) {
+        if (session.granted_scopes.includes(messageScope)) {
           hasSession = true;
           storage.touchSession(effectiveSessionId);
         }
@@ -5607,7 +5705,7 @@ async function buildServer(): Promise<FastifyInstance> {
       const { consent, isNew } = storage.createPendingConsent(
         agent_name,
         'sign_message',
-        walletScope,
+        messageScope,
         consentDetailsWithDisplayName(body as Record<string, unknown>, agent_name, {
           description,
           chain,
@@ -5917,6 +6015,10 @@ async function buildServer(): Promise<FastifyInstance> {
       since?: string;
     };
   }>('/v1/vault/activity', async (request) => {
+    // The audit trail exposes agent names, scopes, amounts, destinations, and
+    // which credentials were read — owner-only, like the other sensitive routes.
+    requireOwnerToken(request);
+
     const limit = parseInt(request.query.limit || '100', 10);
     const agentName = request.query.agent;
     const eventType = request.query.type?.toUpperCase() as AuditEventType | undefined;
@@ -6176,12 +6278,19 @@ async function buildServer(): Promise<FastifyInstance> {
   server.delete('/v1/telegram/config', async (request, reply) => {
     requireOwnerToken(request);
 
-    // Also notify cloud service to delete pairing
+    // Also notify cloud service to delete pairing (signed: only the vault owner
+    // may unlink its own pairing, so a stranger who knows the vault_id can't).
     const identity = await ensureRelayIdentity();
     const vaultId = identity.vaultId;
     try {
+      const { timestamp, nonce, signature } = await signTelegramRequest({ vault_id: vaultId });
       await fetch(`${TELEGRAM_CLOUD_URL}/api/pair/${vaultId}`, {
         method: 'DELETE',
+        headers: {
+          'x-dcp-timestamp': timestamp,
+          'x-dcp-nonce': nonce,
+          'x-dcp-signature': signature,
+        },
       });
     } catch (err) {
       // Ignore cloud errors - still delete local config
@@ -7540,6 +7649,92 @@ const CLOUD_CONNECT_MCP_TOOLS = [
       required: ['scope'],
     },
   },
+  {
+    name: 'vault_transfer',
+    description:
+      'Send SOL or an SPL token from the user\'s wallet to an address (requires on-device ' +
+      'approval + budget check; never auto-sends). Use currency for known tokens (SOL, USDC, ' +
+      'USDT, 1LY) or mint + decimals for an arbitrary SPL token.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chain: { type: 'string', enum: ['solana'], default: 'solana' },
+        to: { type: 'string', description: 'Destination Solana address.' },
+        amount: { type: 'number', description: 'Amount to send.' },
+        currency: { type: 'string', description: "Known token: 'SOL', 'USDC', 'USDT', '1LY'." },
+        mint: { type: 'string', description: 'SPL mint for an arbitrary token (with decimals).' },
+        decimals: { type: 'number', description: 'Decimals for an arbitrary mint.' },
+        confirm: { type: 'string', enum: ['submitted', 'confirmed'], description: "'confirmed' (default) waits for on-chain confirmation." },
+        description: { type: 'string', description: 'Short explanation shown to the user for approval.' },
+        idempotency_key: { type: 'string', description: 'Stable key to make retries safe (no double-send).' },
+      },
+      required: ['chain', 'to', 'amount'],
+    },
+  },
+  {
+    name: 'vault_swap',
+    description:
+      "Swap one Solana token for another from the user's wallet via Jupiter (requires " +
+      'on-device approval + budget check). from_token/to_token accept SOL, a symbol like USDC, ' +
+      'or a mint address.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chain: { type: 'string', enum: ['solana'], default: 'solana' },
+        from_token: { type: 'string', description: "Input token: 'SOL', a symbol like 'USDC', or a mint." },
+        to_token: { type: 'string', description: "Output token: 'SOL', a symbol like 'USDC', or a mint." },
+        amount: { type: 'number', description: 'Amount of the input token to swap.' },
+        slippage_bps: { type: 'number', description: 'Slippage tolerance in basis points (default 50).' },
+        from_decimals: { type: 'number', description: 'Decimals for from_token when it is an arbitrary mint.' },
+        to_decimals: { type: 'number', description: 'Decimals for to_token when it is an arbitrary mint.' },
+        confirm: { type: 'string', enum: ['submitted', 'confirmed'], description: "'confirmed' (default) waits for confirmation." },
+        description: { type: 'string', description: 'Short explanation shown to the user for approval.' },
+        idempotency_key: { type: 'string', description: 'Stable key to prevent accidental double-swaps.' },
+      },
+      required: ['chain', 'from_token', 'to_token', 'amount'],
+    },
+  },
+  {
+    name: 'vault_get_balances',
+    description: "Read the user's Solana wallet balances (SOL and SPL tokens such as USDC). Read-only, no approval.",
+    inputSchema: {
+      type: 'object',
+      properties: { chain: { type: 'string', enum: ['solana'], default: 'solana' } },
+    },
+  },
+  {
+    name: 'vault_get_tx_status',
+    description: 'Check the on-chain status of a Solana transaction by its signature. Read-only, no approval.',
+    inputSchema: {
+      type: 'object',
+      properties: { signature: { type: 'string', description: 'Base58 transaction signature.' } },
+      required: ['signature'],
+    },
+  },
+  {
+    name: 'vault_get_tx_history',
+    description: "List recent transaction signatures for the user's Solana wallet. Read-only, no approval.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chain: { type: 'string', enum: ['solana'], default: 'solana' },
+        limit: { type: 'number', description: 'Max signatures to return.' },
+        before: { type: 'string', description: 'Paginate: return signatures before this one.' },
+      },
+    },
+  },
+  {
+    name: 'vault_search_tokens',
+    description: 'Search the Solana (Jupiter) token list by symbol, name, or mint. Read-only, no approval.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Symbol, name, or mint to search.' },
+        limit: { type: 'number', description: 'Max results.' },
+      },
+      required: ['query'],
+    },
+  },
 ];
 
 /** Map an MCP tool call to the vault's REST endpoint (same surface as handleRelayRequest). */
@@ -7554,6 +7749,28 @@ function mcpToolToRest(
       return {
         method: 'GET',
         url: `/budget/check?amount=${args.amount ?? ''}&currency=${args.currency ?? ''}&chain=${args.chain ?? ''}`,
+      };
+    case 'vault_get_balances':
+      return {
+        method: 'GET',
+        url: `/v1/vault/balances?chain=${encodeURIComponent((args.chain as string) || 'solana')}`,
+      };
+    case 'vault_get_tx_status':
+      return {
+        method: 'GET',
+        url: `/v1/vault/tx-status?signature=${encodeURIComponent((args.signature as string) || '')}`,
+      };
+    case 'vault_get_tx_history':
+      return {
+        method: 'GET',
+        url:
+          `/v1/vault/tx-history?chain=${encodeURIComponent((args.chain as string) || 'solana')}` +
+          `&limit=${args.limit ?? ''}&before=${encodeURIComponent((args.before as string) || '')}`,
+      };
+    case 'vault_search_tokens':
+      return {
+        method: 'GET',
+        url: `/v1/vault/search-tokens?query=${encodeURIComponent((args.query as string) || '')}&limit=${args.limit ?? ''}`,
       };
     case 'vault_read':
       return { method: 'POST', url: '/v1/vault/read', body: { ...args } };
@@ -7658,6 +7875,11 @@ Common API credential scopes:
 - Anthropic API key: credentials.api.anthropic
 - Stripe API key: credentials.api.stripe
 - GitHub token: credentials.api.github
+
+Wallet scopes (for the wallet tools — these take no scope argument, the scope is implied):
+- Read wallet address, balances, and transaction history (vault_get_address, vault_get_balances, vault_get_tx_history): read:wallet.address
+- Send, swap, or sign (vault_transfer, vault_swap, vault_sign_tx, vault_sign_message, vault_sign_x402): sign:solana
+- Checking a transaction's status (vault_get_tx_status) and searching the token list (vault_search_tokens) are public reads and need no scope.
 
 Rules:
 - Never use username, user.name, profile.name, displayName, legalName, legal_name, contact.email, user.email, or email.

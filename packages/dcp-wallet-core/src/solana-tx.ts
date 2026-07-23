@@ -416,8 +416,35 @@ export function getTransactionProgramIds(unsignedTxB64: string): {
   programIds: string[];
   resolvable: boolean;
 } {
-  const { ixs, resolvable } = normalizeTx(unsignedTxB64);
-  const set = new Set<string>();
-  for (const ix of ixs) if (ix.programId) set.add(ix.programId);
-  return { programIds: [...set], resolvable };
+  const buf = Buffer.from(unsignedTxB64, 'base64');
+  // Legacy tx: the program id is directly on each instruction.
+  try {
+    const tx = Transaction.from(buf);
+    const set = new Set<string>();
+    for (const ix of tx.instructions) set.add(ix.programId.toBase58());
+    return { programIds: [...set], resolvable: true };
+  } catch {
+    /* not a legacy tx */
+  }
+  // Versioned tx: program ids ALWAYS live in the static account keys (Solana forbids
+  // loading a program account via an Address Lookup Table), so every invoked program
+  // is resolvable even when the instruction's *account* args come from a LUT — which
+  // is normal for a Jupiter swap. We deliberately do NOT reuse normalizeTx here: its
+  // `resolvable` flag goes false as soon as any account key is LUT-loaded, which would
+  // wrongly reject a legitimate swap. Only a program-id index outside the static keys
+  // is genuinely opaque.
+  try {
+    const vtx = VersionedTransaction.deserialize(buf);
+    const keys = vtx.message.staticAccountKeys.map((k) => k.toBase58());
+    const n = keys.length;
+    const set = new Set<string>();
+    let resolvable = true;
+    for (const ci of vtx.message.compiledInstructions) {
+      if (ci.programIdIndex < n) set.add(keys[ci.programIdIndex]);
+      else resolvable = false;
+    }
+    return { programIds: [...set], resolvable };
+  } catch {
+    return { programIds: [], resolvable: false };
+  }
 }

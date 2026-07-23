@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/wallet-core",
-  "version": "3.0.0",
+  "version": "3.1.1",
   "description": "Pure, dependency-light DCP wallet brain: tx build, decode, validation, and shared error types. No storage, no key custody, no native deps — safe to import from Node, browser, and React Native.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

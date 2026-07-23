@@ -2,8 +2,11 @@
 
 [![npm agent](https://img.shields.io/npm/v/@dcprotocol/agent?label=@dcprotocol/agent)](https://www.npmjs.com/package/@dcprotocol/agent)
 [![License](https://img.shields.io/github/license/1lystore/dcp)](LICENSE)
+[![Download Desktop](https://img.shields.io/badge/Download-Desktop%20App-2ea44f)](https://github.com/1lystore/dcp-releases/releases/latest)
 
 **Give AI agents permissions. Not your keys.**
+
+**[⬇ Download DCP Desktop](https://github.com/1lystore/dcp-releases/releases/latest)** — macOS (Apple Silicon &amp; Intel), Windows, Linux. Or start at [dcpagent.com](https://dcpagent.com/).
 
 Use DCP if your AI agent needs to use wallets, API keys, credentials, or user data, but you do not want those secrets sitting in agent configs or `.env` files.
 
@@ -18,7 +21,7 @@ Agents ask. You approve, deny, budget, or revoke.
 ## Use DCP If
 
 - you run Claude, Cursor, OpenClaw, Hermes, or custom MCP agents
-- your agent needs to sign Solana transactions without holding a private key
+- your agent needs to send, swap, or sign Solana transactions without holding a private key
 - your agent needs API keys without reading `.env`
 - you want spending limits for agents
 - you want approval before sensitive actions
@@ -196,8 +199,9 @@ DCP is designed around least privilege.
 
 ## Supported Today
 
-- Solana transaction signing
-- Solana message signing
+- Solana transfers and swaps (build, budget-check, approve, sign, submit)
+- Solana transaction and message signing
+- wallet balances, token search, and transaction history
 - scoped vault reads and writes
 - API credential storage
 - budget checks

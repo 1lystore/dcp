@@ -122,6 +122,218 @@ describe('Pairing Start Endpoint', () => {
   });
 });
 
+describe('Vault Key Registration (trust-anchor protection)', () => {
+  function makeServer() {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dcp-telegram-register-'));
+    const store = new TelegramStore(tempDir);
+    const fakeBot = { getStats: () => ({}) };
+    const webhook = new WebhookServer(fakeBot as never, store);
+    return { tempDir, store, webhook };
+  }
+
+  it('accepts first registration (TOFU) and idempotent re-registration of the same key', async () => {
+    const { tempDir, store, webhook } = makeServer();
+    try {
+      const keyPair = generateSigningKeyPair();
+      const vaultId = 'vault_tofu';
+      const publicKey = keyPair.publicKey.toString('base64');
+
+      const first = await webhook.getServer().inject({
+        method: 'POST',
+        url: '/register',
+        payload: { vault_id: vaultId, public_key: publicKey },
+      });
+      expect(first.statusCode).toBe(200);
+
+      // Same key again — still fine, no signature needed.
+      const again = await webhook.getServer().inject({
+        method: 'POST',
+        url: '/register',
+        payload: { vault_id: vaultId, public_key: publicKey },
+      });
+      expect(again.statusCode).toBe(200);
+    } finally {
+      await webhook.getServer().close();
+      store.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects overwriting an existing key with a different one and no signature (takeover attempt)', async () => {
+    const { tempDir, store, webhook } = makeServer();
+    try {
+      const legit = generateSigningKeyPair();
+      const attacker = generateSigningKeyPair();
+      const vaultId = 'vault_takeover';
+
+      await webhook.getServer().inject({
+        method: 'POST',
+        url: '/register',
+        payload: { vault_id: vaultId, public_key: legit.publicKey.toString('base64') },
+      });
+
+      const overwrite = await webhook.getServer().inject({
+        method: 'POST',
+        url: '/register',
+        payload: { vault_id: vaultId, public_key: attacker.publicKey.toString('base64') },
+      });
+      expect(overwrite.statusCode).toBe(403);
+
+      // The legit key must remain the registered trust anchor.
+      expect(store.getVaultKey(vaultId)).toBe(legit.publicKey.toString('base64'));
+    } finally {
+      await webhook.getServer().close();
+      store.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('allows key rotation when signed by the currently-registered key', async () => {
+    const { tempDir, store, webhook } = makeServer();
+    try {
+      const oldKey = generateSigningKeyPair();
+      const newKey = generateSigningKeyPair();
+      const vaultId = 'vault_rotate';
+
+      await webhook.getServer().inject({
+        method: 'POST',
+        url: '/register',
+        payload: { vault_id: vaultId, public_key: oldKey.publicKey.toString('base64') },
+      });
+
+      const newPublicKey = newKey.publicKey.toString('base64');
+      const timestamp = new Date().toISOString();
+      const nonce = 'rotate_nonce';
+      const message = Buffer.from(
+        canonicalJson({ vault_id: vaultId, public_key: newPublicKey, timestamp, nonce }),
+        'utf8'
+      );
+      const signature = signDcpMessage(message, oldKey.privateKey).toString('base64');
+
+      const rotate = await webhook.getServer().inject({
+        method: 'POST',
+        url: '/register',
+        payload: { vault_id: vaultId, public_key: newPublicKey, timestamp, nonce, signature },
+      });
+      expect(rotate.statusCode).toBe(200);
+      expect(store.getVaultKey(vaultId)).toBe(newPublicKey);
+    } finally {
+      await webhook.getServer().close();
+      store.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Remote Approval Endpoints (require signed vault requests)', () => {
+  it('rejects unsigned pending-approvals reads and unsigned processed callbacks', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dcp-telegram-approval-'));
+    const store = new TelegramStore(tempDir);
+    const fakeBot = { getStats: () => ({}) };
+    const webhook = new WebhookServer(fakeBot as never, store);
+    try {
+      const vaultId = 'vault_approvals';
+
+      const listUnsigned = await webhook.getServer().inject({
+        method: 'GET',
+        url: `/api/approvals/${vaultId}`,
+      });
+      expect(listUnsigned.statusCode).toBe(401);
+
+      const processedUnsigned = await webhook.getServer().inject({
+        method: 'POST',
+        url: '/api/approvals/processed',
+        payload: { command_id: 'cmd_1', result: 'success', vault_id: vaultId },
+      });
+      expect(processedUnsigned.statusCode).toBe(401);
+
+      // Unlink must also be signed (else anyone could unlink a stranger's pairing).
+      const unlinkUnsigned = await webhook.getServer().inject({
+        method: 'DELETE',
+        url: `/api/pair/${vaultId}`,
+      });
+      expect(unlinkUnsigned.statusCode).toBe(401);
+    } finally {
+      await webhook.getServer().close();
+      store.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // End-to-end contract test: a request signed exactly the way the vault signs
+  // (canonicalJson over the fields + timestamp + nonce, Ed25519) MUST be accepted.
+  // This is the deploy-coupling risk between @dcprotocol/vault and this service.
+  it('accepts a correctly vault-signed GET (list) and POST (processed)', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dcp-telegram-approval-ok-'));
+    const store = new TelegramStore(tempDir);
+    const fakeBot = {
+      getStats: () => ({}),
+      sendApprovalProcessedNotification: async () => ({ success: true }),
+    };
+    const webhook = new WebhookServer(fakeBot as never, store);
+    try {
+      const keyPair = generateSigningKeyPair();
+      const vaultId = 'vault_e2e';
+      const chatId = '12345';
+
+      // Register key (TOFU) + pair the vault so approvals can be listed.
+      webhook.getServer(); // ensure routes are set up
+      store.registerVaultKey(vaultId, keyPair.publicKey.toString('base64'));
+      const pairing = store.pairings.completePairing(vaultId, chatId);
+      const command = store.approvals.createApprovalCommand(
+        vaultId,
+        chatId,
+        'consent_abc',
+        'approve',
+        (pairing as { id?: string }).id || 'pair_1'
+      );
+
+      // The vault signs canonicalJson({vault_id, timestamp, nonce}) for the GET.
+      const sign = (data: Record<string, unknown>) => {
+        const timestamp = new Date().toISOString();
+        const nonce = `nonce_${Math.random().toString(36).slice(2)}`;
+        const message = Buffer.from(canonicalJson({ ...data, timestamp, nonce }), 'utf8');
+        const signature = signDcpMessage(message, keyPair.privateKey).toString('base64');
+        return { timestamp, nonce, signature };
+      };
+
+      const g = sign({ vault_id: vaultId });
+      const listRes = await webhook.getServer().inject({
+        method: 'GET',
+        url: `/api/approvals/${vaultId}`,
+        headers: {
+          'x-dcp-timestamp': g.timestamp,
+          'x-dcp-nonce': g.nonce,
+          'x-dcp-signature': g.signature,
+        },
+      });
+      expect(listRes.statusCode).toBe(200);
+      expect(listRes.json().commands.map((c: { id: string }) => c.id)).toContain(command.id);
+
+      // The vault signs canonicalJson({vault_id, command_id, result, timestamp, nonce}) for POST.
+      const p = sign({ vault_id: vaultId, command_id: command.id, result: 'success' });
+      const procRes = await webhook.getServer().inject({
+        method: 'POST',
+        url: '/api/approvals/processed',
+        payload: {
+          command_id: command.id,
+          result: 'success',
+          vault_id: vaultId,
+          timestamp: p.timestamp,
+          nonce: p.nonce,
+          signature: p.signature,
+        },
+      });
+      expect(procRes.statusCode).toBe(200);
+      expect(procRes.json().processed).toBe(true);
+    } finally {
+      await webhook.getServer().close();
+      store.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('Webhook Payload Validation', () => {
   it('should validate required fields', () => {
     const validPayload = {

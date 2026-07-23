@@ -553,6 +553,36 @@ export class RelayServer {
     return m ? m[1] : null;
   }
 
+  /** A redirect_uri host that refers to the local loopback interface. */
+  private isLoopbackHost(hostname: string): boolean {
+    const h = hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+    return h === '127.0.0.1' || h === '::1' || h === 'localhost';
+  }
+
+  /**
+   * Is `redirectUri` acceptable for this client's registered redirect_uris?
+   * Exact match always passes. For loopback URIs, RFC 8252 §7.3 requires the
+   * authorization server to permit any port (native/CLI clients bind an
+   * ephemeral port per attempt), so loopback matches on host + path and ignores
+   * the port. Non-loopback URIs require an exact match.
+   */
+  private redirectUriAllowed(redirectUri: string, parsed: URL, registered: string[]): boolean {
+    if (registered.includes(redirectUri)) return true;
+    if (!this.isLoopbackHost(parsed.hostname)) return false;
+    return registered.some((r) => {
+      try {
+        const ru = new URL(r);
+        return (
+          this.isLoopbackHost(ru.hostname) &&
+          ru.hostname === parsed.hostname &&
+          ru.pathname === parsed.pathname
+        );
+      } catch {
+        return false;
+      }
+    });
+  }
+
   // --------------------------------------------------------------------------
   // HTTP Routes (REST + Long-Poll)
   // --------------------------------------------------------------------------
@@ -714,12 +744,37 @@ export class RelayServer {
           ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
         );
       const redirectUri = q.redirect_uri || '';
-      // Validate redirect_uri is a well-formed absolute URL before reflecting it.
-      try {
-        if (redirectUri) new URL(redirectUri);
-      } catch {
-        reply.status(400).header('content-type', 'text/html');
-        return '<h1>Invalid redirect_uri</h1>';
+      // Validate redirect_uri before we ever reflect it or deliver a code to it.
+      if (redirectUri) {
+        let parsedRedirect: URL;
+        try {
+          parsedRedirect = new URL(redirectUri);
+        } catch {
+          reply.status(400).header('content-type', 'text/html');
+          return '<h1>Invalid redirect_uri</h1>';
+        }
+        // Only http(s) targets — a well-formed `javascript:`/`data:`/`file:` URI
+        // would otherwise be reflected and later navigated to with the code.
+        if (parsedRedirect.protocol !== 'http:' && parsedRedirect.protocol !== 'https:') {
+          reply.status(400).header('content-type', 'text/html');
+          return '<h1>Invalid redirect_uri scheme</h1>';
+        }
+        // OAuth 2.1: if the client registered redirect_uris, the request's
+        // redirect_uri MUST match one of them, so an attacker can't have the code
+        // delivered to an attacker-controlled URI. EXCEPTION (RFC 8252 §7.3):
+        // native/CLI clients use loopback redirects with an ephemeral port that
+        // changes per attempt (e.g. http://127.0.0.1:50293/callback), so loopback
+        // URIs match on host+path and IGNORE the port. Non-loopback URIs still
+        // require an exact match.
+        const client = q.client_id ? this.oauthClients.get(q.client_id) : undefined;
+        if (
+          client &&
+          client.redirect_uris.length > 0 &&
+          !this.redirectUriAllowed(redirectUri, parsedRedirect, client.redirect_uris)
+        ) {
+          reply.status(400).header('content-type', 'text/html');
+          return '<h1>redirect_uri is not registered for this client</h1>';
+        }
       }
       reply.header('content-type', 'text/html; charset=utf-8');
 

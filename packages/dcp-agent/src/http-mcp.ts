@@ -289,23 +289,44 @@ export class HttpMcpServer {
   }
 
   /**
-   * Stop the server
+   * Stop the server. Idempotent: concurrent/repeated calls (e.g. from a second
+   * Ctrl+C) all await the same in-flight shutdown instead of racing and leaving
+   * the process wedged.
    */
+  private stopping?: Promise<void>;
   async stop(): Promise<void> {
-    if (this.httpServer) {
-      await new Promise<void>((resolve) => {
-        this.httpServer!.close(() => resolve());
-      });
-    }
+    if (!this.stopping) this.stopping = this.doStop();
+    return this.stopping;
+  }
+
+  private async doStop(): Promise<void> {
+    // Close MCP sessions/transports first — they own the long-lived connections.
     for (const [sessionId, session] of this.sessions) {
       try {
         await session.transport.close();
         await session.server.close();
+      } catch {
+        // best-effort; keep tearing down the rest
       } finally {
         this.sessions.delete(sessionId);
       }
     }
-    await this.connection.close();
+
+    if (this.httpServer) {
+      const srv = this.httpServer;
+      this.httpServer = null; // prevent a double close() (which would never resolve)
+      // Streamable-HTTP keeps long-lived connections open, so server.close() would
+      // block indefinitely waiting for them to drain — the classic "Ctrl+C hangs".
+      // Force any lingering sockets closed so close() can complete.
+      srv.closeAllConnections?.();
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+
+    try {
+      await this.connection.close();
+    } catch {
+      // best-effort
+    }
     log('Stopped');
   }
 
@@ -1052,17 +1073,34 @@ export async function runHttpMcpServer(
 ): Promise<void> {
   const server = new HttpMcpServer(config, options);
 
-  // Handle shutdown
-  process.on('SIGINT', async () => {
+  // Graceful shutdown that survives repeated Ctrl+C. The first signal starts a
+  // graceful stop; a second signal (user impatient because something is slow)
+  // forces an immediate exit instead of stacking concurrent stop() calls. A
+  // hard timeout guarantees we exit even if teardown wedges.
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) {
+      log(`Received ${signal} again — forcing exit.`);
+      process.exit(1);
+    }
+    shuttingDown = true;
     log('Shutting down...');
-    await server.stop();
-    process.exit(0);
-  });
+    const forceExit = setTimeout(() => {
+      log('Shutdown timed out — forcing exit.');
+      process.exit(1);
+    }, 5000);
+    forceExit.unref?.();
+    try {
+      await server.stop();
+      process.exit(0);
+    } catch (err) {
+      log(`Error during shutdown: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  };
 
-  process.on('SIGTERM', async () => {
-    await server.stop();
-    process.exit(0);
-  });
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
   await server.start();
 }

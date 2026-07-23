@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/relay-client",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Internal relay client for DCP vault transport packages",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

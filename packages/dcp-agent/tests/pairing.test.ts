@@ -41,14 +41,14 @@ describe('Pairing', () => {
       expect(phrase1).not.toBe(phrase2);
     });
 
-    it('should generate 3-word hyphenated phrase', () => {
+    it('should generate a 4-word hyphenated phrase (BIP-39, 2^44 collision resistance)', () => {
       const publicKey = new Uint8Array(32).fill(1);
       const inviteId = 'inv_test123';
 
       const phrase = generateVerificationPhrase(publicKey, inviteId);
       const words = phrase.split('-');
 
-      expect(words).toHaveLength(3);
+      expect(words).toHaveLength(4);
       expect(words.every((w) => w.length > 0)).toBe(true);
     });
 

@@ -149,6 +149,14 @@ describe('Budget Engine', () => {
       expect(result2.remaining_daily).toBeGreaterThanOrEqual(0);
     });
 
+    it('should reject NaN, Infinity, and negative amounts (fail closed)', () => {
+      for (const bad of [NaN, Infinity, -Infinity, -0.001]) {
+        const result = budget.checkBudget(bad, 'SOL', 'solana');
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('BUDGET_EXCEEDED_TX');
+      }
+    });
+
     it('should enforce budget and throw on exceeded', () => {
       expect(() => {
         budget.enforceBudget(0.02, 'SOL', 'solana');

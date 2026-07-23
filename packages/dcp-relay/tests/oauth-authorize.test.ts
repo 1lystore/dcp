@@ -72,6 +72,63 @@ describe('Browser auth-code adapter (/oauth/authorize)', () => {
     expect(res.status).toBe(400);
   });
 
+  it('rejects a non-http(s) redirect_uri scheme (javascript:)', async () => {
+    const res = await fetch(
+      `${base()}/oauth/authorize?redirect_uri=${encodeURIComponent('javascript:alert(1)')}`
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a redirect_uri not registered for a DCR client', async () => {
+    // Register a client with a fixed redirect_uri allow-list.
+    const reg = await fetch(`${base()}/oauth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client_name: 'Test', redirect_uris: ['https://app.example/cb'] }),
+    });
+    const { client_id } = await reg.json();
+    expect(client_id).toBeTruthy();
+
+    // A different redirect_uri for that client must be rejected.
+    const bad = await fetch(
+      `${base()}/oauth/authorize?client_id=${encodeURIComponent(client_id)}` +
+        `&redirect_uri=${encodeURIComponent('https://evil.example/steal')}`
+    );
+    expect(bad.status).toBe(400);
+
+    // The registered redirect_uri is accepted (renders the paste form, 200).
+    const good = await fetch(
+      `${base()}/oauth/authorize?client_id=${encodeURIComponent(client_id)}` +
+        `&redirect_uri=${encodeURIComponent('https://app.example/cb')}`
+    );
+    expect(good.status).toBe(200);
+  });
+
+  it('allows a loopback redirect_uri on any port (RFC 8252 — native/CLI clients)', async () => {
+    // Native clients (Hermes, ChatGPT/Claude.ai connectors) register a loopback
+    // redirect with one ephemeral port, then use a DIFFERENT port per attempt.
+    const reg = await fetch(`${base()}/oauth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client_name: 'CLI', redirect_uris: ['http://127.0.0.1:9999/callback'] }),
+    });
+    const { client_id } = await reg.json();
+
+    // Different loopback port must be ACCEPTED (host + path match, port ignored).
+    const diffPort = await fetch(
+      `${base()}/oauth/authorize?client_id=${encodeURIComponent(client_id)}` +
+        `&redirect_uri=${encodeURIComponent('http://127.0.0.1:50293/callback')}`
+    );
+    expect(diffPort.status).toBe(200);
+
+    // But a loopback URI with a DIFFERENT path is still rejected.
+    const diffPath = await fetch(
+      `${base()}/oauth/authorize?client_id=${encodeURIComponent(client_id)}` +
+        `&redirect_uri=${encodeURIComponent('http://127.0.0.1:50293/evil')}`
+    );
+    expect(diffPath.status).toBe(400);
+  });
+
   it('redeems a connect-link, surfaces the match code, and completes the auth-code flow', async () => {
     const verifier = 'v'.repeat(64);
     const url =
