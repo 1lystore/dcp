@@ -82,6 +82,13 @@ export interface SolanaBalances {
   total_tokens: number;
   /** True when `tokens` was truncated to MAX_BALANCE_TOKENS. */
   truncated: boolean;
+  /**
+   * True when the SPL token read could not be completed (e.g. the RPC plan gates
+   * `getTokenAccountsByOwner`). The SOL balance is still authoritative; `tokens`
+   * is empty and callers should surface "token balances unavailable" rather than
+   * "no tokens".
+   */
+  tokens_unavailable?: boolean;
 }
 
 export type SignatureStatus = 'processed' | 'confirmed' | 'finalized' | 'failed' | 'not_found';
@@ -349,13 +356,23 @@ export class SolanaReader {
     const owner = toPublicKey(address);
     return this.cached(`bal:${address}`, async () => {
       const rpc = this.rpc();
-      const [lamports, parsed] = await Promise.all([
+      // The SOL balance is essential; the SPL token read is best-effort. Some RPC
+      // plans gate `getTokenAccountsByOwner` (HTTP 403 / "plan upgrade") — that
+      // must NOT blank the whole wallet, so a token-read failure degrades to an
+      // empty, flagged token list while the SOL balance still renders.
+      const [balRes, tokRes] = await Promise.allSettled([
         rpc.getBalance(owner),
         rpc.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID }),
       ]);
+      if (balRes.status === 'rejected') {
+        throw balRes.reason;
+      }
+      const lamports = balRes.value;
+      const tokensUnavailable = tokRes.status === 'rejected';
+      const parsedAccounts = tokRes.status === 'fulfilled' ? tokRes.value.value : [];
 
       const allTokens: TokenBalance[] = [];
-      for (const acct of parsed.value) {
+      for (const acct of parsedAccounts) {
         const info = acct.account?.data?.parsed?.info;
         if (!info) continue;
         const amount = info.tokenAmount.amount;
@@ -384,6 +401,7 @@ export class SolanaReader {
         tokens: allTokens.slice(0, MAX_BALANCE_TOKENS),
         total_tokens: allTokens.length,
         truncated: allTokens.length > MAX_BALANCE_TOKENS,
+        tokens_unavailable: tokensUnavailable,
       };
     });
   }
@@ -410,7 +428,11 @@ export class SolanaReader {
   async getTxHistory(address: string, options?: { limit?: number; before?: string }): Promise<TxHistoryResult> {
     const owner = toPublicKey(address);
     const limit = clampHistoryLimit(options?.limit);
-    const before = options?.before;
+    // Treat an empty-string cursor as "no cursor". Callers that build a query string
+    // (e.g. the cloud-connect facade) send `before=` when there is no page cursor;
+    // passing '' to getSignaturesForAddress makes the RPC reject it as a wrong-size
+    // signature ("Invalid param: WrongSize"). Coerce falsy → undefined.
+    const before = options?.before || undefined;
     return this.cached(`hist:${address}:${limit}:${before ?? ''}`, async () => {
       const rpc = this.rpc();
       const sigs = await rpc.getSignaturesForAddress(owner, { limit, before });

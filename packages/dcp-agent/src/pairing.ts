@@ -5,72 +5,26 @@
  * for secure agent-to-vault pairing.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   generateSigningKeyPair,
   parseVpsPairingInvite,
   isVpsInviteExpired,
   isVpsPairingInvite,
   signMessage,
+  generateVerificationPhrase,
   VPS_INVITE_PREFIX,
   type VpsPairingInvite,
 } from '@dcprotocol/core';
 
 // ============================================================================
-// Word List for Verification Phrases
-// ============================================================================
-
-const WORD_LIST = [
-  'apple', 'banana', 'cherry', 'dragon', 'eagle', 'falcon',
-  'grape', 'harbor', 'island', 'jungle', 'kettle', 'lemon',
-  'mango', 'nectar', 'orange', 'pepper', 'quartz', 'river',
-  'sunset', 'tiger', 'umbrella', 'violet', 'walnut', 'xylophone',
-  'yellow', 'zebra', 'anchor', 'bridge', 'castle', 'delta',
-  'ember', 'forest',
-];
-
-// ============================================================================
 // Verification Phrase Generation
 // ============================================================================
 
-/**
- * Generate deterministic verification phrase from public key and invite_id
- *
- * Same inputs = same phrase (for verification on both sides)
- *
- * IMPORTANT: Uses invite_id (not full invite) to match relay's verification.
- * Both agent and relay use: publicKey + invite_id
- *
- * @param publicKey - Agent's public key bytes (or base64 string)
- * @param inviteId - The invite ID string (e.g., "inv_abc123")
- * @returns Three-word hyphenated phrase (e.g., "apple-dragon-sunset")
- */
-export function generateVerificationPhrase(
-  publicKey: Uint8Array | string,
-  inviteId: string
-): string {
-  // Handle both Uint8Array and base64 string
-  const publicKeyBytes = typeof publicKey === 'string'
-    ? Buffer.from(publicKey, 'base64')
-    : Buffer.from(publicKey);
-
-  // Combine public key and invite_id for uniqueness
-  // This MUST match the relay's verification phrase generation
-  const combined = Buffer.concat([
-    publicKeyBytes,
-    Buffer.from(inviteId),
-  ]);
-
-  // Hash to get deterministic bytes
-  const hash = createHash('sha256').update(combined).digest();
-
-  // Pick 3 words using hash bytes
-  const word1 = WORD_LIST[hash[0] % WORD_LIST.length];
-  const word2 = WORD_LIST[hash[1] % WORD_LIST.length];
-  const word3 = WORD_LIST[hash[2] % WORD_LIST.length];
-
-  return `${word1}-${word2}-${word3}`;
-}
+// The verification phrase algorithm lives in @dcprotocol/core as the single
+// source of truth shared with the relay (they must produce identical phrases).
+// Re-exported here to preserve the agent's existing import surface.
+export { generateVerificationPhrase };
 
 // ============================================================================
 // Pairing Invite Parsing

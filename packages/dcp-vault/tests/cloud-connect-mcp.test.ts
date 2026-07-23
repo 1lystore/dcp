@@ -129,10 +129,16 @@ describe('Cloud-Connect vault MCP handler', () => {
 
     const list = await handleCloudConnectMcp(server, agentId, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
     const names = (list.body as any).result.tools.map((t: { name: string }) => t.name);
-    expect(names).toContain('vault_get_address');
-    expect(names).toContain('vault_sign_tx');
-    // Parity with the local agent: the scope guide must be advertised, not just callable.
-    expect(names).toContain('vault_scope_guide');
+    // FULL parity with the local agent — an agentic wallet exposes the SAME 14
+    // tools to remote/cloud agents as to local ones (no second-class agents).
+    const expected = [
+      'vault_get_address', 'vault_read', 'vault_write', 'vault_scope_guide', 'vault_budget_check',
+      'vault_sign_tx', 'vault_sign_message', 'vault_sign_x402',
+      'vault_transfer', 'vault_swap',
+      'vault_get_balances', 'vault_get_tx_status', 'vault_get_tx_history', 'vault_search_tokens',
+    ];
+    for (const t of expected) expect(names).toContain(t);
+    expect(names.length).toBe(expected.length);
   });
 
   it('advertises vault_scope_guide and returns the canonical scope names', async () => {

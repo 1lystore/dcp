@@ -318,6 +318,19 @@ export class BudgetEngine {
   checkBudget(amount: number, currency: string, chain: Chain): BudgetCheckResult {
     const limits = this.getLimits(currency);
 
+    // Reject malformed amounts up front. A NaN amount makes every comparison
+    // below false and would silently return allowed:true; a negative amount would
+    // understate daily spend and could be used to defeat both limits. Fail closed.
+    if (!Number.isFinite(amount) || amount < 0) {
+      return {
+        allowed: false,
+        requires_approval: false,
+        remaining_daily: Math.max(0, limits.daily_budget),
+        remaining_tx: Math.max(0, limits.tx_limit),
+        reason: `BUDGET_EXCEEDED_TX: Invalid transaction amount (must be a finite, non-negative number)`,
+      };
+    }
+
     // Default result
     const result: BudgetCheckResult = {
       allowed: true,

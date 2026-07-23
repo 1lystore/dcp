@@ -1,6 +1,6 @@
 {
   "name": "@dcprotocol/agent",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "DCP Agent - Lightweight binary for connecting AI agents to vaults via pairing grants",
   "type": "module",
   "main": "dist/index.js",

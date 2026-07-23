@@ -396,17 +396,28 @@ curl -i -sS \
   --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 ```
 
-Good tool list includes:
+The agent exposes 14 tools:
 
 ```text
-vault_read
-vault_write
-vault_get_address
-vault_budget_check
-vault_sign_tx
-vault_sign_message
-vault_sign_x402
-vault_scope_guide
+# Data
+vault_read              read an approved data record (e.g. identity.email)
+vault_write             store a data record
+vault_scope_guide       list the canonical DCP scope names
+
+# Wallet — reads (no approval)
+vault_get_address       the user's Solana public address
+vault_get_balances      SOL + SPL token balances
+vault_get_tx_history    recent transaction signatures
+vault_get_tx_status     on-chain status of a transaction
+vault_search_tokens     search the Jupiter token list
+vault_budget_check      check an amount against the budget policy
+
+# Wallet — actions & signing (approval + budget)
+vault_transfer          send SOL or an SPL token
+vault_swap              swap tokens via Jupiter
+vault_sign_tx           sign an unsigned Solana transaction
+vault_sign_message      sign a message
+vault_sign_x402         sign an x402 payment payload
 ```
 
 ### Test prompts

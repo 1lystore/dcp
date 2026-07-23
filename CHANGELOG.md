@@ -6,6 +6,48 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## Unreleased
 
+Security hardening pass across the published packages. All changes are backward
+compatible for normal flows; the Telegram cloud service and the vault must be
+released together (the desktop↔cloud auth contract tightened — see below).
+
+### Security
+- `telegram`: `/register` is now trust-on-first-use — the first key registered for
+  a vault wins, idempotent re-registration of the same key is allowed, and replacing
+  an existing key with a different one requires a signature from the currently
+  registered key. Closes an account-takeover hole where anyone who knew a `vault_id`
+  could overwrite its trust-anchor key and forge webhooks.
+- `telegram`: `/api/approvals/*` (list + processed) and pairing `unlink` now require
+  an Ed25519 signature from the vault's registered key, with an ownership check so a
+  signature for vault A cannot touch vault B. `vault` signs these calls accordingly.
+- `core`/`vault`: agent transaction consent is now bound to the amount + destination
+  the owner approved — an approval for transaction A can no longer be reused to sign a
+  different transaction B.
+- `vault`: `sign_message` is gated on its own consent scope, so a session approved for
+  sending transactions no longer silently authorizes signing arbitrary off-chain
+  messages.
+- `vault`: `GET /v1/vault/activity` now requires the owner token (the audit trail
+  exposes amounts, destinations, and which credentials were read).
+- `core`/`agent`/`relay`: the pairing verification phrase moved to a single shared
+  implementation using the BIP-39 2048-word list and 4 words (~2^44 collision
+  resistance, up from ~2^15), defeating offline phrase-collision grinding by a MITM.
+- `relay`: `/oauth/authorize` validates `redirect_uri` — rejects non-http(s) schemes
+  and, for registered clients, enforces an exact allow-list match (OAuth 2.1).
+
+### Fixed
+- `core`: `checkBudget` rejects non-finite/negative amounts (fail closed) so a crafted
+  `NaN`/negative amount can no longer bypass per-tx and daily limits.
+- `agent`: HTTP MCP server shuts down cleanly on repeated Ctrl+C — idempotent stop,
+  force-closes long-lived Streamable-HTTP connections (no more hang), and a hard
+  timeout guarantees exit.
+- `wallet-core`: `solana-reads` degrades gracefully when SPL-token reads are gated
+  (returns an empty, flagged token list instead of blanking the wallet).
+
+### Publishing
+- `@dcprotocol/wallet-core` must be published (it is a new `workspace:*` dependency of
+  `core`, `agent`, and `vault`). Publish with **`pnpm publish`**, never `npm publish`:
+  only pnpm rewrites `workspace:*` → the concrete version; a plain `npm publish` ships
+  a literal `workspace:*` and every install fails.
+
 ## 3.0.0 — 2026-06-15
 
 Major, lockstep release of all published `@dcprotocol/*` packages (`core`, `vault`,

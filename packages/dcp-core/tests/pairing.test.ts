@@ -16,6 +16,7 @@ import {
   verifySessionToken,
   isSessionToken,
   SESSION_TOKEN_PREFIX,
+  generateVerificationPhrase,
 } from '../src/pairing.js';
 import { generateSigningKeyPair, zeroize, canonicalJson } from '../src/crypto.js';
 
@@ -385,5 +386,30 @@ describe('Session Tokens', () => {
 
       zeroize(privateKey);
     });
+  });
+});
+
+describe('Verification Phrase', () => {
+  const pubKey = new Uint8Array(32).fill(1);
+  const inviteId = 'inv_test123';
+
+  it('is deterministic and produces a 4-word BIP-39 phrase (2^44 collision resistance)', () => {
+    const phrase = generateVerificationPhrase(pubKey, inviteId);
+    expect(phrase.split('-')).toHaveLength(4);
+    // Pinned vector: this MUST match the relay's implementation byte-for-byte.
+    // If this value changes, the relay copy in dcp-relay/src/store.ts must change
+    // identically or agent/relay pairing verification will silently break.
+    expect(phrase).toBe('earn-bracket-valve-cousin');
+  });
+
+  it('changes when the public key or invite id changes', () => {
+    const base = generateVerificationPhrase(pubKey, inviteId);
+    expect(generateVerificationPhrase(new Uint8Array(32).fill(2), inviteId)).not.toBe(base);
+    expect(generateVerificationPhrase(pubKey, 'inv_other')).not.toBe(base);
+  });
+
+  it('accepts a base64 public key string equivalently to raw bytes', () => {
+    const b64 = Buffer.from(pubKey).toString('base64');
+    expect(generateVerificationPhrase(b64, inviteId)).toBe(generateVerificationPhrase(pubKey, inviteId));
   });
 });

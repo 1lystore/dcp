@@ -9,6 +9,7 @@
  */
 
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import fastifyRateLimit from '@fastify/rate-limit';
 import { verify as cryptoVerify, createHmac, timingSafeEqual } from 'crypto';
 import { canonicalJson, type TelegramConsentPayload } from '@dcprotocol/core';
 import type { ApprovalAction, TelegramServiceConfig } from './types.js';
@@ -80,6 +81,23 @@ interface PairingStartRequest {
 interface ApprovalProcessedRequest {
   command_id: string;
   result: string;
+  /** Vault whose command is being acknowledged (used to look up the signing key) */
+  vault_id: string;
+  /** ISO timestamp for freshness check */
+  timestamp: string;
+  /** Unique nonce for replay protection */
+  nonce: string;
+  /** Ed25519 signature over {vault_id, command_id, result, timestamp, nonce} */
+  signature: string;
+}
+
+/** Vault key registration request (public_key required; signature required only to rotate an existing key) */
+interface RegisterRequest {
+  vault_id: string;
+  public_key: string;
+  timestamp?: string;
+  nonce?: string;
+  signature?: string;
 }
 
 /**
@@ -176,6 +194,18 @@ export class WebhookServer {
       logger: this.config.debug,
     });
 
+    // HTTP-level rate limiting on every route (per client IP). The signed webhook /
+    // approval / register routes verify Ed25519 vault signatures, so auth can't be
+    // forged — this caps request volume to close the DoS surface (unbounded
+    // signature-verify + DB lookups). Registered before routes so the global hook
+    // applies to all of them. Tunable via DCP_TELEGRAM_RATE_LIMIT (per minute).
+    const rateMax = parseInt(process.env.DCP_TELEGRAM_RATE_LIMIT || '', 10) || 240;
+    void this.server.register(fastifyRateLimit, {
+      global: true,
+      max: rateMax,
+      timeWindow: '1 minute',
+    });
+
     // Load persisted vault keys from database into memory cache
     this.loadVaultKeys();
 
@@ -243,11 +273,67 @@ export class WebhookServer {
   }
 
   /**
+   * Verify an Ed25519-signed request against a vault's registered key.
+   *
+   * Enforces the same gauntlet as the consent/budget webhooks: presence of
+   * timestamp/nonce/signature, a known vault key, timestamp freshness + nonce
+   * replay protection, and a valid signature over the canonical `signedData`.
+   *
+   * @returns an error descriptor to send back, or `null` when the request is authorized.
+   */
+  private verifySignedVaultRequest(
+    vaultId: string,
+    signedData: Record<string, unknown>,
+    signature: string | undefined,
+    timestamp: string | undefined,
+    nonce: string | undefined
+  ): { status: number; error: string; message: string } | null {
+    if (!vaultId) {
+      return { status: 400, error: 'INVALID_PAYLOAD', message: 'vault_id is required' };
+    }
+    if (!timestamp || !nonce || !signature) {
+      return {
+        status: 401,
+        error: 'MISSING_SIGNATURE',
+        message: 'timestamp, nonce, and signature are required',
+      };
+    }
+
+    const publicKey = this.getVaultPublicKey(vaultId);
+    if (!publicKey) {
+      return {
+        status: 401,
+        error: 'UNKNOWN_VAULT_KEY',
+        message: 'Vault public key not registered. Call /register first.',
+      };
+    }
+
+    if (!this.nonceStore.checkAndMark(nonce, timestamp)) {
+      return { status: 400, error: 'REPLAY_DETECTED', message: 'Stale timestamp or reused nonce' };
+    }
+
+    const message = Buffer.from(canonicalJson(signedData), 'utf8');
+    const signatureBuffer = Buffer.from(signature, 'base64');
+    if (!verifyEd25519(message, signatureBuffer, publicKey)) {
+      return { status: 401, error: 'INVALID_SIGNATURE', message: 'Signature verification failed' };
+    }
+
+    return null;
+  }
+
+  /**
    * Set up routes
    */
   private setupRoutes(): void {
+    // Per-route rate-limit config (in addition to the global limiter). Applied
+    // explicitly to every authenticated route so the request cap is visible per
+    // handler — closes the DoS surface on the signed webhook/approval/register
+    // routes. Tunable via DCP_TELEGRAM_RATE_LIMIT (per minute).
+    const rateMax = parseInt(process.env.DCP_TELEGRAM_RATE_LIMIT || '', 10) || 240;
+    const rl = { config: { rateLimit: { max: rateMax, timeWindow: '1 minute' } } };
+
     // Health check
-    this.server.get('/health', async () => {
+    this.server.get('/health', rl, async () => {
       return {
         status: 'ok',
         service: 'dcp-telegram-cloud',
@@ -257,7 +343,7 @@ export class WebhookServer {
     });
 
     // Stats endpoint
-    this.server.get('/stats', async () => {
+    this.server.get('/stats', rl, async () => {
       return {
         stats: this.store.getStats(),
         bot: this.bot.getStats(),
@@ -269,6 +355,7 @@ export class WebhookServer {
     // Desktop calls this to start pairing
     this.server.post<{ Body: PairingStartRequest }>(
       '/api/pair/start',
+      rl,
       async (request, reply) => {
         return this.handlePairingStart(request, reply);
       }
@@ -277,6 +364,7 @@ export class WebhookServer {
     // Desktop polls this to check pairing status
     this.server.get<{ Params: { vaultId: string } }>(
       '/api/pair/status/:vaultId',
+      rl,
       async (request, reply) => {
         return this.handlePairingStatus(request, reply);
       }
@@ -285,6 +373,7 @@ export class WebhookServer {
     // Desktop calls this to unlink
     this.server.delete<{ Params: { vaultId: string } }>(
       '/api/pair/:vaultId',
+      rl,
       async (request, reply) => {
         return this.handleUnlink(request, reply);
       }
@@ -294,6 +383,7 @@ export class WebhookServer {
 
     this.server.get<{ Params: { vaultId: string } }>(
       '/api/approvals/:vaultId',
+      rl,
       async (request, reply) => {
         return this.handlePendingApprovals(request, reply);
       }
@@ -301,6 +391,7 @@ export class WebhookServer {
 
     this.server.post<{ Body: ApprovalProcessedRequest }>(
       '/api/approvals/processed',
+      rl,
       async (request, reply) => {
         return this.handleApprovalProcessed(request, reply);
       }
@@ -311,6 +402,7 @@ export class WebhookServer {
     // Consent webhook from desktop (no chat_id needed - we look it up)
     this.server.post<{ Body: ConsentWebhookPayload }>(
       '/webhook/consent',
+      rl,
       async (request, reply) => {
         return this.handleConsentWebhook(request, reply);
       }
@@ -319,6 +411,7 @@ export class WebhookServer {
     // Budget exceeded webhook from desktop
     this.server.post<{ Body: BudgetWebhookPayload }>(
       '/webhook/budget',
+      rl,
       async (request, reply) => {
         return this.handleBudgetWebhook(request, reply);
       }
@@ -327,6 +420,7 @@ export class WebhookServer {
     // Register vault public key
     this.server.post<{ Body: { vault_id: string; public_key: string } }>(
       '/register',
+      rl,
       async (request, reply) => {
         return this.handleRegister(request, reply);
       }
@@ -437,6 +531,22 @@ export class WebhookServer {
   ) {
     const { vaultId } = request.params;
 
+    // Require the vault's signature — otherwise anyone who knows a vault_id could
+    // unlink someone else's Telegram pairing (griefing / notification DoS).
+    const timestamp = request.headers['x-dcp-timestamp'] as string | undefined;
+    const nonce = request.headers['x-dcp-nonce'] as string | undefined;
+    const signature = request.headers['x-dcp-signature'] as string | undefined;
+    const authError = this.verifySignedVaultRequest(
+      vaultId,
+      { vault_id: vaultId, timestamp, nonce },
+      signature,
+      timestamp,
+      nonce
+    );
+    if (authError) {
+      return reply.status(authError.status).send({ error: authError.error, message: authError.message });
+    }
+
     const deleted = this.store.pairings.deletePairing(vaultId);
 
     console.log(`[UNLINK] Vault ${vaultId} unlinked: ${deleted}`);
@@ -451,6 +561,23 @@ export class WebhookServer {
     reply: FastifyReply
   ) {
     const { vaultId } = request.params;
+
+    // Require an Ed25519 signature from the vault's registered key. Only the
+    // desktop that owns this vault may enumerate its pending approvals.
+    const timestamp = request.headers['x-dcp-timestamp'] as string | undefined;
+    const nonce = request.headers['x-dcp-nonce'] as string | undefined;
+    const signature = request.headers['x-dcp-signature'] as string | undefined;
+    const authError = this.verifySignedVaultRequest(
+      vaultId,
+      { vault_id: vaultId, timestamp, nonce },
+      signature,
+      timestamp,
+      nonce
+    );
+    if (authError) {
+      return reply.status(authError.status).send({ error: authError.error, message: authError.message });
+    }
+
     const pairing = this.store.pairings.getPairingByVaultId(vaultId);
 
     if (!pairing) {
@@ -487,12 +614,36 @@ export class WebhookServer {
     request: FastifyRequest<{ Body: ApprovalProcessedRequest }>,
     reply: FastifyReply
   ) {
-    const { command_id, result } = request.body || {};
+    const { command_id, result, vault_id, timestamp, nonce, signature } = request.body || {};
 
-    if (!command_id || !result) {
+    if (!command_id || !result || !vault_id) {
       return reply.status(400).send({
         error: 'INVALID_PAYLOAD',
-        message: 'command_id and result are required',
+        message: 'command_id, result, and vault_id are required',
+      });
+    }
+
+    // Require an Ed25519 signature from the vault's registered key over the exact
+    // command being acknowledged — prevents anyone from forging "processed"
+    // notifications or spoofing arbitrary result text into the user's Telegram.
+    const authError = this.verifySignedVaultRequest(
+      vault_id,
+      { vault_id, command_id, result, timestamp, nonce },
+      signature,
+      timestamp,
+      nonce
+    );
+    if (authError) {
+      return reply.status(authError.status).send({ error: authError.error, message: authError.message });
+    }
+
+    // Authorization: the command must belong to the vault that signed the request,
+    // so a valid signature for vault A cannot process vault B's command.
+    const existing = this.store.approvals.getApprovalCommand(command_id);
+    if (!existing || existing.vault_id !== vault_id) {
+      return reply.status(404).send({
+        error: 'COMMAND_NOT_FOUND',
+        message: 'Approval command not found',
       });
     }
 
@@ -829,16 +980,43 @@ export class WebhookServer {
    * Handle vault key registration
    */
   private async handleRegister(
-    request: FastifyRequest<{ Body: { vault_id: string; public_key: string } }>,
+    request: FastifyRequest<{ Body: RegisterRequest }>,
     reply: FastifyReply
   ) {
-    const { vault_id, public_key } = request.body;
+    const { vault_id, public_key, timestamp, nonce, signature } = request.body;
 
     if (!vault_id || !public_key) {
       return reply.status(400).send({
         error: 'INVALID_PAYLOAD',
         message: 'vault_id and public_key are required',
       });
+    }
+
+    // Trust-anchor protection: the first key registered for a vault wins (TOFU),
+    // and idempotent re-registration of the SAME key is always allowed. Replacing
+    // an existing key with a DIFFERENT one is a rotation that must be signed by the
+    // currently-registered key — otherwise anyone who knows a vault_id could
+    // overwrite its trust anchor and forge every downstream webhook.
+    const existing = this.store.getVaultKey(vault_id);
+    if (existing && existing !== public_key) {
+      const authError = this.verifySignedVaultRequest(
+        vault_id,
+        { vault_id, public_key, timestamp, nonce },
+        signature,
+        timestamp,
+        nonce
+      );
+      if (authError) {
+        // A rotation attempt without a valid signature from the existing key is a
+        // takeover attempt — surface it distinctly from a first-time registration.
+        return reply.status(authError.status === 401 ? 403 : authError.status).send({
+          error: authError.error === 'MISSING_SIGNATURE' ? 'KEY_ALREADY_REGISTERED' : authError.error,
+          message:
+            authError.error === 'MISSING_SIGNATURE'
+              ? 'A different key is already registered for this vault; rotation must be signed by the existing key'
+              : authError.message,
+        });
+      }
     }
 
     try {

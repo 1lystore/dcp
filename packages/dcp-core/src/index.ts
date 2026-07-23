@@ -136,6 +136,8 @@ export {
   isVpsPairingInvite,
   VPS_INVITE_PREFIX,
   type VpsPairingInvite,
+  // Verification phrase (out-of-band MITM check, shared by agent + relay)
+  generateVerificationPhrase,
   // Session Tokens (for Gateway Authentication)
   createSessionToken,
   decodeSessionToken,
