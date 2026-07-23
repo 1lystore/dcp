@@ -325,8 +325,15 @@ export class WebhookServer {
    * Set up routes
    */
   private setupRoutes(): void {
+    // Per-route rate-limit config (in addition to the global limiter). Applied
+    // explicitly to every authenticated route so the request cap is visible per
+    // handler — closes the DoS surface on the signed webhook/approval/register
+    // routes. Tunable via DCP_TELEGRAM_RATE_LIMIT (per minute).
+    const rateMax = parseInt(process.env.DCP_TELEGRAM_RATE_LIMIT || '', 10) || 240;
+    const rl = { config: { rateLimit: { max: rateMax, timeWindow: '1 minute' } } };
+
     // Health check
-    this.server.get('/health', async () => {
+    this.server.get('/health', rl, async () => {
       return {
         status: 'ok',
         service: 'dcp-telegram-cloud',
@@ -336,7 +343,7 @@ export class WebhookServer {
     });
 
     // Stats endpoint
-    this.server.get('/stats', async () => {
+    this.server.get('/stats', rl, async () => {
       return {
         stats: this.store.getStats(),
         bot: this.bot.getStats(),
@@ -348,6 +355,7 @@ export class WebhookServer {
     // Desktop calls this to start pairing
     this.server.post<{ Body: PairingStartRequest }>(
       '/api/pair/start',
+      rl,
       async (request, reply) => {
         return this.handlePairingStart(request, reply);
       }
@@ -356,6 +364,7 @@ export class WebhookServer {
     // Desktop polls this to check pairing status
     this.server.get<{ Params: { vaultId: string } }>(
       '/api/pair/status/:vaultId',
+      rl,
       async (request, reply) => {
         return this.handlePairingStatus(request, reply);
       }
@@ -364,6 +373,7 @@ export class WebhookServer {
     // Desktop calls this to unlink
     this.server.delete<{ Params: { vaultId: string } }>(
       '/api/pair/:vaultId',
+      rl,
       async (request, reply) => {
         return this.handleUnlink(request, reply);
       }
@@ -373,6 +383,7 @@ export class WebhookServer {
 
     this.server.get<{ Params: { vaultId: string } }>(
       '/api/approvals/:vaultId',
+      rl,
       async (request, reply) => {
         return this.handlePendingApprovals(request, reply);
       }
@@ -380,6 +391,7 @@ export class WebhookServer {
 
     this.server.post<{ Body: ApprovalProcessedRequest }>(
       '/api/approvals/processed',
+      rl,
       async (request, reply) => {
         return this.handleApprovalProcessed(request, reply);
       }
@@ -390,6 +402,7 @@ export class WebhookServer {
     // Consent webhook from desktop (no chat_id needed - we look it up)
     this.server.post<{ Body: ConsentWebhookPayload }>(
       '/webhook/consent',
+      rl,
       async (request, reply) => {
         return this.handleConsentWebhook(request, reply);
       }
@@ -398,6 +411,7 @@ export class WebhookServer {
     // Budget exceeded webhook from desktop
     this.server.post<{ Body: BudgetWebhookPayload }>(
       '/webhook/budget',
+      rl,
       async (request, reply) => {
         return this.handleBudgetWebhook(request, reply);
       }
@@ -406,6 +420,7 @@ export class WebhookServer {
     // Register vault public key
     this.server.post<{ Body: { vault_id: string; public_key: string } }>(
       '/register',
+      rl,
       async (request, reply) => {
         return this.handleRegister(request, reply);
       }
