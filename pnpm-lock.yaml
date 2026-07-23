@@ -267,6 +267,9 @@ importers:
       '@dcprotocol/core':
         specifier: workspace:^
         version: link:../dcp-core
+      '@fastify/rate-limit':
+        specifier: ^10.0.0
+        version: 10.3.0
       better-sqlite3:
         specifier: ^11.0.0
         version: 11.10.0

@@ -9,6 +9,7 @@
  */
 
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import fastifyRateLimit from '@fastify/rate-limit';
 import { verify as cryptoVerify, createHmac, timingSafeEqual } from 'crypto';
 import { canonicalJson, type TelegramConsentPayload } from '@dcprotocol/core';
 import type { ApprovalAction, TelegramServiceConfig } from './types.js';
@@ -191,6 +192,18 @@ export class WebhookServer {
 
     this.server = Fastify({
       logger: this.config.debug,
+    });
+
+    // HTTP-level rate limiting on every route (per client IP). The signed webhook /
+    // approval / register routes verify Ed25519 vault signatures, so auth can't be
+    // forged — this caps request volume to close the DoS surface (unbounded
+    // signature-verify + DB lookups). Registered before routes so the global hook
+    // applies to all of them. Tunable via DCP_TELEGRAM_RATE_LIMIT (per minute).
+    const rateMax = parseInt(process.env.DCP_TELEGRAM_RATE_LIMIT || '', 10) || 240;
+    void this.server.register(fastifyRateLimit, {
+      global: true,
+      max: rateMax,
+      timeWindow: '1 minute',
     });
 
     // Load persisted vault keys from database into memory cache
